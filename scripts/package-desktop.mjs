@@ -42,17 +42,28 @@ try{
   const ps=process.env.WINDIR?path.join(process.env.WINDIR,'System32','WindowsPowerShell','v1.0','powershell.exe'):'powershell.exe';
   const built=spawnSync(ps,['-NoProfile','-ExecutionPolicy','Bypass','-File',path.join(root,'代码','合同助手','mcp','build.ps1'),'-OutputFolder','out/desktop-release'],{cwd:root,encoding:'utf8',windowsHide:true});
   if(built.status!==0)throw Error('合同程序构建失败：'+(built.stderr||built.stdout).slice(-3000));
-  for(const relative of ['apps/desktop','apps/service','packages/contracts','packages/storage','packages/runtime-harness','node_modules/sql.js'])copy(relative);
+  for(const relative of ['apps/desktop','apps/service','packages/contracts','packages/storage','packages/runtime-harness','packages/wechat-bridge','packages/extensions','packages/workers','packages/documents','packages/mail-plugin','packages/harness-host-plugin',
+    '代码/项目/package.json','代码/项目/scripts/hook-onebot.mjs','代码/项目/scripts/text-delivery-store.mjs','代码/项目/scripts/wechat-account-check.mjs','代码/项目/scripts/reader-account-state.mjs',
+    '代码/项目/components/qq-bridge/src/core/wechat-events.js','代码/项目/components/qq-bridge/src/core/sticker-policy.js','代码/项目/components/qq-bridge/src/core/proactive-policy.js',
+    '代码/项目/components/qq-bridge/src/onebot/normalize.js','代码/项目/public/console/conversation-settings.mjs','代码/项目/packages/dsh-social-bridge-plugin/conversation-policy.mjs','代码/项目/packages/extension-runtime/catalog.mjs'])copy(relative);
+  const lock=JSON.parse(fs.readFileSync(path.join(root,'package-lock.json'),'utf8'));
+  const productionDependencies=Object.entries(lock.packages).filter(([name,entry])=>name.startsWith('node_modules/')&&!entry.dev&&fs.existsSync(path.join(root,name)));
+  for(const [name]of productionDependencies.sort(([a],[b])=>a.length-b.length))if(!fs.existsSync(path.join(stage,name)))copy(name);
   const appPackage={...metadata,devDependencies:undefined,scripts:undefined};
   fs.writeFileSync(path.join(stage,'package.json'),JSON.stringify(appPackage,null,2)+'\n');
   fs.mkdirSync(path.join(stage,'config'),{recursive:true});
   const runtime=await inspectRuntime();
   if(runtime.available)fs.writeFileSync(path.join(stage,'config','runtime-locations.json'),JSON.stringify({harnessCommand:runtime.command},null,2)+'\n');
+  const wechatLocations=path.join(root,'config','wechat-locations.json');
+  if(fs.existsSync(wechatLocations)){
+    const location=JSON.parse(fs.readFileSync(wechatLocations,'utf8')).workspace;
+    if(typeof location==='string'&&path.isAbsolute(location))fs.writeFileSync(path.join(stage,'config','wechat-locations.json'),JSON.stringify({workspace:location},null,2)+'\n');
+  }
   const icon=path.join(stage,'assistant.ico');createIcon(icon);
   const embeddedContract=path.join(stage,'contract-resource');fs.mkdirSync(embeddedContract);
   for(const name of ['合同填写小助手.exe','合同助手MCP.exe'])fs.copyFileSync(path.join(contractOutput,name),path.join(embeddedContract,name));
   fs.copyFileSync(path.join(root,'代码','合同助手','desktop','source-origin.json'),path.join(embeddedContract,'source-origin.json'));
-  fs.writeFileSync(path.join(stage,'THIRD-PARTY-NOTICES.txt'),'小助手 0.1 开发预览版\nSQLite: sql.js (MIT) https://github.com/sql-js/sql.js\nElectron (MIT) https://github.com/electron/electron\n合同源码来源见 resources/contract-resource/source-origin.json\nHarness 是独立安装的核心依赖，本包不复制用户 Harness 或其个人配置。\n');
+  fs.writeFileSync(path.join(stage,'THIRD-PARTY-NOTICES.txt'),`小助手 ${metadata.version} 开发预览版\nElectron (MIT) https://github.com/electron/electron\n${productionDependencies.map(([name,entry])=>`${name.slice(13)} ${entry.version} (${entry.license??'见包内许可文件'})`).join('\n')}\n合同源码来源见 resources/contract-resource/source-origin.json\nHarness 是独立安装的核心依赖，本包不复制用户 Harness 或其个人配置。\n`);
   fs.mkdirSync(releaseRoot,{recursive:true});
   const expected=path.join(releaseRoot,'小助手-win32-x64');
   if(!inside(releaseRoot,expected)||path.basename(expected)!=='小助手-win32-x64')throw Error('Unexpected package overwrite target');
@@ -65,9 +76,9 @@ try{
   const manifest={version:metadata.version,createdAt:new Date().toISOString(),executable,sha256:createHash('sha256').update(fs.readFileSync(executable)).digest('hex'),
     harness:{bundled:false,detectedVersion:runtime.version??null,programLocationOnly:runtime.available?runtime.command:null},
     contract:{included:true,syntheticDevelopmentTemplate:true},accountCredentialsIncluded:false,personalChatIncluded:false,
-    signature:'unsigned-development-preview',capabilities:['local-organize','persistent-tasks','text-harness-adapter','local-contract-form']};
+    signature:'unsigned-development-preview',capabilities:['local-organize','persistent-tasks','dsh-existing-login','wechat-account-contacts-history-media','mail-imap-smtp','workers','docx-pdf','literature-search','legacy-skill-migration','dsh-owner-grants']};
   fs.writeFileSync(path.join(releaseRoot,'release.json'),JSON.stringify(manifest,null,2)+'\n');
-  fs.writeFileSync(path.join(output[0],'使用说明.txt'),'小助手 0.1 开发预览版\r\n\r\n双击“小助手.exe”启动。请保留整个文件夹，不要单独移动 EXE。\r\n\r\n现在可以：添加文件并整理清单、保存任务与成果、设置名字和人格、打开本地合同表单工具。\r\nAI 文本工作需要在“助手设置”填写模型 API Key；密钥由 Windows 保护保存。\r\n引擎需本机已安装支持的 DeepSeek Harness 0.2.1-rc.2。\r\n模型地址使用 Messages 兼容接口，默认 https://api.deepseek.com/anthropic。\r\n微信、邮箱、任意MCP/Skill和多agent尚未接入新桌面入口。\r\n合同内置合成开发模板，正式工作请导入并核对自己的模板。\r\n关闭窗口后留在托盘，右键托盘可退出。\r\n这是一份未签名的开发预览版，不是全部计划的最终交付。\r\n');
+  fs.writeFileSync(path.join(output[0],'使用说明.txt'),`小助手 ${metadata.version} 开发预览版\r\n\r\n双击“小助手.exe”启动。请保留整个文件夹，不要单独移动 EXE。\r\n\r\n入口分为工作台、任务记录、微信通信、能力中心和控制面板。\r\n微信页导入本机已有微信运行环境，核对允许的会话后连接。账号版本与消息源通过核验后才接收，AI只起草，由你点击发送；只有数据库服务器回执才标为已送达。\r\n能力中心可管理本机stdio MCP插件和Skills。插件默认停用，启用不等于模型能自动调用任意工具。\r\n小助手始终由DSH提供核心能力，默认复用现有Harness登录，不需要另填API Key。请通过Harness官方插件命令安装产品宿主插件；其他API仅是可选辅助能力。\r\n支持资料整理、任务和成果保存、人格设置以及本地合同工具。合同内置合成开发模板，正式工作请导入并核对自己的模板。\r\n支持多账号IMAP/SMTP邮箱导入、只读收信和手动发送；支持DSH分步骤写作/审查协作、DOCX/PDF成果导出、Crossref/arXiv文献检索。实际登录、授权及服务端可用性以界面状态为准。\r\n关闭窗口后留在托盘，右键托盘可退出。\r\n新版本会迁移数据库，旧0.1不能再打开新数据；原数据不会删除。\r\n这是一份未签名开发预览版。\r\n`);
   console.log(JSON.stringify({ok:true,executable,releaseManifest:path.join(releaseRoot,'release.json')}));
 }finally{
   const expectedParent=path.resolve(os.tmpdir());

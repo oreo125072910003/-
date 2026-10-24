@@ -1,0 +1,1 @@
+{"requiredCapabilities":["contract.generate"],"permissions":["artifact.create"],"executors":["deterministic"]}

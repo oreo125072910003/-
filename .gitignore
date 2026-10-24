@@ -13,6 +13,7 @@
 
 # Runtime data and local dependencies
 /config/runtime-locations.json
+/config/wechat-locations.json
 /.assistant-data/
 node_modules/
 .venv/

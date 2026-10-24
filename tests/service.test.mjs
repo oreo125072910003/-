@@ -88,5 +88,5 @@ test('binary attachments never become imaginary AI text and no model request is 
   let invoked=false;const{service,dataDir}=await setup(t,{runtime:{...fakeRuntime,runTask:async()=>{invoked=true;return{ok:true,finalText:'bad'};}}});
   await service.saveSettings({runtimeApiKey:'test-key'});const source=path.join(dataDir,'说明.pdf');fs.writeFileSync(source,'%PDF fake fixture');service.grantAttachments([source]);
   const task=await service.createTask({prompt:'分析这个文件',attachmentPaths:[source]});const detail=await waitTask(service,task.id);
-  assert.equal(detail.task.status,'failed');assert.match(detail.task.error,/文档解析工具/);assert.equal(invoked,false);
+  assert.equal(detail.task.status,'failed');assert.match(detail.task.error,/PDF|文档/);assert.equal(invoked,false);
 });

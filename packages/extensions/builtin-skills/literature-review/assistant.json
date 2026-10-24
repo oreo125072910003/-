@@ -1,0 +1,1 @@
+{"requiredCapabilities":["literature.search","documents.write","agent.text"],"permissions":["artifact.create"],"executors":["harness-text"]}

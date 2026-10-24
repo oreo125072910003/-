@@ -395,3 +395,4 @@ export async function probeRuntimeConnection(input = {}) {
     if (!await terminateOwned(child)) return { ok: false, modelCalled: false, error: { code: 'RUNTIME_CLEANUP_FAILED', message: '无法确认协议体检进程已退出。' } };
   }
 }
+export { inspectHostedRuntime, probeHostedRuntimeConnection, readHostedCatalog, runHostedTask } from './hosted.mjs';

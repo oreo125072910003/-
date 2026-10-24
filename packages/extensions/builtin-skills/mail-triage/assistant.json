@@ -1,0 +1,1 @@
+{"requiredCapabilities":["mail.read","agent.text"],"permissions":["mail.read"],"executors":["harness-text"]}

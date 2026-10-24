@@ -1,0 +1,1 @@
+{"requiredCapabilities":["projects.read"],"permissions":["projects.read"],"executors":["harness-text"]}

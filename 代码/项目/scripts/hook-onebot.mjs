@@ -56,11 +56,14 @@ export function textSegments(message) {
 }
 
 export class HookOneBot {
-  constructor({ directory = root, fetchImpl = fetch, receiptTimeoutMs, pollMs = 400 } = {}) {
+  constructor({ directory = root, fetchImpl = fetch, receiptTimeoutMs, pollMs = 400, configuration } = {}) {
     this.directory = directory;
     this.fetch = fetchImpl;
     this.receiptOverride = receiptTimeoutMs;
     this.pollMs = pollMs;
+    // The product desktop owns its configuration and credential store. Legacy
+    // launchers keep their existing file-based defaults when this is absent.
+    this.configuration = configuration;
     this.socket = null;
     this.stopped = false;
     this.controllers = new Set();
@@ -82,13 +85,13 @@ export class HookOneBot {
     this.reload();
   }
   reload() {
-    this.project = read(path.join(this.directory, 'config', 'wechatagent.json'));
-    this.api = read(path.join(this.directory, 'state', 'wechat-io-config.json'));
+    this.project = this.configuration?.project ?? read(path.join(this.directory, 'config', 'wechatagent.json'));
+    this.api = this.configuration?.api ?? read(path.join(this.directory, 'state', 'wechat-io-config.json'));
     this.hook = this.project.hook;
     if (this.project.runtime.sender !== 'wechat-hook' || !this.hook || this.project.runtime.weflowMode !== 'nt') fail('HOOK_NT_CONFIG_REQUIRED');
     const url = new URL(this.hook.baseUrl);
     if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) fail('HOOK_LOOPBACK_REQUIRED');
-    this.nativeToken = fs.readFileSync(path.join(this.directory, 'state', 'hook', 'native-token.txt'), 'utf8').trim();
+    this.nativeToken = this.configuration?.nativeToken ?? fs.readFileSync(path.join(this.directory, 'state', 'hook', 'native-token.txt'), 'utf8').trim();
     if (!/^[a-f0-9]{64}$/.test(this.nativeToken)) fail('HOOK_TOKEN_MISSING');
   }
   allowed(kind, target) { return this.project.wechat.whitelist[kind === 'group' ? 'groups' : 'private'].map(String).includes(String(target)); }

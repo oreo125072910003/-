@@ -1,0 +1,3 @@
+# prepare-install.mjs generates an absolute, product-specific patch before installation.
+# Do not install this unconfigured source folder into your live Harness profile.
+[]

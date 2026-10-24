@@ -1,0 +1,1 @@
+{"requiredCapabilities":["artifact.read","agent.text"],"permissions":["artifact.read"],"executors":["harness-text"]}
