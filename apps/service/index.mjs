@@ -223,7 +223,10 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       settings:{...options,persona:`你的名字是${current.assistantName}。${current.persona}`,personaPrefix:`你的名字是${current.assistantName}。${current.persona}`},
       onEvent:entry=>{if(signal.aborted)return;event(task.id,entry.type||'status',entry.message||'正在执行');}});
     inspection=null;
-    if(result.cancellation?.confirmed===false)throw Object.assign(Error('Harness 尚未确认停止，本轮执行状态待核对。'),{stopUnconfirmed:true});
+    // The native host also reports { requested: false, confirmed: false } on
+    // ordinary completion. A missing cancellation confirmation matters only
+    // after a stop was actually requested (including our own aborted signal).
+    if((result.cancellation?.requested===true||signal.aborted)&&result.cancellation?.confirmed===false)throw Object.assign(Error('Harness 尚未确认停止，本轮执行状态待核对。'),{stopUnconfirmed:true});
     signal.throwIfAborted();
     if(!result.ok)throw new Error(result.error?.message||result.error||'Harness 未确认任务完成。');
     if(typeof result.finalText!=='string'||!result.finalText.trim())throw new Error('引擎未返回可保存的答复。');

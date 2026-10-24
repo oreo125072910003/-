@@ -11,21 +11,21 @@ async function until(check, timeout = 3000) {
   const deadline = Date.now() + timeout;
   while (!await check()) { if (Date.now() > deadline) throw Error('等待本机自动回复夹具超时'); await new Promise(resolve => setTimeout(resolve, 8)); }
 }
-async function fixture(t, { enabled = true, status = 'succeeded', reply = '这是完整的合成回复。', autoOptions = {}, reader = true, cancellation = true, createGate } = {}) {
+async function fixture(t, { enabled = true, status = 'succeeded', reply = '这是完整的合成回复。', autoOptions = {}, reader = true, cancellation = true, createGate, clock = Date.now(), sendImpl } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xzs-wechat-auto-')), source = path.join(root, 'old'), data = path.join(root, 'product');
   fs.mkdirSync(path.join(source, 'config'), { recursive: true }); fs.mkdirSync(path.join(source, 'state', 'hook'), { recursive: true });
   fs.writeFileSync(path.join(source, 'config', 'wechatagent.json'), JSON.stringify({ runtime: { sender: 'wechat-hook', weflowMode: 'nt' }, hook: { expectedVersion: '4.1.10.27', baseUrl: 'http://127.0.0.1:30001' }, wechat: { whitelist: { private: ['101', '102'], groups: ['201'] }, wake_mode: 'mention', wake_words: ['合成唤醒词'] } }));
   fs.writeFileSync(path.join(source, 'state', 'wechat-io-config.json'), JSON.stringify({ reader_base_url: 'http://127.0.0.1:5031', reader_token: 'synthetic-reader-token-for-auto-tests' }));
   fs.writeFileSync(path.join(source, 'state', 'hook', 'native-token.txt'), 'a'.repeat(64));
   const store = await createStore(path.join(data, 'db')), secrets = new Map();
-  const state = { clock: Date.now(), callbacks: null, creates: [], cancels: [], sends: [], replies: new Map(), status, reply, stopped: 0,
+  const state = { clock, callbacks: null, creates: [], cancels: [], sends: [], replies: new Map(), status, reply, stopped: 0,
     receipt: { receipt: 'wechat-server-id', delivered: 'database-confirmed', message_id: 'synthetic-server-id' } };
   const controller = createWechatController({ store, dataDir: data, secretStore: { get: key => secrets.get(key), set: (key, value) => secrets.set(key, value), delete: key => secrets.delete(key) },
     autoOptions: { now: () => state.clock, pollMs: 5, ...autoOptions },
     bridgeFactory: callbacks => { state.callbacks = callbacks; return {
       async start() { callbacks.onState({ state: 'ready', selfId: '777', accountVerified: true, readerConnected: true }); },
       async stop() { state.stopped++; },
-      async sendText(value) { state.sends.push(value); if (state.sendError) throw state.sendError; return state.receipt; },
+      async sendText(value) { state.sends.push(value); if (state.sendError) throw state.sendError; return sendImpl ? sendImpl(value, state) : state.receipt; },
       async getHistory({ kind, target }) { return { kind, target, name: '合成测试会话', messages: [{ message_id: 'history-one', external_id: 'history-one', text: '旧历史合成资料', sender_id: target, sender_name: '合成联系人', outgoing: false, time: Math.floor(state.clock / 1000) - 30, message_type: 'text' }] }; },
     }; },
     async createTask(input, options) {
@@ -224,4 +224,72 @@ test('close waits for late task admission, cancels it and never uses a closed st
   await new Promise(resolve => setTimeout(resolve, 15)); assert.equal(closed, false);
   resolveAdmission(); await closing;
   assert.equal(f.state.creates.length, 1); assert.deepEqual(f.state.cancels, [f.state.creates[0].id]); assert.equal(f.state.sends.length, 0);
+});
+
+test('whole-second reader timestamps admit live messages in the connection second while older seconds and repeated IDs stay blocked', async t => {
+  const f = await fixture(t, { clock: 100250 });
+  const current = f.incoming({ time: 100 });
+  f.state.callbacks.onMessage(current);
+  await until(() => f.state.sends.length === 1);
+  f.state.callbacks.onMessage(current);
+  f.emit({ time: 99 });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(f.state.creates.length, 1); assert.equal(f.state.sends.length, 1);
+  assert.equal((await f.controller.getState()).autoReply.ignored, 1);
+  await f.controller.disconnect(); f.state.clock = 103250; await f.controller.connect();
+  f.state.callbacks.onMessage(current);
+  f.emit({ time: 102 });
+  f.emit({ time: 103 });
+  await until(() => f.state.sends.length === 2);
+  assert.equal(f.state.creates.length, 2);
+  assert.equal((await f.controller.getState()).autoReply.ignored, 2);
+});
+
+test('two chats generate concurrently but submit their finished replies serially once each', async t => {
+  let releaseFirst, sending = 0, peak = 0;
+  const firstSend = new Promise(resolve => { releaseFirst = resolve; });
+  const f = await fixture(t, { sendImpl: async (value, state) => {
+    sending++; peak = Math.max(peak, sending);
+    try { if (value.target === '101') await firstSend; return state.receipt; }
+    finally { sending--; }
+  } });
+  try {
+    f.emit(); f.emit({ conversation_id: '102', sender_id: '102' });
+    await until(() => f.state.creates.length === 2 && f.state.sends.length >= 1);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(f.state.sends.length, 1, 'the second completed reply must wait for the active send');
+    assert.equal((await f.controller.getState()).autoReply.active, 2, 'generation remains concurrent across chats');
+  } finally { releaseFirst(); }
+  await until(async () => (await f.controller.getState()).autoReply.active === 0);
+  assert.equal(peak, 1);
+  assert.deepEqual(f.state.sends.map(item => item.target), ['101', '102']);
+  assert.equal(new Set(f.state.sends.map(item => item.deliveryId)).size, 2);
+  assert.equal((await f.controller.getState()).outbox.filter(item => item.status === 'delivered').length, 2);
+});
+
+test('a reply waiting for the send turn rechecks human takeover and every live permission boundary', async t => {
+  for (const action of ['manual', 'disconnect', 'disable', 'revoke', 'close', 'timeout']) await t.test(action, async child => {
+    let releaseFirst;
+    const firstSend = new Promise(resolve => { releaseFirst = resolve; });
+    const f = await fixture(child, { autoOptions: { deadlineMs: 100 }, sendImpl: async (value, state) => {
+      if (value.target === '101') await firstSend;
+      return state.receipt;
+    } });
+    let change;
+    try {
+      f.emit(); f.emit({ conversation_id: '102', sender_id: '102' });
+      await until(() => f.state.creates.length === 2 && f.state.sends.length >= 1);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      if (action === 'manual') f.state.callbacks.onMessage(f.incoming({ conversation_id: '102', sender_id: '777', outgoing: true, time: Math.floor(f.state.clock / 1000), text: '本人已经接管回复。' }));
+      else if (action === 'disconnect') change = f.controller.disconnect();
+      else if (action === 'disable') change = f.controller.saveSettings({ autoReply: false });
+      else if (action === 'revoke') change = f.controller.saveSettings({ allowedPrivate: ['101'] });
+      else if (action === 'close') change = f.controller.close();
+      else f.state.clock += 101;
+    } finally { releaseFirst(); }
+    await change;
+    await until(async () => (await f.controller.getState()).autoReply.active === 0);
+    assert.deepEqual(f.state.sends.map(item => item.target), ['101'], 'the queued reply must not be submitted after ' + action);
+    assert.equal((await f.controller.getState()).outbox.length, 1);
+  });
 });

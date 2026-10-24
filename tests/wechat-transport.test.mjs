@@ -168,6 +168,15 @@ test('WeChat accepted but unconfirmed deliveries are never automatically resubmi
   assert.equal(f.backend.sends, 1);
 });
 
+test('WeChat attachment contention proves it was not attempted before the active send finishes', async t => {
+  const f = await fixture(t, { confirm: false });
+  await f.bridge.start(f.config); await until(() => f.bridge.getStatus().state === 'ready');
+  const active = assert.rejects(f.bridge.sendText({ kind: 'private', target: '101', text: '合成的在途文字', deliveryId: '7'.repeat(64) }), { code: 'TEXT_DELIVERY_UNCONFIRMED', attempted: true });
+  await assert.rejects(f.bridge.sendAttachment({ kind: 'private', target: '101' }), { code: 'SENDER_BUSY', attempted: false });
+  await active;
+  assert.equal(f.backend.sends, 1, 'the rejected attachment cannot submit anything');
+});
+
 test('WeChat stop cancels streams and prevents subsequent receive or send', async t => {
   const f = await fixture(t);
   await f.bridge.start(f.config); await until(() => f.bridge.getStatus().state === 'ready');

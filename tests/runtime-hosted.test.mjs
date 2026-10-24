@@ -11,6 +11,7 @@ import { apply as installTextPolicy, TEXT_POLICY } from '../packages/harness-hos
 import { OWNER_ACCESS } from '../packages/harness-host-plugin/owner-access.mjs';
 import { prepareHostedPluginInstall } from '../packages/harness-host-plugin/prepare-install.mjs';
 import { inspectHostedRuntime, probeHostedRuntimeConnection, runHostedTask, readHostedCatalog } from '../packages/runtime-harness/hosted.mjs';
+import { createAssistantService } from '../apps/service/index.mjs';
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(check) { for (let n = 0; n < 100; n++) { const value = check(); if (value) return value; await pause(10); } throw new Error('fixture condition not reached'); }
@@ -85,6 +86,61 @@ test('client and native host complete text only after matching terminal event an
   assert.equal(call.input.meta.cwd, f.workspace); assert.equal(events.find(e => e.type === 'text').message, result.finalText);
   assert.equal((await inspectHostedRuntime(f.settings)).ready, true);
   assert.ok((await readdir(path.join(f.root, 'harness-host'))).includes('sessions.json'));
+});
+
+test('native host ordinary completion survives the product service and sends consecutive WeChat replies', async t => {
+  const f = await fixture(t), groups = new Map(), replies = [], nativeResults = [], requests = [];
+  // Use the real HTTP host and client, with synthetic native model events and
+  // an isolated WeChat sender. This catches contract mismatches between layers.
+  f.ctx.workspaceRegistry = {
+    archivedSessionIds: [], resolveByPath: async directory => groups.get(directory),
+    async create(directory) {
+      const group = { id: randomUUID(), path: directory, sessionIds: [], async attachSession(sid) { this.sessionIds.push(sid); } };
+      groups.set(directory, group); return group;
+    },
+  };
+  f.ctx.sessionTitle = { get: () => undefined, rename() {} };
+  const runtime = {
+    inspectHostedRuntime: () => inspectHostedRuntime(f.settings),
+    readHostedCatalog: () => readHostedCatalog(f.settings),
+    async runHostedTask(input) {
+      requests.push(input);
+      const result = await runHostedTask({ ...input, settings: { ...input.settings, hostedConfigFile: undefined, ...f.settings } });
+      nativeResults.push(result); return result;
+    },
+  };
+  const source = path.join(f.root, 'legacy'), secrets = new Map(); let callbacks;
+  await mkdir(path.join(source, 'config'), { recursive: true }); await mkdir(path.join(source, 'state/hook'), { recursive: true });
+  await writeFile(path.join(source, 'config/wechatagent.json'), JSON.stringify({ runtime: { sender: 'wechat-hook', weflowMode: 'nt' }, hook: { expectedVersion: '4.1.10.27', baseUrl: 'http://127.0.0.1:30001' }, wechat: { whitelist: { private: ['101'], groups: [] } } }));
+  await writeFile(path.join(source, 'state/wechat-io-config.json'), JSON.stringify({ reader_base_url: 'http://127.0.0.1:5031', reader_token: 'synthetic-host-service-reader-token' }));
+  await writeFile(path.join(source, 'state/hook/native-token.txt'), 'a'.repeat(64));
+  const service = await createAssistantService({
+    dataDir: f.workspace, runtime,
+    secretStore: { get: key => secrets.get(key), set: (key, value) => secrets.set(key, value), delete: key => secrets.delete(key) },
+    wechatBridgeFactory: options => {
+      callbacks = options;
+      return { start: async () => options.onState({ state: 'ready', selfId: '777', accountVerified: true, readerConnected: true }), stop: async () => {},
+        sendText: async value => { replies.push(value); return { receipt: 'wechat-server-id', delivered: 'database-confirmed', message_id: String(replies.length) }; } };
+    },
+  });
+  try {
+    await service.importWechatConnection(source, { automatic: true });
+    const waitReply = async count => {
+      const deadline = Date.now() + 6000;
+      while (replies.length < count || (await service.getWechatState()).autoReply.active > 0) {
+        assert.ok(Date.now() < deadline, JSON.stringify(service.listTasks().map(({ status, error }) => ({ status, error })))); await pause(20);
+      }
+    };
+    const emitMessage = id => callbacks.onMessage({ self_id: '777', kind: 'private', conversation_id: '101', sender_id: '101', sender_name: '合成联系人',
+      conversation_name: '宿主集成测试', text: '合成消息 ' + id, message_id: id, time: Math.ceil(Date.now() / 1000) });
+    emitMessage('1'); await waitReply(1); emitMessage('2'); await waitReply(2);
+    assert.deepEqual(nativeResults.map(result => result.cancellation), [{ requested: false, confirmed: false }, { requested: false, confirmed: false }]);
+    assert.ok(service.listTasks().every(task => task.status === 'succeeded'));
+    assert.equal(requests[1].sessionId, nativeResults[0].sessionId);
+    assert.equal(requests[0].workspace, requests[1].workspace);
+    assert.deepEqual(replies.map(reply => reply.text), ['小助手真实协议模拟回答', '小助手真实协议模拟回答']);
+    assert.ok((await service.getWechatState()).outbox.every(delivery => delivery.status === 'delivered'));
+  } finally { await service.close(); }
 });
 test('only product-created native sessions can resume in the identical workspace', async t => {
   const f = await fixture(t);

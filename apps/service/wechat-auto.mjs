@@ -44,7 +44,7 @@ export function createWechatAutoResponder({
   deadlineMs = Math.max(50, Math.min(180000, deadlineMs));
   pollMs = Math.max(5, Math.min(1000, pollMs));
   const queue = [], active = new Map(), conversations = new Set(), seen = new Set(), calls = [];
-  let closed = false, connected = false, revision = 0, freshAfter = Infinity;
+  let closed = false, connected = false, revision = 0, freshAfter = Infinity, sendTail = Promise.resolve();
   let status = { state: 'idle', detail: '等待授权会话的新消息。', latestMessageId: null, taskId: null, lastError: null, completed: 0, ignored: 0 };
   const notify = patch => { status = { ...status, ...patch }; try { onChange(); } catch {} };
   const keyFor = message => [message.accountId, message.kind, message.conversationId].join(':');
@@ -73,6 +73,17 @@ export function createWechatAutoResponder({
     try { await cancelTask(job.taskId); } catch { /* The parent service retains actual stop/unknown state. */ }
   }
   function abort(job, code) { job.stopReason = code; job.controller.abort(); }
+  function sendInOrder(job, text) {
+    const operation = sendTail.then(() => {
+      // Generation may overlap; the native sender has one shared send slot.
+      // Revalidate only when this reply reaches that slot, never retry a submit.
+      assertCurrent(job);
+      notify({ state: 'sending', detail: '正在向原会话发送 DSH 已完成的完整回复。' });
+      return send(job.message, text);
+    });
+    sendTail = operation.catch(() => {});
+    return operation;
+  }
   async function run(job) {
     try {
       assertCurrent(job);
@@ -121,9 +132,8 @@ export function createWechatAutoResponder({
         return;
       }
       if (text.length > 16000 || Buffer.byteLength(text, 'utf8') > 16000) throw failure('AUTO_REPLY_TOO_LONG');
-      notify({ state: 'sending', detail: '正在向原会话发送 DSH 已完成的完整回复。' });
-      assertCurrent(job);
-      const delivery = await send(message, text);
+      notify({ state: 'sending', detail: '回复已完成，正在等待本次发送。' });
+      const delivery = await sendInOrder(job, text);
       notify({ state: delivery?.status === 'delivered' ? 'idle' : 'unconfirmed',
         detail: delivery?.status === 'delivered' ? '自动回复已取得微信服务器回执。' : '本条发送结果待核对，未自动重发。',
         completed: status.completed + (delivery?.status === 'delivered' ? 1 : 0) });
@@ -156,7 +166,10 @@ export function createWechatAutoResponder({
     connectionChanged(isReady) {
       if (isReady && connected || !isReady && !connected) return;
       connected = isReady; revision++;
-      freshAfter = isReady ? Math.ceil(now() / 1000) * 1000 : Infinity;
+      // Reader timestamps only identify a whole second: unseen history from the
+      // handshake's own second cannot be distinguished from a new live message.
+      // Admit that second instead of setting a future cutoff; IDs still dedupe.
+      freshAfter = isReady ? Math.floor(now() / 1000) * 1000 : Infinity;
       queue.length = 0;
       for (const { job } of active.values()) abort(job, 'AUTO_DISCONNECTED');
       notify({ state: isReady ? 'idle' : 'paused', detail: isReady ? '仅等待本次连接之后的新消息。' : MESSAGES.AUTO_DISCONNECTED });

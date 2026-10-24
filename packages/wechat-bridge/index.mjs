@@ -552,7 +552,7 @@ export function createWechatBridge({
 
   async function sendAttachment(value = {}) {
     assertTarget(value.kind, value.target);
-    if (activeSend) throw fault('SENDER_BUSY');
+    if (activeSend) throw Object.assign(fault('SENDER_BUSY'), { attempted: false });
     if (!mediaTransport || state.state !== 'ready' || !state.accountVerified || !state.readerConnected) throw fault('WECHAT_NOT_READY');
     const job = mediaTransport.send(value); activeSend = job;
     try { return await job; }

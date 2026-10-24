@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.3.2';
+export const APP_VERSION = '0.3.3';
 export const TASK_STATUSES = new Set(['queued', 'running', 'validating', 'succeeded', 'partial', 'failed', 'cancelled', 'interrupted', 'waiting_dependency']);
 export const TERMINAL_STATUSES = new Set(['succeeded', 'partial', 'failed', 'cancelled', 'interrupted']);
 
