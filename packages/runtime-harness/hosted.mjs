@@ -2,6 +2,7 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { validateTaskImages } from '../contracts/image-input.mjs';
 
 const PROTOCOL = 'xiaozhushou-harness-host-v1';
 const SESSION = /^xzs-[a-f0-9]{32}$/;
@@ -81,7 +82,7 @@ export async function readHostedCatalog(settings = {}) {
 }
 
 /** Product-owned native session, using the account already logged into Harness. */
-export async function runHostedTask({ prompt, workspace, sessionId, conversation, signal, onEvent, settings = {} } = {}) {
+export async function runHostedTask({ prompt, workspace, sessionId, conversation, images, signal, onEvent, settings = {} } = {}) {
   const emit = (type, message) => { try { onEvent?.({ type, message }); } catch {} };
   const taskId = randomUUID(); let config, submitted = false, cancelled = signal?.aborted === true, lastStatus, lastSession = sessionId;
   const onAbort = () => { cancelled = true; };
@@ -98,14 +99,16 @@ export async function runHostedTask({ prompt, workspace, sessionId, conversation
     if (typeof prompt !== 'string' || !prompt.trim() || Buffer.byteLength(prompt) > 256 * 1024) throw fault('INVALID_PROMPT', '请输入有效任务内容（不超过 256 KiB）。');
     if (!path.isAbsolute(workspace || '')) throw fault('INVALID_WORKSPACE', '请选择小助手工作区。');
     if (sessionId !== undefined && !SESSION.test(sessionId)) throw fault('SESSION_REFUSED', '该会话不是小助手宿主创建的会话。');
+    const taskImages = validateTaskImages(images);
     if (cancelled) throw fault('CANCELLED', '任务已取消。');
-    config = await connection(settings); verifyHealth(await request(config, '/health', { maxBytes: 65536 }));
+    config = await connection(settings); const health = verifyHealth(await request(config, '/health', { maxBytes: 65536 }));
+    if (taskImages.length && health.capabilities?.images !== true) throw fault('HOST_IMAGES_UNSUPPORTED', '当前 Harness 宿主尚未支持图片输入，请更新并启用图片能力后重试；本轮没有提交。');
     signal?.addEventListener('abort', onAbort, { once: true }); if (signal?.aborted) onAbort();
     if (cancelled) throw fault('CANCELLED', '任务已取消。');
     emit('status', '正在使用现有 Harness 登录建立小助手会话…');
     submitted = true;
     const personaPrefix = settings.personaPrefix ?? settings.persona;
-    let value = verifyTask(await request(config, '/tasks', { method: 'POST', body: { taskId, prompt, workspace, ...(sessionId ? { sessionId } : {}), ...(conversation ? { conversation } : {}), ...(personaPrefix ? { personaPrefix } : {}), ...(settings.hostedOwnerGrants ? { authority: 'product-owner', ownerGrants: settings.hostedOwnerGrants } : {}) } }), taskId);
+    let value = verifyTask(await request(config, '/tasks', { method: 'POST', body: { taskId, prompt, workspace, ...(taskImages.length ? { images: taskImages } : {}), ...(sessionId ? { sessionId } : {}), ...(conversation ? { conversation } : {}), ...(personaPrefix ? { personaPrefix } : {}), ...(settings.hostedOwnerGrants ? { authority: 'product-owner', ownerGrants: settings.hostedOwnerGrants } : {}) } }), taskId);
     lastSession = value.sessionId;
     const deadline = Date.now() + (settings.timeoutMs ?? 10 * 60 * 1000);
     while (!final(value)) {

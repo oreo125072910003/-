@@ -6,7 +6,7 @@
   "type": "module",
   "main": "index.mjs",
   "exports": { ".": "./index.mjs", "./text-policy.mjs": "./text-policy.mjs", "./locale/*.json": "./locale/*.json", "./icon": "./icon.svg" },
-  "files": ["index.mjs", "server.mjs", "text-policy.mjs", "owner-access.mjs", "cordis.patch.yml", "locale/*.json", "icon.svg"],
+  "files": ["index.mjs", "server.mjs", "image-input.mjs", "contract-image-input.mjs", "text-policy.mjs", "owner-access.mjs", "cordis.patch.yml", "locale/*.json", "icon.svg"],
   "dependencies": { "@deepseek-ai/dsh-llm": "0.2.0-rc.2" },
   "peerDependencies": { "@deepseek-ai/dsh": ">=0.2.0-rc.2 <0.3.0" },
   "peerDependenciesMeta": { "@deepseek-ai/dsh": { "optional": true } },

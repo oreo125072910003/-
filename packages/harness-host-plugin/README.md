@@ -16,11 +16,17 @@
 
 - `GET /health`：协议标识 `xiaozhushou-harness-host-v1`、原生 provider/model、产品路径、活动任务数和模型是否完成过回复。健康检查没有模型调用，不能证明账号真实可用。
 - `GET /catalog`：直接从原 Harness skills/tools 服务读取元数据，包含技能来源、可授权工具和授权契约。清单本身没有执行权限。
-- `POST /tasks`：`{taskId?,prompt,workspace,sessionId?,conversation?,personaPrefix?,authority?,ownerGrants?}`；返回任务回执，不等待模型完成。重复 taskId/相同内容不会重复入队，不同内容会拒绝。
+- `POST /tasks`：`{taskId?,prompt,workspace,sessionId?,conversation?,images?,personaPrefix?,authority?,ownerGrants?}`；返回任务回执，不等待模型完成。重复 taskId/相同内容不会重复入队，不同内容会拒绝；图片顺序、名称、大小和摘要也参与冲突检查。
 - `GET /tasks/:id`：返回任务状态。只有匹配自身 session 和 turn 的 `turn/end completed`，且会话 flush 成功，才能返回成功文字。
 - `DELETE /tasks/:id`：仅取消此产品任务拥有的 native agent。未收到结束确认时返回 `stop_unconfirmed`，保持会话锁，不声称已经停止。
 
-任务只可继续产品 `harness-host/sessions.json` 中登记的 `xzs-<32 hex>` 会话，工作目录必须位于指定产品工作区。同会话仅一轮，宿主默认最多并行 3 轮。输出、请求体、超时和记录数均有上限。当前不会提供 token streaming、图片或自动收集模型写出的成果。
+任务只可继续产品 `harness-host/sessions.json` 中登记的 `xzs-<32 hex>` 会话，工作目录必须位于指定产品工作区。同会话仅一轮，宿主默认最多并行 3 轮。输出、请求体、超时和记录数均有上限。当前不会提供 token streaming 或自动收集模型写出的成果。
+
+`images` 为最多 4 个 `{id,name?,mime,b64,sha256,bytes}`，每张最多 768 KiB，只接受 PNG/JPEG/WEBP 原始字节，拒绝路径和 URL。共享契约校验标准 Base64、精确长度、格式头和 SHA256；整个请求最多 5 MiB，文字仍独立限制为 256 KiB。安装器把共享校验模块复制进独立插件并更新所有相对导入的 revision。
+
+`health.capabilities.images` 只有实际 `llm.resolveModelInfo(provider,model,signal)` 声明图片输入且原生 attachment 服务可用时才为 true，不根据模型名推断。图片交给原有 `attachments.saveImages/saveImage`，通过原生 image block 进入同一个 DSH agent。客户端遇到旧宿主会明确返回 `HOST_IMAGES_UNSUPPORTED`；产品微信入口据此给出“未提供画面”的文字说明，不假装看图。
+
+宿主只在真实本轮 `turn/end` 后，对本轮可信 `user/message` 的图片位置追加 `image/offload` 并确认保存，然后释放会话。图片待清理标记先持久化；卸载或保存未确认的会话，即使宿主重启也会拒绝续聊。停止未确认时继续占用会话，不提前卸载仍在使用的图片。图片像素从后续模型上下文卸载，任务源图片快照与读取清单保留；这不是删除本机附件或实现全量聊天记忆。
 
 `conversation` 可为 `{channel:'wechat'|'desktop'|'mail',displayName?:string}`，仅用于显示分类和标题，不能指定路径、会话 ID、工具或授权。原生 `workspaceRegistry` 按已经校验的真实 `workspace` 路径查找或创建工作空间，再用 `attachSession` 校验会话 `header.cwd` 后归类。续聊复用已有原生会话和工作空间，保留已有组名及会话标题；归档会话不自动恢复。微信等持续会话应由产品为每个会话保持固定目录，例如 `tasks/conversations/wechat_<hash>`；成果文件仍可保存在独立任务目录。新建标题如“小助手 · 微信 · 测试联系人”，采用 75 字节 Unicode 安全截断；插件不向 stdout 输出联系人名称。最终任务回执可包含原生 `groupId`，映射保存在产品的 `harness-host/sessions.json`。分类不可用或未确认保存时，本轮不会提交模型消息。
 

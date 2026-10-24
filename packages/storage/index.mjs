@@ -183,11 +183,11 @@ export async function createStore(dataDir) {
     getTask(id) { return mapTask(query('SELECT * FROM tasks WHERE id=?', [id])[0]); },
     listTasks() { return query('SELECT * FROM tasks ORDER BY created_at DESC,id DESC LIMIT 500').map(mapTask); },
     updateTask(id, patch) {
-      const fields = { status:'status', progress:'progress', summary:'summary', error:'error', sessionId:'session_id',workerResult:'worker_result' };
+      const fields = { status:'status', progress:'progress', summary:'summary', error:'error', sessionId:'session_id',workerResult:'worker_result',attachments:'attachments' };
       if (patch.status && !TASK_STATUSES.has(patch.status)) throw new Error('任务状态无效。');
       const entries = Object.entries(patch).filter(([key]) => fields[key]);
       transaction(() => {
-        db.run(`UPDATE tasks SET ${[...entries.map(([key]) => `${fields[key]}=?`),'updated_at=?'].join(',')} WHERE id=?`, [...entries.map(([key,v])=>key==='workerResult'?JSON.stringify(v):v), new Date().toISOString(), id]);
+        db.run(`UPDATE tasks SET ${[...entries.map(([key]) => `${fields[key]}=?`),'updated_at=?'].join(',')} WHERE id=?`, [...entries.map(([key,v])=>['workerResult','attachments'].includes(key)?JSON.stringify(v):v), new Date().toISOString(), id]);
       });
       return api.getTask(id);
     },

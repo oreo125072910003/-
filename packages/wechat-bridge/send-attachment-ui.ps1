@@ -96,7 +96,14 @@ public class XzsWechatMediaWindow {
     }
     if ($matches.Count -ne 1) { Fail 'WECHAT_ATTACHMENT_UI_INPUT_UNREADABLE' }
     $value = $null
-    if (-not $matches[0].TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value) -or $value.Current.Value.Length -gt 0) { Fail 'WECHAT_ATTACHMENT_UI_DRAFT_PRESENT' }
+    $readable = $false
+    $inputText = $null
+    try {
+      $readable = $matches[0].TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value)
+      if ($readable -and $null -ne $value) { $inputText = $value.Current.Value }
+    } catch { Fail 'WECHAT_ATTACHMENT_UI_INPUT_UNREADABLE' }
+    if (-not $readable -or $inputText -isnot [string]) { Fail 'WECHAT_ATTACHMENT_UI_INPUT_UNREADABLE' }
+    if ($inputText.Length -gt 0) { Fail 'WECHAT_ATTACHMENT_UI_DRAFT_PRESENT' }
     return $matches[0]
   }
   function Check-File {

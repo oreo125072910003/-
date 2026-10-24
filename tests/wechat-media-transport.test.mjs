@@ -5,8 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import http from 'node:http';
+import { execFileSync } from 'node:child_process';
 import { createWechatBridge } from '../packages/wechat-bridge/index.mjs';
-import { createWechatMediaTransport, inspectWechatAttachment, matchesWechatAttachmentReceipt } from '../packages/wechat-bridge/media-transport.mjs';
+import { createWechatMediaTransport, inspectWechatAttachment, matchesWechatAttachmentReceipt, wechatAttachmentUiError } from '../packages/wechat-bridge/media-transport.mjs';
 
 const digest = (bytes, algorithm = 'sha256') => crypto.createHash(algorithm).update(bytes).digest('hex');
 const escape = text => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -38,6 +39,105 @@ function fixture(t, { mediaType = 'file', runner, directory, ...options } = {}) 
   });
   return { root, transport, attachment, checked, state, aborter };
 }
+
+test('input UI failures need a strict pre-paste report after a grant, while unknown failures stay uncertain', () => {
+  for (const code of ['WECHAT_ATTACHMENT_UI_INPUT_UNREADABLE', 'WECHAT_ATTACHMENT_UI_DRAFT_PRESENT']) {
+    assert.equal(wechatAttachmentUiError({ code, submitted: false }, true).attempted, false);
+    assert.equal(wechatAttachmentUiError({ code, submitted: false }, false).attempted, false);
+    for (const submitted of [undefined, null, 0, 'false', true]) {
+      const error = wechatAttachmentUiError({ code, submitted }, true);
+      assert.equal(error.code, code); assert.equal(error.attempted, true);
+    }
+  }
+  for (const code of ['WECHAT_ATTACHMENT_UI_TIMEOUT', 'WECHAT_ATTACHMENT_UI_PROTOCOL_INVALID', 'WECHAT_ATTACHMENT_UI_PREVIEW_UNREADABLE', 'WECHAT_ATTACHMENT_UNKNOWN']) {
+    assert.equal(wechatAttachmentUiError({ code, submitted: false }, true).attempted, true);
+  }
+});
+
+test('proven input preflight failures stay rejected before and after the grant without replaying a delivery', async t => {
+  for (const code of ['WECHAT_ATTACHMENT_UI_INPUT_UNREADABLE', 'WECHAT_ATTACHMENT_UI_DRAFT_PRESENT']) {
+    for (const granted of [false, true]) {
+      const f = fixture(t, { runner: async ({ context }) => {
+        if (granted) await context.beforeSubmit();
+        throw wechatAttachmentUiError({ code, submitted: false }, granted);
+      } });
+      await assert.rejects(f.transport.send(f.attachment), { code, attempted: false });
+      const directory = path.join(f.root, 'state', 'media-deliveries');
+      const record = JSON.parse(fs.readFileSync(path.join(directory, fs.readdirSync(directory)[0]), 'utf8'));
+      assert.equal(record.state, 'rejected'); assert.equal(record.attempted, false);
+      await assert.rejects(f.transport.send(f.attachment), { code: 'WECHAT_ATTACHMENT_DELIVERY_UNCONFIRMED', attempted: false });
+      assert.equal(f.state.calls, 1);
+    }
+  }
+  for (const event of [
+    { code: 'WECHAT_ATTACHMENT_UI_INPUT_UNREADABLE', submitted: true },
+    { code: 'WECHAT_ATTACHMENT_UI_DRAFT_PRESENT' },
+    { code: 'WECHAT_ATTACHMENT_UI_PREVIEW_UNREADABLE', submitted: false },
+    { code: 'WECHAT_ATTACHMENT_UI_TIMEOUT', submitted: false },
+    { code: 'WECHAT_ATTACHMENT_UNKNOWN', submitted: false },
+  ]) {
+    const uncertain = fixture(t, { runner: async ({ context }) => {
+      await context.beforeSubmit();
+      throw wechatAttachmentUiError(event, true);
+    } });
+    await assert.rejects(uncertain.transport.send(uncertain.attachment), { code: event.code, attempted: true });
+  }
+});
+
+test('PowerShell input preflight distinguishes unreadable values from actual drafts without loading the sender', { skip: process.platform !== 'win32' }, () => {
+  const source = path.resolve('packages/wechat-bridge/send-attachment-ui.ps1').replaceAll("'", "''");
+  const probe = `
+$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
+Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
+$tokens=$null; $parseErrors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('${source}',[ref]$tokens,[ref]$parseErrors)
+if (@($parseErrors).Count -ne 0) { throw 'Offline sender parse failed' }
+$definition=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Find-Input'},$true)
+if ($null -eq $definition) { throw 'Missing input preflight' }
+Invoke-Expression $definition.Extent.Text
+function Fail([string]$code) { throw [System.Exception]::new($code) }
+function Get-Elements { return ,$script:elements }
+$root=[pscustomobject]@{Current=[pscustomobject]@{BoundingRectangle=[pscustomobject]@{Left=0;Top=0;Height=1000}}}
+$cases=@(
+  @{Name='unsupported';Readable=$false;Text=''},
+  @{Name='pattern-error';Readable=$true;ThrowPattern=$true;Text=''},
+  @{Name='value-error';Readable=$true;ThrowValue=$true;Text=''},
+  @{Name='null-value';Readable=$true;Text=$null},
+  @{Name='empty';Readable=$true;Text=''},
+  @{Name='draft';Readable=$true;Text='synthetic-offline-draft'},
+  @{Name='whitespace-draft';Readable=$true;Text=' '}
+)
+$results=@(foreach ($case in $cases) {
+  $script:submitted=$false
+  $current=[pscustomobject]@{Value=$case.Text}
+  if ($case.ThrowValue) { $current | Add-Member -MemberType ScriptProperty -Name Value -Value { throw 'Synthetic unavailable property' } -Force }
+  $element=[pscustomobject]@{
+    Current=[pscustomobject]@{ControlType=[System.Windows.Automation.ControlType]::Edit;IsOffscreen=$false;IsEnabled=$true;BoundingRectangle=[pscustomobject]@{Left=300;Top=600}}
+    Readable=$case.Readable;ThrowPattern=$case.ThrowPattern;Pattern=[pscustomobject]@{Current=$current}
+  }
+  $element | Add-Member -MemberType ScriptMethod -Name TryGetCurrentPattern -Value {
+    param($pattern,[ref]$result)
+    if ($this.ThrowPattern) { throw 'Synthetic unavailable pattern' }
+    $result.Value=$this.Pattern
+    return $this.Readable
+  }
+  $script:elements=@($element)
+  $code='OK'
+  try { $null=Find-Input } catch { $code=$_.Exception.Message }
+  @{name=$case.Name;code=$code;submitted=$script:submitted}
+})
+$results | ConvertTo-Json -Compress
+`;
+  const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const output = execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', Buffer.from(probe, 'utf16le').toString('base64')], { windowsHide: true, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] });
+  const results = JSON.parse(output);
+  for (const item of results) {
+    const expected = item.name === 'empty' ? 'OK' : item.name.includes('draft') ? 'WECHAT_ATTACHMENT_UI_DRAFT_PRESENT' : 'WECHAT_ATTACHMENT_UI_INPUT_UNREADABLE';
+    assert.equal(item.code, expected, item.name); assert.equal(item.submitted, false, item.name);
+  }
+  assert.equal(results.length, 7);
+});
 
 test('image and file sends require exact database media and return the actual server ID', async t => {
   for (const mediaType of ['image', 'file']) {

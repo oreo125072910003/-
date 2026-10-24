@@ -12,6 +12,7 @@ import { createLegacyMigration } from '../../packages/extensions/legacy.mjs';
 import { createLiteratureClient, writeLiteratureExports } from '../../packages/documents/literature.mjs';
 import { createMailController } from '../../packages/mail-plugin/index.mjs';
 import { createDshAccess } from './dsh-access.mjs';
+import { prepareWechatTaskImages } from './wechat-image-input.mjs';
 
 const TEXT_EXTENSIONS = new Set(['.txt','.md','.json','.csv','.tsv','.tex','.yaml','.yml','.log','.py','.js','.mjs','.css','.html','.cs']);
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
@@ -135,10 +136,12 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       saveResult:result=>{update(result.parentTaskId,{workerResult:publicWorkerResult(result)});},
     },onEvent:entry=>{if(entry.parentTaskId)event(entry.parentTaskId,entry.type,entry.message??(entry.type==='worker.step'?`${entry.role}：${entry.status}`:entry.type==='plan.created'?'已登记协作计划。':'协作步骤状态已更新。'));}
   });
-  async function selectedText(task,signal){
-    const snippets=[],sources=[];
+  async function selectedText(task,signal,{imagesSupported=false}={}){
+    const {snippets,sources,images}=await prepareWechatTaskImages({task,store,wechat,signal,supported:imagesSupported,
+      saveAttachments:attachments=>update(task.id,{attachments}),onEvent:(type,message)=>event(task.id,type,message)});
     for(const item of task.attachments){
       signal.throwIfAborted();
+      if(item.source==='wechat-image')continue;
       const extension=path.extname(item.name).toLowerCase();
       if(['.pdf','.docx'].includes(extension)){
         const parsed=await extractDocument({path:item.path,allowedRoot:path.join(task.workspace,'资料'),maxChars:18000,signal});
@@ -155,7 +158,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
         sources.push({name:item.name,sha256:hashFile(item.path),truncated:item.size>length,bytesProvided:length});
       }
     }
-    return{snippets,sources};
+    return{snippets,sources,images};
   }
   async function organize(task,signal) {
     signal.throwIfAborted();
@@ -187,9 +190,11 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
   async function agent(task,signal) {
     const options=await runtimeOptions(task.id);
     signal.throwIfAborted();
+    let imagesSupported=false;
     if(hosted){
       const state=await inspect();
       if(!state.available){update(task.id,{status:'waiting_dependency',progress:'等待连接现有 Harness',error:'请启动现有 Harness 并启用小助手连接插件。复用原有登录，无需另填 API Key。'+state.detail});event(task.id,'waiting','小助手 DSH 宿主尚未连接，未发起模型请求。');return;}
+      imagesSupported=state.capabilities?.images===true;
     }else if(!options.env.DEEPSEEK_API_KEY) {
       const state=await inspect();
       if(!state.credentialsConfigured) {
@@ -197,7 +202,15 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
         event(task.id,'waiting','Harness 的模型账户尚未配置，未发起模型请求。');return;
       }
     }
-    const {snippets,sources}=await selectedText(task,signal);
+    let selected;
+    try{selected=await selectedText(task,signal,{imagesSupported});}
+    finally{
+      if(task.attachments.some(item=>item.source==='wechat-image')){
+        const records=findTask(task.id).attachments.filter(item=>item.source==='wechat-image').map(item=>({name:item.name,source:item.source,imageId:item.imageId,replyToMessageId:item.replyToMessageId,status:item.status,...(item.sha256?{sha256:item.sha256,bytesProvided:item.size}:{}),...(item.errorCode?{errorCode:item.errorCode}:{})}));
+        writeResult(task,'微信图片读取记录.json',JSON.stringify(records,null,2)+'\n','application/json');
+      }
+    }
+    const {snippets,sources,images}=selected;
     const current=settings();
     const skillContexts=[];
     for(const id of task.skillIds??[])skillContexts.push(await extensions.loadSkillContext(id,ownerContext));
@@ -218,7 +231,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     if(Buffer.byteLength(fullPrompt)>256*1024)throw Error('本次任务与技能资料超过引擎输入上限，请减少资料后重试。');
     const conversation=task.conversationId?store.getConversation(task.conversationId):null;
     if(task.conversationId&&!conversation)throw Error('微信会话记录缺失，未建立新的临时会话。');
-    const result=await runCoreTask({prompt:fullPrompt,workspace:conversation?.workspace??task.workspace,signal,
+    const result=await runCoreTask({prompt:fullPrompt,workspace:conversation?.workspace??task.workspace,signal,...(images.length?{images}:{}),
       ...(conversation?{sessionId:conversation.sessionId??undefined,conversation:{channel:'wechat',displayName:conversation.title}}:{}),
       settings:{...options,persona:`你的名字是${current.assistantName}。${current.persona}`,personaPrefix:`你的名字是${current.assistantName}。${current.persona}`},
       onEvent:entry=>{if(signal.aborted)return;event(task.id,entry.type||'status',entry.message||'正在执行');}});
@@ -375,11 +388,12 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     async createTask(value,context=ownerContext,conversationInfo){
       if(stopping)throw new Error('小助手正在退出，请稍后重试。');
       const input=taskInput(value);
-      let conversation;
+      let conversation,inboundMessage;
       if(conversationInfo){
         if(context!==externalContext||input.kind!=='agent'||input.workflowId!=='single'||input.attachmentPaths.length||input.skillIds.length)throw Error('会话来源不受支持。');
         const message=store.getWechatMessage(safeId(conversationInfo.replyToMessageId));
         if(!message||message.outgoing||message.accountId!==conversationInfo.accountId||message.kind!==conversationInfo.kind||message.conversationId!==conversationInfo.target||conversationInfo.conversationKey!==`wechat:${message.kind}:${message.conversationId}`)throw Error('会话与收到的微信消息不一致。');
+        inboundMessage=message;
         const fingerprint=createHash('sha256').update(JSON.stringify([message.accountId,message.kind,message.conversationId])).digest('hex').slice(0,32);
         const workspace=path.join(workspaces,'conversations','wechat_'+fingerprint);fs.mkdirSync(workspace,{recursive:true});
         if(fs.lstatSync(workspace).isSymbolicLink()||!inside(fs.realpathSync.native(workspaces),fs.realpathSync.native(workspace)))throw Error('会话工作空间不在小助手目录内。');
@@ -399,6 +413,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       fs.mkdirSync(inputs,{recursive:true});
       const attachments=[];
       try {
+        for(const [index,image] of (inboundMessage?.images??[]).entries())attachments.push({source:'wechat-image',imageId:image.id,replyToMessageId:inboundMessage.id,name:'微信图片'+(index+1),status:'pending'});
         for(const [index,item]of sources.entries()){
           const name=path.basename(item.filename);const destination=path.join(inputs,`${index+1}_${safeFilename(name)}`);
           const fd=fs.openSync(item.filename,fs.constants.O_RDONLY| (fs.constants.O_NOFOLLOW??0));

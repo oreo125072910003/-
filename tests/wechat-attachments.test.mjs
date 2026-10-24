@@ -144,6 +144,14 @@ test('proven pre-submit attachment rejection persists and only an explicit new r
   assert.equal(f.store.getWechatDelivery(first.id).status,'rejected');
 });
 
+test('unreadable input preflight displays the input warning instead of claiming a draft exists',async t=>{
+  const f=await fixture(t),selected=await f.stage(f.source());
+  f.state.error=Object.assign(Error('synthetic unreadable input'),{code:'WECHAT_ATTACHMENT_UI_INPUT_UNREADABLE',attempted:false});
+  const record=await f.controller.sendAttachment({kind:'private',target:'101',attachmentId:selected.id,requestId:requestId()});
+  assert.equal(record.status,'rejected');assert.match(record.error,/无法核对聊天输入区/);assert.match(record.error,/确认未发送/);
+  assert.equal(record.error.includes('已有草稿'),false);
+});
+
 test('attachment rejection requires a trusted explicit code and strict false attempt evidence',async t=>{
   const f=await fixture(t),selected=await f.stage(f.source());
   for(const error of[

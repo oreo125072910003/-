@@ -4,6 +4,8 @@ import { mkdir, readFile, realpath, stat, writeFile, rename } from 'node:fs/prom
 import path from 'node:path';
 import { TEXT_POLICY, apply as installTextPolicy } from './text-policy.mjs';
 import { bindOwnerAccess, normalizeOwnerGrants, grantableTool } from './owner-access.mjs';
+import { validateTaskImages } from '../contracts/image-input.mjs';
+import { prepareNativeImageBlocks, supportsNativeImages, nativeImageTarget, offloadNativeImages } from './image-input.mjs';
 
 export const HOST_PROTOCOL = 'xiaozhushou-harness-host-v1';
 const SESSION = /^xzs-[a-f0-9]{32}$/;
@@ -92,6 +94,7 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
   const cancelConfirmMs = numeric(config.cancelConfirmMs, 5000, 20, 30000);
   const maxOutputBytes = numeric(config.maxOutputBytes, 1048576, 1024, 4194304);
   const maxConcurrent = numeric(config.maxConcurrent, 3, 1, 8);
+  const imagePrepareTimeoutMs = numeric(config.imagePrepareTimeoutMs, 25000, 50, 60000);
   const stateDir = path.join(dataRoot, 'harness-host');
   await mkdir(stateDir, { recursive: true });
   if (!inside(dataRoot, await realpath(stateDir))) throw fault('HOST_STATE_PATH_REFUSED', '产品会话记录目录无效。');
@@ -105,7 +108,7 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     }
     sessions = saved.sessions;
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  const tasks = new Map(), active = new Map(), handles = new Map();
+  const tasks = new Map(), active = new Map(), handles = new Map(), finalizations = new Set();
   let modelVerified = false, closed = false, stateQueue = Promise.resolve();
   const persist = () => {
     const snapshot = JSON.stringify({ version: 1, sessions });
@@ -157,16 +160,51 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     task.controller.abort(); task.access?.dispose();
     update(task, status); task.result = result; active.delete(task.sessionId);
   }
+  function cancelledResult(task) {
+    const cancelled = task.cancelReason === 'CANCELLED';
+    return { ok: false, finalText: '', sessionId: task.sessionId, artifacts: [], error: { code: task.cancelReason, message: cancelled ? '任务已取消。' : task.cancelReason === 'RUNTIME_TIMEOUT' ? '本轮任务已超时并停止。' : 'Harness 本轮未通过会话检查，已停止。' }, cancellation: { requested: true, confirmed: true } };
+  }
+  function terminalize(task, status, result, { save = false } = {}) {
+    if (task.nativeTerminal || task.finalizing) return;
+    const pendingImages = sessions[task.sessionId]?.pendingImageTaskId === task.id;
+    if (!save && !(task.imageCount && task.submitted) && !pendingImages) { finish(task, status, result); return; }
+    task.finalizing = true; update(task, 'saving'); clearTimeout(task.timeout); clearTimeout(task.cancelTimer);
+    // Native append observers are synchronous. Offload and flush after the real
+    // turn/end dispatch, while this task still owns the session lock.
+    const job = Promise.resolve().then(async () => {
+      if (task.imageCount && task.submitted) {
+        if (task.imageTrackingError) throw fault('IMAGE_OFFLOAD_FAILED', 'Harness 图片位置未通过核对。');
+        if (status === 'completed' && !task.imageTargets.size) throw fault('IMAGE_ADMISSION_UNCONFIRMED', 'Harness 未确认接收本轮图片。');
+        offloadNativeImages(task.agent.session, [...task.imageTargets.values()]);
+      }
+      if (save || task.imageCount && task.submitted) {
+        if (await ctx.sessions.flush(task.agent.session) === false) throw fault('SESSION_SAVE_FAILED', 'Harness 会话尚未确认保存。');
+      }
+      if (sessions[task.sessionId]?.pendingImageTaskId === task.id) {
+        const previous = sessions[task.sessionId];
+        const { pendingImageTaskId: _pending, ...clean } = previous;
+        sessions[task.sessionId] = clean;
+        try { await persist(); } catch (error) { sessions[task.sessionId] = previous; throw error; }
+      }
+      if (task.cancelReason) finish(task, task.cancelReason === 'CANCELLED' ? 'cancelled' : 'failed', cancelledResult(task));
+      else { if (status === 'completed') modelVerified = true; finish(task, status, result); }
+    }).catch(error => finish(task, 'failed', { ok: false, finalText: '', sessionId: task.sessionId, artifacts: [], error: {
+      code: task.imageCount ? /^IMAGE_[A-Z_]+$/.test(error?.code || '') ? error.code : 'IMAGE_SESSION_SAVE_FAILED' : 'SESSION_SAVE_FAILED',
+      message: task.imageCount ? '本轮已结束，但图片卸载或保存未确认；此会话暂时不能继续，请开启新会话。' : '回复已产生，但 Harness 会话未能确认保存。',
+    } }));
+    finalizations.add(job); void job.finally(() => finalizations.delete(job));
+  }
   function requestCancel(task, code = 'CANCELLED') {
     if (task.nativeTerminal || task.cancelReason) return;
     task.cancelReason = code; update(task, 'cancel_requested'); clearTimeout(task.timeout);
     task.controller.abort();
+    if (task.finalizing) return;
     if (!task.submitted || task.turnEnded) {
-      finish(task, code === 'CANCELLED' ? 'cancelled' : 'failed', { ok: false, finalText: '', sessionId: task.sessionId, artifacts: [], error: { code, message: code === 'CANCELLED' ? '任务已取消。' : '本轮 Harness 任务已超时。' }, cancellation: { requested: true, confirmed: true } });
+      terminalize(task, code === 'CANCELLED' ? 'cancelled' : 'failed', cancelledResult(task));
       return;
     }
     try { task.agent?.cancel({ kind: 'user' }); } catch { /* A missing turn/end remains unconfirmed. */ }
-    if (task.nativeTerminal) return;
+    if (task.nativeTerminal || task.finalizing) return;
     task.cancelTimer = setTimeout(() => {
       if (task.nativeTerminal) return;
       update(task, 'stop_unconfirmed');
@@ -176,7 +214,17 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
   }
   const onSessionEvent = (session, event) => {
     const task = active.get(String(session?.id));
-    if (!task || task.nativeTerminal || !task.submitted) return;
+    if (!task || task.nativeTerminal || task.finalizing || !task.submitted) return;
+    if (task.imageCount && event?.type === 'user/message') {
+      try {
+        const target = nativeImageTarget(event, task.id);
+        if (target) {
+          if (target.imageIndexes.length !== task.imageCount) throw fault('IMAGE_SESSION_EVENT_INVALID', 'Harness 接收的图片数量不匹配。');
+          task.imageTargets.set(target.seq, target);
+        }
+      } catch { task.imageTrackingError = true; requestCancel(task, 'IMAGE_SESSION_EVENT_INVALID'); }
+      return;
+    }
     if (event?.type === 'turn/start' && task.turnId === undefined) { task.turnId = event.data?.turn; update(task, task.cancelReason ? 'cancel_requested' : 'running'); }
     if (typeof event?.type === 'string' && event.type.startsWith('tool/')) {
       if (event.data?.turn !== undefined && task.turnId !== undefined && event.data.turn !== task.turnId) return;
@@ -196,30 +244,28 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     const reason = event.data?.reason?.kind;
     task.turnEnded = true;
     if (task.cancelReason) {
-      const cancelled = task.cancelReason === 'CANCELLED';
-      finish(task, cancelled ? 'cancelled' : 'failed', { ok: false, finalText: '', sessionId: task.sessionId, artifacts: [], error: { code: task.cancelReason, message: cancelled ? '任务已取消。' : task.cancelReason === 'RUNTIME_TIMEOUT' ? '本轮任务已超时并停止。' : 'Harness 本轮未通过文本会话检查，已停止。' }, cancellation: { requested: true, confirmed: true } });
+      terminalize(task, task.cancelReason === 'CANCELLED' ? 'cancelled' : 'failed', cancelledResult(task));
     } else if (reason !== 'completed' || !task.text?.trim()) {
-      finish(task, 'failed', { ok: false, finalText: '', sessionId: task.sessionId, artifacts: [], error: { code: reason === 'completed' ? 'EMPTY_RESULT' : 'MODEL_TURN_FAILED', message: reason === 'completed' ? 'Harness 没有返回可交付的文字回答。' : 'Harness 未确认本轮正常完成，请检查现有账号或模型状态。' } });
+      terminalize(task, 'failed', { ok: false, finalText: '', sessionId: task.sessionId, artifacts: [], error: { code: reason === 'completed' ? 'EMPTY_RESULT' : 'MODEL_TURN_FAILED', message: reason === 'completed' ? 'Harness 没有返回可交付的文字回答。' : 'Harness 未确认本轮正常完成，请检查现有账号或模型状态。' } });
     } else {
-      // Flush outside the synchronous native append observer before releasing this session.
-      update(task, 'saving'); clearTimeout(task.timeout);
-      Promise.resolve().then(() => ctx.sessions.flush(task.agent.session)).then(() => {
-        modelVerified = true;
-        finish(task, 'completed', { ok: true, finalText: task.text, sessionId: task.sessionId, artifacts: [], ...(task.usage ? { usage: task.usage } : {}) });
-      }).catch(() => finish(task, 'failed', { ok: false, finalText: '', sessionId: task.sessionId, artifacts: [], error: { code: 'SESSION_SAVE_FAILED', message: '回复已产生，但 Harness 会话未能确认保存。' } }));
+      terminalize(task, 'completed', { ok: true, finalText: task.text, sessionId: task.sessionId, artifacts: [], ...(task.usage ? { usage: task.usage } : {}) }, { save: true });
     }
   };
   const offEvents = ctx.on('session/event', onSessionEvent, { global: true });
   async function submit(body) {
     if (closed) throw fault('HOST_CLOSED', 'Harness 桥接已关闭。', 503);
-    if (!body || typeof body.prompt !== 'string' || !body.prompt.trim() || Buffer.byteLength(body.prompt) > 256 * 1024) throw fault('INVALID_PROMPT', '请输入有效任务文字（不超过 256 KiB）。');
+    if (!body || typeof body.prompt !== 'string' || !body.prompt.trim()) throw fault('INVALID_PROMPT', '请输入有效任务文字（不超过 256 KiB）。');
+    if (Buffer.byteLength(body.prompt) > 256 * 1024) throw fault('BODY_LIMIT', '任务文字不超过 256 KiB。', 413);
+    let images;
+    try { images = validateTaskImages(body.images); } catch (error) { throw fault(error.code || 'INVALID_IMAGE_INPUT', error.message || '图片输入无效。'); }
     if (typeof body.workspace !== 'string' || !path.isAbsolute(body.workspace)) throw fault('INVALID_WORKSPACE', '工作目录无效。');
     if (body.taskId !== undefined && (typeof body.taskId !== 'string' || !TASK.test(body.taskId))) throw fault('INVALID_TASK', '任务标识无效。');
     if (body.personaPrefix !== undefined && (typeof body.personaPrefix !== 'string' || Buffer.byteLength(body.personaPrefix) > 16384 || body.personaPrefix.includes('\0'))) throw fault('INVALID_PERSONA', '小助手个性设置须为不超过 16 KiB 的文字。');
     const conversation = conversationInfo(body.conversation);
     let grants;
     try { grants = normalizeOwnerGrants(body); } catch (error) { throw fault(error.code, '主人能力授权格式无效，当前任务未启动。', 403); }
-    const digest = createHash('sha256').update(JSON.stringify([body.prompt, body.workspace, body.sessionId ?? null, grants, body.personaPrefix ?? null, conversation ?? null])).digest('hex');
+    const imageManifest = images.map(({ id, name, mime, sha256, bytes }) => ({ id, ...(name ? { name } : {}), mime, sha256, bytes }));
+    const digest = createHash('sha256').update(JSON.stringify([body.prompt, body.workspace, body.sessionId ?? null, grants, body.personaPrefix ?? null, conversation ?? null, imageManifest])).digest('hex');
     if (body.taskId && tasks.has(body.taskId)) {
       const existing = tasks.get(body.taskId);
       if (existing.digest !== digest) throw fault('TASK_CONFLICT', '任务标识已被不同请求使用。', 409);
@@ -239,17 +285,20 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     if (!SESSION.test(sid) || (resumed && (!sessions[sid] || sessions[sid].workspace !== workspace))) throw fault('SESSION_REFUSED', '只能继续由小助手创建的同一工作区会话。', 403);
     if (resumed && workspaceRegistry()?.archivedSessionIds?.includes(sid)) throw fault('SESSION_ARCHIVED', '此小助手会话已归档，请在产品中开启新会话。', 409);
     if (active.has(sid)) throw fault('SESSION_BUSY', '该小助手会话仍在运行或等待停止确认。', 409);
+    if (resumed && sessions[sid]?.pendingImageTaskId) throw fault('SESSION_IMAGE_CLEANUP_REQUIRED', '上轮图片尚未确认卸载保存，请开启新会话。', 409);
     if (active.size >= maxConcurrent) throw fault('HOST_BUSY', '小助手 Harness 任务已达到并行上限。', 429);
     for (const [id, old] of tasks) if (old.nativeTerminal && Date.now() - Date.parse(old.updatedAt) > 15 * 60 * 1000) tasks.delete(id);
     if (tasks.size >= 512) throw fault('HOST_TASK_LIMIT', '任务记录暂满，请稍后重试。', 429);
-    const task = { id: body.taskId || randomUUID(), digest, grants, controller: new AbortController(), toolCallIds: new Set(), sessionId: sid, status: 'queued', nativeTerminal: false, createdAt: new Date().toISOString(), text: '' };
+    const task = { id: body.taskId || randomUUID(), digest, grants, imageCount: images.length, imageTargets: new Map(), controller: new AbortController(), toolCallIds: new Set(), sessionId: sid, status: 'queued', nativeTerminal: false, createdAt: new Date().toISOString(), text: '' };
     task.updatedAt = task.createdAt; tasks.set(task.id, task); active.set(sid, task);
     task.timeout = setTimeout(() => requestCancel(task, 'RUNTIME_TIMEOUT'), turnTimeoutMs); task.timeout.unref?.();
-    void start(task, body, workspace, sid, resumed, conversation);
+    void start(task, body, workspace, sid, resumed, conversation, images);
     return visible(task);
   }
-  async function start(task, body, workspace, sid, resumed, conversation) {
+  async function start(task, body, workspace, sid, resumed, conversation, images) {
     try {
+      const imageBlocks = await prepareNativeImageBlocks(ctx, images, provider, model, { signal: task.controller.signal, timeoutMs: imagePrepareTimeoutMs });
+      task.controller.signal.throwIfAborted();
       const group = await nativeGroup(workspace, conversation, task.controller.signal);
       const setup = async agentCtx => {
         const mounted = await ctx.agentPresets.mount(agentCtx, preset);
@@ -273,16 +322,18 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
       if (task.nativeTerminal) return;
       task.access = await bindOwnerAccess(agent.ctx, ctx, agent, { grants: task.grants, personaPrefix: body.personaPrefix, active: () => active.get(sid) === task && !task.nativeTerminal && !task.cancelReason && !task.turnEnded, signal: task.controller.signal });
       if (task.nativeTerminal) { task.access.dispose(); return; }
-      if (!resumed || task.groupId && sessions[sid]?.groupId !== task.groupId) {
-        sessions[sid] = { ...sessions[sid], workspace, createdAt: sessions[sid]?.createdAt || task.createdAt, ...(task.groupId ? { groupId: task.groupId } : {}) };
+      if (!resumed || imageBlocks.length || task.groupId && sessions[sid]?.groupId !== task.groupId) {
+        task.controller.signal.throwIfAborted();
+        sessions[sid] = { ...sessions[sid], workspace, createdAt: sessions[sid]?.createdAt || task.createdAt, ...(task.groupId ? { groupId: task.groupId } : {}), ...(imageBlocks.length ? { pendingImageTaskId: task.id } : {}) };
         await persist();
       }
-      if (task.nativeTerminal) return;
+      task.controller.signal.throwIfAborted();
+      if (task.nativeTerminal || task.finalizing) return;
       task.submitted = true;
-      agent.followup(createUserMessage({ content: [{ type: 'text', text: task.access.instructions + body.prompt }], source: { kind: 'xiaozhushou-desktop-host', form: 'direct', taskId: task.id, authority: task.grants.skills.length || task.grants.tools.length ? 'product-owner' : 'text-only' } }));
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: task.access.instructions + body.prompt }, ...imageBlocks], source: { kind: 'xiaozhushou-desktop-host', form: 'direct', taskId: task.id, authority: task.grants.skills.length || task.grants.tools.length ? 'product-owner' : 'text-only' } }));
     } catch (error) {
       if (task.submitted) { task.failureCode = error.code || 'PROMPT_QUEUE_FAILED'; requestCancel(task, task.failureCode); }
-      else finish(task, 'failed', { ok: false, finalText: '', sessionId: sid, artifacts: [], error: { code: error.code || 'HOST_SESSION_FAILED', message: '无法建立小助手 Harness 会话，请检查插件预设和当前 Harness 状态。' } });
+      else terminalize(task, 'failed', { ok: false, finalText: '', sessionId: sid, artifacts: [], error: { code: error.code || 'HOST_SESSION_FAILED', message: task.imageCount ? '无法准备图片或建立 Harness 会话，本轮未提交。' : '无法建立小助手 Harness 会话，请检查插件预设和当前 Harness 状态。' } });
     }
   }
   async function catalog() {
@@ -307,10 +358,11 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
       const url = new URL(req.url, 'http://' + expectedHost);
       if (url.search || url.hash) throw fault('INVALID_ROUTE', '请求路径无效。', 404);
       if (req.method === 'GET' && url.pathname === '/health') {
-        reply(200, { ok: true, protocol: HOST_PROTOCOL, project: 'xiaozhushou', provider, model, preset, productDataRoot: dataRoot, workspacesRoot, modelVerified, credentialsSource: 'harness-existing-login', activeTasks: active.size, toolPolicy: 'product-owner-task-grants-v1', capabilities: { text: true, resume: true, streaming: false, mcp: true, skills: true, ownerTaskGrants: true, sessionGroups: Boolean(workspaceRegistry()?.resolveByPath && workspaceRegistry()?.create), defaultToolAccess: 'none', images: false, artifacts: false, cancel: 'native-owned-session' } }); return;
+        const images = await supportsNativeImages(ctx, provider, model, { timeoutMs: Math.min(imagePrepareTimeoutMs, 5000) });
+        reply(200, { ok: true, protocol: HOST_PROTOCOL, project: 'xiaozhushou', provider, model, preset, productDataRoot: dataRoot, workspacesRoot, modelVerified, credentialsSource: 'harness-existing-login', activeTasks: active.size, toolPolicy: 'product-owner-task-grants-v1', capabilities: { text: true, resume: true, streaming: false, mcp: true, skills: true, ownerTaskGrants: true, sessionGroups: Boolean(workspaceRegistry()?.resolveByPath && workspaceRegistry()?.create), defaultToolAccess: 'none', images, artifacts: false, cancel: 'native-owned-session' } }); return;
       }
       if (req.method === 'GET' && url.pathname === '/catalog') { reply(200, await catalog()); return; }
-      if (req.method === 'POST' && url.pathname === '/tasks') { reply(202, await submit(await readJson(req, 300 * 1024))); return; }
+      if (req.method === 'POST' && url.pathname === '/tasks') { reply(202, await submit(await readJson(req, 5 * 1024 * 1024))); return; }
       const id = url.pathname.match(/^\/tasks\/([^/]+)$/)?.[1];
       if (!id || !TASK.test(id) || !['GET', 'DELETE'].includes(req.method)) throw fault('NOT_FOUND', '请求不存在。', 404);
       const task = tasks.get(id); if (!task) throw fault('TASK_NOT_FOUND', '任务记录不存在或已过期。', 404);
@@ -325,6 +377,8 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     async close() {
       closed = true;
       for (const task of active.values()) requestCancel(task);
+      await Promise.resolve();
+      await Promise.allSettled([...finalizations]);
       if (typeof offEvents === 'function') offEvents();
       server.closeAllConnections?.(); await new Promise(resolve => server.close(resolve));
       for (const task of tasks.values()) { clearTimeout(task.timeout); clearTimeout(task.cancelTimer); }

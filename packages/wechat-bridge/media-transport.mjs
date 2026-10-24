@@ -11,7 +11,16 @@ const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).
 // this fixed product script; source runs retain their ordinary filesystem path.
 const scriptPath = fileURLToPath(new URL('./send-attachment-ui.ps1', import.meta.url)).replace(/([\\/])app\.asar([\\/])/, '$1app.asar.unpacked$2');
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp']);
+const INPUT_PREFLIGHT_CODES = new Set(['WECHAT_ATTACHMENT_UI_INPUT_UNREADABLE', 'WECHAT_ATTACHMENT_UI_DRAFT_PRESENT']);
 let globalMediaBusy = false;
+
+// Only the fixed sender's explicit pre-paste report can revoke a submission
+// reservation. Missing, ambiguous or post-paste evidence remains uncertain.
+export function wechatAttachmentUiError(event, granted) {
+  const code = typeof event?.code === 'string' && /^WECHAT_[A-Z0-9_]{1,70}$/.test(event.code) ? event.code : 'WECHAT_ATTACHMENT_UI_FAILED';
+  const provenPreSubmit = event?.submitted === false && INPUT_PREFLIGHT_CODES.has(code);
+  return fault(code, granted && !provenPreSubmit);
+}
 
 export function inspectWechatAttachment(value) {
   if (!value || !['private', 'group'].includes(value.kind) || !/^[1-9]\d{0,15}$/.test(value.target ?? '') ||
@@ -118,7 +127,7 @@ export async function runWechatAttachmentUi(request, { signal, beforeSubmit } = 
             granted = true; child.stdin.write(JSON.stringify({ type: 'submit', deliveryId: request.deliveryId }) + '\n');
           }).catch(error => finish(error));
         } else if (event.type === 'result' && event.submitted === true && granted) result = { submitted: true, targetChecked: true, windowChecked: true };
-        else if (event.type === 'error') finish(fault(/^WECHAT_[A-Z0-9_]{1,70}$/.test(event.code) ? event.code : 'WECHAT_ATTACHMENT_UI_FAILED', granted));
+        else if (event.type === 'error') finish(wechatAttachmentUiError(event, granted));
         else return finish(fault('WECHAT_ATTACHMENT_UI_PROTOCOL_INVALID', granted));
       }
     });
@@ -183,9 +192,15 @@ export function createWechatMediaTransport({ dataDir, signal, assertReady, verif
           inspectWechatAttachment(attachment);
           attempt.attempted = true; attempt.state = 'dispatching'; attempt.startedAt = Date.now(); save(filename, attempt);
         };
-        const native = await nativeRunner(Object.freeze({ path: attachment.path, name: attachment.name, sha256: attachment.sha256,
-          size: attachment.size, mime: attachment.mime, mediaType: attachment.mediaType, deliveryId: attachment.deliveryId,
-          targetName: target.name, targetWxid: target.wxid, account: identity.account }), { signal, beforeSubmit });
+        let native;
+        try {
+          native = await nativeRunner(Object.freeze({ path: attachment.path, name: attachment.name, sha256: attachment.sha256,
+            size: attachment.size, mime: attachment.mime, mediaType: attachment.mediaType, deliveryId: attachment.deliveryId,
+            targetName: target.name, targetWxid: target.wxid, account: identity.account }), { signal, beforeSubmit });
+        } catch (error) {
+          if (error?.attempted === false && INPUT_PREFLIGHT_CODES.has(error?.code)) attempt.attempted = false;
+          throw error;
+        }
         if (!grantUsed || !attempt.attempted || native?.submitted !== true || native.targetChecked !== true || native.windowChecked !== true) throw fault('WECHAT_ATTACHMENT_UI_PROTOCOL_INVALID', attempt.attempted);
         const deadline = Date.now() + receiptTimeoutMs;
         do {
