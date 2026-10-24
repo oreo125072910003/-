@@ -1,0 +1,66 @@
+﻿# Detached one-shot repair: stop DSH, rewrite stale session notices (frame-aware),
+# restart the MCP server so the new fetch_paper tool loads, then start DSH.
+# ASCII only; saved as UTF-8 with BOM.
+param(
+  [int]$DelaySeconds = 12
+)
+
+$ErrorActionPreference = 'Continue'
+$root = 'F:\deepseek工作区\wechat-pc-bridge'
+$log = Join-Path $root 'final_fix.log'
+$exe = 'F:\deepseek harness\DeepSeek Harness.exe'
+$node = Join-Path $env:USERPROFILE '.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe'
+$sessionFile = 'C:\Users\ADMIN\.dsh\sessions\--F-deepseek~5DE5~4F5C~533A--\social-b156bb208b9bcbc2320c9464e48fd091\session.v4.jsonl.zstd'
+
+function Write-Log($msg) {
+  $line = "{0} {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg
+  Add-Content -Path $log -Value $line -Encoding UTF8
+}
+
+function Test-Port([int]$Port) {
+  $client = [System.Net.Sockets.TcpClient]::new()
+  try { $task = $client.ConnectAsync('127.0.0.1', $Port); return ($task.Wait(900) -and $client.Connected) }
+  catch { return $false } finally { $client.Dispose() }
+}
+
+function Stop-Dsh {
+  Get-Process 'DeepSeek Harness' -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowHandle -ne 0 } |
+    ForEach-Object { [void]$_.CloseMainWindow() }
+  $deadline = (Get-Date).AddSeconds(15)
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 2
+    if (-not (Get-Process 'DeepSeek Harness' -ErrorAction SilentlyContinue)) { break }
+  }
+  if (Get-Process 'DeepSeek Harness' -ErrorAction SilentlyContinue) {
+    Get-Process 'DeepSeek Harness' -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Seconds 4
+  }
+}
+
+Write-Log ("=== 一次性修复 (延迟 ${DelaySeconds}s) ===")
+Start-Sleep -Seconds $DelaySeconds
+
+Write-Log '1) 停 DSH'
+Stop-Dsh
+
+Write-Log '2) 改写会话旧提示(按帧解压)'
+& $node (Join-Path $root '_fix_notes_v2.mjs') $sessionFile 2>&1 | ForEach-Object { Write-Log ('   ' + $_) }
+
+Write-Log '3) 重启 MCP 服务(加载 fetch_paper)'
+Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" |
+  Where-Object { $_.CommandLine -like "*mcp_dsh_server*" } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Start-Sleep -Seconds 2
+Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+  CommandLine = 'wscript.exe "F:\deepseek工作区\wechat-pc-bridge\start_hidden.vbs"' } | Out-Null
+Start-Sleep -Seconds 4
+Write-Log ('   mcp 8765 = ' + (Test-Port 8765))
+
+Write-Log '4) 启动 DSH'
+Start-Process -FilePath $exe
+Start-Sleep -Seconds 45
+Write-Log ('   11230 = ' + (Test-Port 11230))
+Write-Log ('   bridge 11229 = ' + (Test-Port 11229))
+Write-Log ('   hook 30001 = ' + (Test-Port 30001))
+Write-Log '=== 完成 ==='

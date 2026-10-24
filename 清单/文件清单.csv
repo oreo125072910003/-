@@ -1,0 +1,56 @@
+﻿类别,路径,类型,大小,说明
+00-入口,G:\小助手,目录,16929.2 MB / 85670 文件,r
+00-入口,G:\小助手\README.md,文件,0.00 MB,
+01-主程序,G:\wechat-deepseek\app\WeChatAgent.exe,文件,212.52 MB,Electron 桌面客户端 (212MB)
+01-主程序,G:\wechat-deepseek\app\resources\project,目录,13.6 MB / 1389 文件,安装包内的项目副本(deployment 校验源)
+01-主程序,G:\wechat-deepseek\app\resources,目录,1046.6 MB / 2152 文件,资源目录
+02-项目,G:\wechat-deepseek\data\workspace,目录,910.8 MB / 3359 文件,运行中的真项目 (849MB)
+02-项目,G:\wechat-deepseek\data\workspace\config,目录,0.0 MB / 6 文件,主配置：wechatagent.json / 凭据 / 策略文件
+02-项目,G:\wechat-deepseek\data\workspace\roles,目录,0.1 MB / 9 文件,人格 md
+02-项目,G:\wechat-deepseek\data\workspace\scripts,目录,1.0 MB / 83 文件,manage.ps1、reader-api.py、hook-onebot.mjs、console-server.mjs 等
+02-项目,G:\wechat-deepseek\data\workspace\components,目录,3.7 MB / 169 文件,qq-bridge(社交桥)、WeChat-Hook(hook源码)、weflow-cli(读库)
+02-项目,G:\wechat-deepseek\data\workspace\packages,目录,7.1 MB / 1111 文件,dsh-social-bridge-plugin(DSH插件)、extension-runtime
+02-项目,G:\wechat-deepseek\data\workspace\public\console,目录,1.5 MB / 24 文件,网页控制台静态资源
+02-项目,G:\wechat-deepseek\data\workspace\docs,目录,0.0 MB / 19 文件,项目自带 19 篇说明文档
+02-项目,G:\wechat-deepseek\data\workspace\extensions\skills,目录,0.0 MB / 2 文件,扩展技能(meme-search)
+02-项目,G:\wechat-deepseek\data\workspace\state,目录,897.3 MB / 1931 文件,运行状态与日志
+02-项目,G:\wechat-deepseek\data\workspace\state\logs,目录,0.0 MB / 10 文件,服务日志(排障首先看这里)
+02-项目,G:\wechat-deepseek\data\workspace\state\hook,目录,861.5 MB / 227 文件,挂载版微信客户端 4.1.10.27
+02-项目,G:\wechat-deepseek\data\workspace\state\stickers,目录,30.1 MB / 73 文件,表情包缓存/发送记录
+02-项目,G:\wechat-deepseek\data\workspace\state\media,目录,2.2 MB / 37 文件,媒体缓存
+02-项目,G:\wechat-deepseek\data\workspace\state\text-deliveries,目录,1.7 MB / 1491 文件,文本发送回执记录
+02-项目,G:\wechat-deepseek\data\workspace\config\wechatagent.json,文件,0.01 MB,总配置：账号/白名单/授权/人格
+02-项目,G:\wechat-deepseek\data\workspace\scripts\manage.ps1,文件,0.02 MB,一键启停入口
+02-项目,G:\wechat-deepseek\data\workspace\scripts\reader-api.py,文件,0.06 MB,读微信数据库 API(5031)
+02-项目,G:\wechat-deepseek\data\workspace\scripts\hook-onebot.mjs,文件,0.04 MB,OneBot 适配器/发送(11229/8766)
+02-项目,G:\wechat-deepseek\data\workspace\scripts\console-server.mjs,文件,0.05 MB,控制台后端(WeChatAgent 内嵌)
+02-项目,G:\wechat-deepseek\data\workspace\components\qq-bridge\src\social-bridge.js,文件,0.01 MB,社交桥主程序
+02-项目,G:\wechat-deepseek\data\workspace\components\qq-bridge\src\core\social-engine.js,文件,0.04 MB,对话调度/群消息规则/发送纪律
+02-项目,G:\wechat-deepseek\data\workspace\packages\dsh-social-bridge-plugin,目录,7.0 MB / 1108 文件,DSH 微信插件(会话/工具/上下文)
+02-项目,G:\wechat-deepseek\data\workspace\roles\小助手.md,文件,0.02 MB,小助手人格(每轮读取，改完立即生效)
+03-运行时,G:\wechat-deepseek\data\runtimes,目录,229.7 MB / 804 文件,项目 Python 3.13
+03-运行时,C:\Users\ADMIN\.dsh\local-fixes\powershell-7.6.5,目录,244.7 MB / 658 文件,项目自带 PowerShell 7
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge,目录,87.3 MB / 528 文件,电脑桥接 MCP(8765)
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge\mcp_dsh_server.py,文件,0.13 MB,MCP 服务本体(16 个工具)
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge\config.json,文件,0.00 MB,桥接配置(token/代理/目标)
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge\send_wechat_native.ps1,文件,0.02 MB,微信 UI 发送脚本(文字/图片/文件)
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge\start_hidden.vbs,文件,0.00 MB,后台启动 pcbridge
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge\pcbridge_watchdog_loop.ps1,文件,0.00 MB,看门狗循环
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge\pcbridge_watchdog.vbs,文件,0.00 MB,看门狗隐藏启动
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge\restart_wx_software.ps1,文件,0.00 MB,软件渲染重启微信客户端
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge\wx_client_watchdog.ps1,文件,0.00 MB,微信客户端看门狗
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge\bridge.log,文件,0.17 MB,桥接日志
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge\watchdog_pcbridge.log,文件,0.00 MB,看门狗日志
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge\README.md,文件,0.01 MB,桥接说明
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge\README-文件发送.md,文件,0.00 MB,文件发送说明
+04-电脑桥接,F:\deepseek工作区\wechat-pc-bridge\_diag_archive_20261023,目录,29.8 MB / 353 文件,诊断脚本归档(52 个历史脚本)
+05-DSH,F:\deepseek harness,目录,1043.3 MB / 7814 文件,DSH 桌面端(1GB)
+05-DSH,C:\Users\ADMIN\.dsh,目录,1963.0 MB / 36933 文件,DSH 用户目录(1GB)
+05-DSH,C:\Users\ADMIN\.dsh\profiles\desktop\cordis.patch.yml,文件,0.00 MB,DSH 插件补丁(MCP/模型/主题)
+05-DSH,C:\Users\ADMIN\.dsh\sessions,目录,50.0 MB / 229 文件,DSH 会话记录
+05-DSH,C:\Users\ADMIN\.dsh\dsh-expression.json,文件,0.00 MB,表情包设置
+05-DSH,C:\Users\ADMIN\.dsh\meme-packs,缺失,,表情包图库
+06-合同助手,C:\Users\ADMIN\Documents\电脑管理\contract-helper,目录,272.6 MB / 3733 文件,合同助手项目
+06-合同助手,C:\Users\ADMIN\Documents\电脑管理\contract-helper\desktop\成品_合同助手2.3最终版,目录,4.8 MB / 5 文件,合同助手 MCP + 桌面版
+06-合同助手,C:\Users\ADMIN\Documents\电脑管理\contract-helper\生成的合同,目录,0.0 MB / 0 文件,已生成合同
+07-微信数据,F:\wx file,目录,11031.4 MB / 30259 文件,微信数据库/文件缓存(勿手动改)

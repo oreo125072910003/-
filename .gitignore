@@ -1,0 +1,51 @@
+# Personal settings and snapshots
+/配置快照/
+**/config/wechatagent.json*
+**/pcbridge/config.json
+**/wechat-io-config.json
+**/.credentials.yaml
+.env
+.env.*
+!.env.example
+*.token
+*.pem
+*.key
+
+# Runtime data and local dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+**/state/
+**/logs/
+*.log
+*.sqlite*
+*.db
+*.db-wal
+*.db-shm
+
+# Generated builds and backups
+**/dist/
+**/build/
+**/out/
+**/backups/
+*.bak
+*.bak_*
+*.bak-*
+*.zip
+*.7z
+*.exe
+*.dll
+*.pdb
+.DS_Store
+Thumbs.db
+
+# Local diagnostics, conversation exports and historical copies
+/代码/pcbridge/_grp_dump.json
+/代码/pcbridge/rebuild_session.ps1
+*.before-*
+/代码/合同助手/mcp/qa/final/
+/代码/合同助手/mcp/qa/integration/
+/代码/合同助手/mcp/qa/sdk-check/
+/代码/合同助手/mcp/qa/release-verification.json

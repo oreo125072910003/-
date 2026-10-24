@@ -1,0 +1,6 @@
+本资料包已脱敏：token 类字段替换为 REDACTED_SEE_REAL_CONFIG。
+真实凭证位置见 docs/02_运行与运维手册.md 第八节；恢复运行前需把 token 换回真实值。
+凭据文件（*.token、wechat-io-config.json、.credentials.yaml）未包含在包内。
+
+隐私说明：包内不含任何聊天截图/诊断截图（已剔除 48 张，约 12 MB）；
+代码目录里只有 UI 图标与标题指纹这 4 张 png。

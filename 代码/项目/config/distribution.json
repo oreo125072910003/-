@@ -1,0 +1,14 @@
+{
+  "version": "0.3.9",
+  "buildId": "62c7611ac6f4bc49",
+  "runtimeRevision": "db3bce768f85",
+  "installed": true,
+  "dataHome": "G:\\wechat-deepseek\\data",
+  "python": "G:\\wechat-deepseek\\data\\runtimes\\0.3.9-db3bce768f85\\python\\python.exe",
+  "node": "G:\\wechat-deepseek\\data\\runtimes\\0.3.9-db3bce768f85\\node.exe",
+  "dshBundled": false,
+  "dsh": "",
+  "dshHome": "C:\\Users\\ADMIN\\.dsh",
+  "externalDshHome": "C:\\Users\\ADMIN\\.dsh",
+  "assets": "G:\\wechat-deepseek\\app\\resources"
+}

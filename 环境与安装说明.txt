@@ -1,0 +1,29 @@
+小助手 完整资料包（代码版） 2026-10-24
+=====================================
+
+本包包含：
+- docs/           六篇项目文档（总览/清单/运维/功能/优化/变更）
+- 清单/文件清单.csv
+- 一键脚本/       启动、停止、重启并应用、查看状态、备份配置
+- 代码/项目/      运行中的项目全量源码（components/config/docs/extensions/packages/public/roles/scripts + 根文件；已排除 node_modules 与 state 运行时数据）
+- 代码/项目-安装包副本/  app\resources\project 全量（升级校验用；改代码需与 代码/项目 同步）
+- 代码/pcbridge/  电脑桥接全部源码脚本（mcp_dsh_server.py、send_wechat_native.ps1、看门狗、白屏重启、账号等待、标题指纹、说明）
+- 代码/合同助手/  合同助手 MCP 源码/资产/构建脚本（不含 Electron 桌面版二进制）
+- 配置快照/       wechatagent.json、9 个人格、bridge-config.json、DSH 补丁、表情设置（token 已脱敏）
+
+没有进包（体积太大或属于安装物/隐私数据，原位置见 docs/01_目录与文件清单.md）：
+- G:\wechat-deepseek\app\WeChatAgent.exe 等主程序本体（1.26 GB）
+- F:\deepseek harness  DSH 桌面端（1.0 GB）
+- G:\wechat-deepseek\data\runtimes  Python 运行时（108 MB）
+- C:\Users\ADMIN\.dsh\dsh-runtimes、profiles 里的 node_modules、electron、speech-to-text（约 1.5 GB）
+- 合同助手 desktop\（Electron 桌面版 233 MB）
+- workspace\state\ 运行时数据 897 MB（其中挂载版微信客户端 861 MB；另有表情缓存、发送回执、日志）
+- F:\wx file  微信聊天数据库（约 10.8 GB，含隐私）
+- 所有 *.log 日志、会话记录、凭据文件（native-token.txt、social-dsh-token.txt、wechat-io-config.json、.credentials.yaml）
+
+恢复方式：
+1. 装 WeChatAgent/DSH/Python 运行时（原位置）；
+2. 把 代码/项目 覆盖回 G:\wechat-deepseek\data\workspace（先停服务）；
+3. 把 代码/pcbridge 放回 F:\deepseek工作区\wechat-pc-bridge，按需恢复 config.json 的 token；
+4. 配置快照里 token 需换回真实值；
+5. node --check / py_compile 检查后「重启并应用」。
