@@ -81,7 +81,7 @@ export async function readHostedCatalog(settings = {}) {
 }
 
 /** Product-owned native session, using the account already logged into Harness. */
-export async function runHostedTask({ prompt, workspace, sessionId, signal, onEvent, settings = {} } = {}) {
+export async function runHostedTask({ prompt, workspace, sessionId, conversation, signal, onEvent, settings = {} } = {}) {
   const emit = (type, message) => { try { onEvent?.({ type, message }); } catch {} };
   const taskId = randomUUID(); let config, submitted = false, cancelled = signal?.aborted === true, lastStatus, lastSession = sessionId;
   const onAbort = () => { cancelled = true; };
@@ -105,7 +105,7 @@ export async function runHostedTask({ prompt, workspace, sessionId, signal, onEv
     emit('status', '正在使用现有 Harness 登录建立小助手会话…');
     submitted = true;
     const personaPrefix = settings.personaPrefix ?? settings.persona;
-    let value = verifyTask(await request(config, '/tasks', { method: 'POST', body: { taskId, prompt, workspace, ...(sessionId ? { sessionId } : {}), ...(personaPrefix ? { personaPrefix } : {}), ...(settings.hostedOwnerGrants ? { authority: 'product-owner', ownerGrants: settings.hostedOwnerGrants } : {}) } }), taskId);
+    let value = verifyTask(await request(config, '/tasks', { method: 'POST', body: { taskId, prompt, workspace, ...(sessionId ? { sessionId } : {}), ...(conversation ? { conversation } : {}), ...(personaPrefix ? { personaPrefix } : {}), ...(settings.hostedOwnerGrants ? { authority: 'product-owner', ownerGrants: settings.hostedOwnerGrants } : {}) } }), taskId);
     lastSession = value.sessionId;
     const deadline = Date.now() + (settings.timeoutMs ?? 10 * 60 * 1000);
     while (!final(value)) {

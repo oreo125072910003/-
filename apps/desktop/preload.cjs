@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const methods = ['getBootstrap','listTasks','getTask','createTask','cancelTask','getSettings','saveSettings','getWorkflowsState','exportTaskDocument',
   'pickAttachments','openArtifact','openWorkspace','openContract',
   'getWechatState','importWechatConnection','saveWechatSettings','connectWechat','disconnectWechat','draftWechatReply','sendWechatReply','searchWechatContacts','refreshWechatProfile',
-  'getWechatSessions','getWechatHistory','resolveWechatImage','getWechatStickers','sendWechatMessage','sendWechatSticker','importLegacyExtensions','refreshDshCatalog',
+  'getWechatSessions','getWechatHistory','resolveWechatImage','getWechatStickers','sendWechatMessage','sendWechatSticker','pickWechatAttachments','sendWechatAttachment','importLegacyExtensions','refreshDshCatalog',
   'getMailState','importMailAccounts','importMailAccountsFile','syncMail','getMailMessage','createMailDraft','sendMailDraft','resolveMailAttachment','saveMailAttachment','draftMailReply',
   'getDshAccessState','refreshDshAccessCatalog','saveDshOwnerGrants',
   'getExtensionsState','importMcpManifest','installBuiltinMcp','enableMcp','disableMcp','testMcp','setMcpTools',

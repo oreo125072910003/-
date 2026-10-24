@@ -112,7 +112,8 @@ test('WeChat bridge normalizes allowlisted SSE messages and deduplicates reconne
   f.emit(f.message({ isSend: true, rawid: '7003' }));
   f.emit(f.message({ sessionId: 'test@chatroom', talkerId: 'wxid_group_friend', conversationId: 202, groupName: '测试群', rawid: '7004' }));
   await until(() => f.messages.length === 2);
-  assert.deepEqual(Object.keys(f.messages[0]).sort(), ['conversation_id', 'conversation_name', 'kind', 'message_id', 'self_id', 'sender_id', 'sender_name', 'text', 'time']);
+  assert.deepEqual(Object.keys(f.messages[0]).sort(), ['conversation_id', 'conversation_name', 'kind', 'message_id', 'segments', 'self_id', 'sender_id', 'sender_name', 'text', 'time']);
+  assert.deepEqual(f.messages[0].segments, [{type:'text',data:{text:'你好，小助手'}}]);
   assert.equal(f.messages[0].conversation_id, '101');
   assert.equal(f.messages[0].text, '你好，小助手');
   assert.equal(f.messages[0].conversation_name, '测试朋友');
@@ -124,6 +125,23 @@ test('WeChat bridge normalizes allowlisted SSE messages and deduplicates reconne
   f.emit(f.message()); await delay(40);
   assert.equal(f.messages.length, 2);
   assert(f.states.some(s => s.state === 'error' && !s.readerConnected));
+});
+
+test('WeChat retains trusted group wake metadata and distinguishes verified human self-sends', async t => {
+  const f=await fixture(t);await f.bridge.start(f.config);await until(()=>f.bridge.getStatus().state==='ready');
+  const group={sessionId:'test@chatroom',talkerId:'wxid_group_friend',conversationId:202,groupName:'测试群'};
+  f.emit(f.message({...group,rawid:'7101',content:'@小助手\u2005请接着聊'}));
+  f.emit(f.message({...group,rawid:'7102',type:49,content:'引用回复',quoteReply:{version:1,reply:'继续',reference:{senderId:'wxid_self_0001',senderName:'本人',conversationId:'test@chatroom',messageId:'9001',time:'',kind:'1',text:'之前的答复'}}}));
+  f.emit(f.message({rawid:'7103',talkerId:'wxid_self_0001',isSend:true}));
+  f.emit(f.message({rawid:'7104',talkerId:'wxid_imposter',isSend:true}));
+  f.emit(f.message({rawid:'7105',talkerId:'wxid_self_0001',isSend:true,conversationId:999}));
+  await until(()=>f.messages.length===3);
+  assert(f.messages[0].segments.some(item=>item.type==='at'&&item.data.qq===f.messages[0].self_id));
+  assert.equal(f.messages[1].quoteReply.reference.senderRelation,'self');
+  assert.equal(f.messages[1].quoteReply.reply,'继续');
+  assert.equal(f.messages[2].outgoing,true);assert.equal(f.messages[2].sender_id,f.messages[2].self_id);
+  assert.equal(f.messages[2].text,'你好，小助手','retain bounded text to distinguish our automatic echo from a human reply');
+  await delay(40);assert.equal(f.messages.length,3);
 });
 
 test('WeChat sends require server receipts and a delivery ID is not resubmitted', async t => {

@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { HookOneBot, conversationId, onebotId } from '../../代码/项目/scripts/hook-onebot.mjs';
 import { normalizeOneBotEvent } from '../../代码/项目/components/qq-bridge/src/onebot/normalize.js';
 import { validateStickerSettings } from '../../代码/项目/components/qq-bridge/src/core/sticker-policy.js';
+import { createWechatMediaTransport } from './media-transport.mjs';
 
 const MAX_EVENT_BYTES = 256_000;
 const MAX_JSON_BYTES = 1_200_000;
@@ -63,6 +64,7 @@ export function createWechatBridge({
   onMessage = () => {}, onState = () => {}, onError = () => {}, fetchImpl = fetch,
   reconnectDelayMs = 1_500, healthIntervalMs = 5_000, idleTimeoutMs = 35_000,
   requestTimeoutMs = 5_000, receiptTimeoutMs = 18_000, pollMs = 400,
+  mediaNativeRunner,
 } = {}) {
   for (const value of [reconnectDelayMs, healthIntervalMs, idleTimeoutMs, requestTimeoutMs, receiptTimeoutMs, pollMs]) {
     if (!Number.isInteger(value) || value < 1 || value > 60_000) throw fault('WECHAT_TIMEOUT_INVALID');
@@ -72,6 +74,7 @@ export function createWechatBridge({
   let lifecycle = null, streamController = null, loop = null, healthTimer = null, healthPending = null;
   let activeSend = null, startPending = null, stopPending = null, generation = 0, receiveFailed = false;
   let account = null;
+  let mediaTransport = null;
   const controllers = new Set(), seen = new Map();
 
   function publish(next) {
@@ -161,6 +164,9 @@ export function createWechatBridge({
     await verify();
     account = { id: String(verified.selfId), name: displayText(profile.nickname, 200),
       wxid: displayText(profile.wxid, 256), alias: displayText(profile.alias, 200), source };
+    // incoming() reloads this injected object, so the actual verified nickname
+    // survives reloads without changing any legacy configuration on disk.
+    if (account.name) ownAdapter.project.account.nicknames = [...new Set([...ownAdapter.project.account.nicknames, account.name])];
     publish({ account: { ...account }, profileError: undefined });
     return { ...account };
   }
@@ -273,6 +279,25 @@ export function createWechatBridge({
     return result.data;
   }
 
+  async function resolveMediaTarget(kind, target) {
+    assertTarget(kind, target);
+    const ownAdapter = adapter, signal = lifecycle.signal;
+    const wxid = await ownAdapter.resolveTarget(kind, target);
+    const sessions = await ownAdapter.reader('/api/v1/sessions?limit=500');
+    const matches = (sessions?.sessions ?? []).filter(item => item?.username === wxid);
+    if (matches.length !== 1 || matches[0].ambiguous === true) throw fault('WECHAT_ATTACHMENT_TARGET_AMBIGUOUS');
+    const name = displayText(matches[0].displayName, 200);
+    if (!name || name !== matches[0].displayName) throw fault('WECHAT_ATTACHMENT_UI_TARGET_UNREADABLE');
+    const contacts = await ownAdapter.reader('/api/v1/contacts?kind=' + (kind === 'group' ? 'groups' : 'private') +
+      '&keyword=' + encodeURIComponent(name) + '&limit=100&refresh=1');
+    if (!Array.isArray(contacts?.contacts) || contacts.contacts.length >= 100) throw fault('WECHAT_ATTACHMENT_TARGET_AMBIGUOUS');
+    const named = contacts.contacts.filter(item => [item?.remark, item?.displayName, item?.nickname].some(value => value === name));
+    if (named.length !== 1 || named[0].username !== wxid || named[0].ambiguous === true) throw fault('WECHAT_ATTACHMENT_TARGET_AMBIGUOUS');
+    if (!current(signal) || adapter !== ownAdapter) throw fault('WECHAT_NOT_CONNECTED');
+    assertTarget(kind, target);
+    return { wxid, name };
+  }
+
   function normalized(payload) {
     // Native source IDs are validated before invoking the legacy normalizer.
     if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
@@ -283,6 +308,18 @@ export function createWechatBridge({
         payload.sourceName !== undefined && (typeof payload.sourceName !== 'string' || payload.sourceName.length > 200) ||
         payload.senderName !== undefined && (typeof payload.senderName !== 'string' || payload.senderName.length > 200) ||
         payload.groupName !== undefined && (typeof payload.groupName !== 'string' || payload.groupName.length > 200)) return null;
+    // The original adapter filters our own outgoing events. Retain only a
+    // verified self-send signal here so a human reply can stop a pending AI reply.
+    if(payload.event==='message.new'&&payload.isSend===true&&payload.talkerId===adapter.ownWxid){
+      try{
+        const kind=payload.sessionId.includes('@chatroom')?'group':'private';
+        const target=String(conversationId(payload.sessionId,payload.groupName,payload.conversationId));
+        if(!adapter.allowed(kind,target))return null;
+        const self=String(onebotId(adapter.ownWxid)),time=Number(payload.timestamp);
+        if(!Number.isSafeInteger(time)||time<0)return null;
+        return{self_id:self,kind,conversation_id:target,sender_id:self,outgoing:true,text:payload.type===1?payload.content.slice(0,16000):'',message_id:String(payload.rawid),time};
+      }catch{return null;}
+    }
     const event = adapter.incoming(payload);
     if (!event) return null;
     const legacy = normalizeOneBotEvent('wechat', 'wechat-hook', event);
@@ -300,6 +337,8 @@ export function createWechatBridge({
       sender_name: event.sender.nickname, time,
       ...(legacy?.images?.length ? { images: legacy.images } : {}),
       ...(legacy?.interaction ? { interaction: legacy.interaction } : {}),
+      ...(legacy?.segments?.length ? {segments:legacy.segments.slice(0,32).filter(item=>item?.type==='at'||item?.type==='text').map(item=>item.type==='at'?{type:'at',data:{qq:String(item.data?.qq??'').slice(0,32)}}:{type:'text',data:{text:String(item.data?.text??'').slice(0,16000)}})} : {}),
+      ...(legacy?.quoteReply ? {quoteReply:structuredClone(legacy.quoteReply)} : {}),
     };
   }
 
@@ -408,6 +447,7 @@ export function createWechatBridge({
     await Promise.allSettled([loop, healthPending, activeSend].filter(Boolean));
     loop = null; healthPending = null; activeSend = null; lifecycle = null;
     adapter = null; config = null; identity = null; accountLocked = false; receiveFailed = false; account = null;
+    mediaTransport = null;
     publish({ state: 'offline', detail: 'WECHAT_DISCONNECTED', accountVerified: false, readerConnected: false, selfId: undefined, account: null, profileError: undefined });
   }
 
@@ -438,6 +478,15 @@ export function createWechatBridge({
         try { return await verify(); }
         catch (error) { if (current()) { markError(error); streamController?.abort(); } throw error; }
       };
+      mediaTransport = createWechatMediaTransport({ dataDir: config.dataDir, signal: lifecycle.signal,
+        assertReady: (kind, target) => {
+          assertTarget(kind, target);
+          if (state.state !== 'ready' || !state.accountVerified || !state.readerConnected) throw fault('WECHAT_NOT_READY');
+        },
+        verify: async () => { const found = await verify(); return { ...found, selfWxid: adapter.ownWxid }; },
+        resolveTarget: resolveMediaTarget, readMessages: wxid => adapter.messages(wxid),
+        ...(mediaNativeRunner ? { nativeRunner: mediaNativeRunner } : {}), receiptTimeoutMs, pollMs,
+      });
       const found = await verify();
       if (epoch !== generation) throw fault('WECHAT_START_CANCELLED');
       publish({ selfId: String(found.selfId), accountVerified: true });
@@ -501,6 +550,15 @@ export function createWechatBridge({
         message: [{ type: 'wechat_sticker', data: { id } }], wechatagent_delivery_id: deliveryId } }, deliveryId);
   }
 
+  async function sendAttachment(value = {}) {
+    assertTarget(value.kind, value.target);
+    if (activeSend) throw fault('SENDER_BUSY');
+    if (!mediaTransport || state.state !== 'ready' || !state.accountVerified || !state.readerConnected) throw fault('WECHAT_NOT_READY');
+    const job = mediaTransport.send(value); activeSend = job;
+    try { return await job; }
+    finally { if (activeSend === job) activeSend = null; }
+  }
+
   async function performSend(request, deliveryId) {
     if (!current() || !adapter || accountLocked || receiveFailed || state.state !== 'ready' || !state.accountVerified || !state.readerConnected) {
       throw fault(accountLocked ? 'WECHAT_ACCOUNT_CHANGED' : 'WECHAT_NOT_READY');
@@ -521,5 +579,5 @@ export function createWechatBridge({
   }
 
   return { start, stop, getStatus: () => ({ ...state, account: account ? { ...account } : null }),
-    getProfile, getDirectory, getSessions, getHistory, resolveImage, getStickers, sendText, sendSticker };
+    getProfile, getDirectory, getSessions, getHistory, resolveImage, getStickers, sendText, sendSticker, sendAttachment };
 }

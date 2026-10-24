@@ -56,7 +56,7 @@ async function quit(){
 }
 async function registerIPC(){
   for(const name of ['getBootstrap','listTasks','getTask','createTask','cancelTask','getSettings','saveSettings','getWorkflowsState','exportTaskDocument',
-    'getWechatState','saveWechatSettings','connectWechat','disconnectWechat','draftWechatReply','sendWechatReply','searchWechatContacts','refreshWechatProfile','getWechatSessions','getWechatHistory','resolveWechatImage','getWechatStickers','sendWechatMessage','sendWechatSticker',
+    'getWechatState','saveWechatSettings','connectWechat','disconnectWechat','draftWechatReply','sendWechatReply','searchWechatContacts','refreshWechatProfile','getWechatSessions','getWechatHistory','resolveWechatImage','getWechatStickers','sendWechatMessage','sendWechatSticker','sendWechatAttachment',
     'importLegacyExtensions','refreshDshCatalog',
     'getMailState','importMailAccounts','syncMail','getMailMessage','createMailDraft','sendMailDraft','resolveMailAttachment','draftMailReply',
     'getDshAccessState','refreshDshAccessCatalog','saveDshOwnerGrants',
@@ -102,7 +102,23 @@ async function registerIPC(){
     if(smoke&&smokeWechat)return service.importWechatConnection(smokeWechat.source);
     const result=await dialog.showOpenDialog(window,{title:'选择现有微信项目文件夹（包含 config 和 state）',defaultPath:wechatSource(),properties:['openDirectory'],buttonLabel:'导入连接'});
     if(result.canceled)return null;
-    return service.importWechatConnection(result.filePaths[0]);
+    return service.importWechatConnection(result.filePaths[0],{automatic:true});
+  });
+  ipcMain.handle('assistant:pickWechatAttachments',async(event,value={})=>{
+    if(!trusted(event))throw Error('此窗口无权选择微信附件。');
+    const mediaType=value?.mediaType;
+    if(!['image','file'].includes(mediaType))throw Error('请选择图片或文件。');
+    let filenames;
+    if(smoke&&smokeAttachment)filenames=[mediaType==='image'?path.join(smokeRoot,'合成图片.png'):smokeAttachment];
+    else{
+      const result=await dialog.showOpenDialog(window,{title:mediaType==='image'?'选择要发到微信的图片':'选择要发到微信的文件',properties:['openFile'],buttonLabel:'添加附件',
+        ...(mediaType==='image'?{filters:[{name:'图片',extensions:['png','jpg','jpeg','gif','webp','bmp']}]}:{})});
+      if(result.canceled)return[];
+      filenames=result.filePaths;
+    }
+    if(filenames.length!==1)throw Error('每次请选择一个微信附件。');
+    service.grantWechatAttachments(filenames);
+    return[await service.stageWechatAttachment({path:filenames[0],mediaType})];
   });
   ipcMain.handle('assistant:pickAttachments',async event=>{
     if(!trusted(event))throw Error('此窗口无权选择资料。');
@@ -126,6 +142,8 @@ async function registerIPC(){
 }
 async function smokeTest(){
   const artifactsDir=process.env.XIAOZHUSHOU_SMOKE_OUTPUT||path.join(projectRoot,'dist','smoke');
+  const mediaNativeScript=app.isPackaged?path.join(process.resourcesPath,'app.asar.unpacked','packages','wechat-bridge','send-attachment-ui.ps1'):path.join(projectRoot,'packages','wechat-bridge','send-attachment-ui.ps1');
+  if(!fs.existsSync(mediaNativeScript)||!fs.statSync(mediaNativeScript).isFile())throw Error('微信附件发送脚本未在本机文件系统中展开。');
   fs.mkdirSync(artifactsDir,{recursive:true});
   const failures=[];window.webContents.on('console-message',details=>{if(details.level==='error')failures.push(details.message);});
   const source=path.join(smokeRoot,'示例资料.txt');fs.writeFileSync(source,'这是用于桌面验收的合成资料。\n数量：3\n状态：待核对\n');
@@ -176,6 +194,8 @@ async function smokeTest(){
   await window.webContents.executeJavaScript(`const reply=document.querySelector('#wechat-reply');reply.value='合成验收：材料已收到。';reply.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#wechat-reply-form').requestSubmit();`);
   await waitFor(async()=>(await service.getWechatState()).outbox[0]?.status==='delivered','微信离线发送回执未验证');
   if(smokeWechat.sends!==1)throw Error('微信发送次数异常');
+  const wechatAutoUI=await require('./smoke-wechat-auto.cjs').verifyWechatAutoUI({window,service,waitFor,artifactsDir,syntheticOnly:true});
+  const wechatMediaUI=await require('./smoke-wechat-media.cjs').verifyWechatMediaUI({window,service,waitFor,artifactsDir,syntheticOnly:true});
   await new Promise(resolve=>setTimeout(resolve,500));
   fs.writeFileSync(path.join(artifactsDir,'desktop-wechat.png'),(await window.webContents.capturePage()).toPNG());
   await service.disconnectWechat();await smokeWechat.close();
@@ -224,7 +244,7 @@ async function smokeTest(){
   const report={ok:true,version:app.getVersion(),dataDir:smokeRoot,taskId:task.id,status:detail.task.status,artifactCount:detail.artifacts.length,
     rendererNodeAccess:isolation.node,preloadAPI:isolation.api,windowsSecretProtection:true,reopenPreserved:true,rendererSubmitExercised:true,
     runtimeDetected:bootstrap.runtime.available,runtimeVersion:bootstrap.runtime.version,contractAvailable:!!contractExecutable(),wechatRendererFlow:true,wechatProfileNameShown:true,wechatSyntheticSends:smokeWechat.sends,extensionsRendererFlow:true,
-    ...extensionUiReport,...mailUiReport,consoleErrors:failures,capturedAt:new Date().toISOString()};
+    ...wechatAutoUI,...wechatMediaUI,mediaNativeScriptAccessible:true,...extensionUiReport,...mailUiReport,consoleErrors:failures,capturedAt:new Date().toISOString()};
   fs.writeFileSync(path.join(artifactsDir,'desktop-smoke.json'),JSON.stringify(report,null,2)+'\n');
   console.log(JSON.stringify(report));await service.close();quitting=true;app.exit(failures.length?1:0);
 }
@@ -234,7 +254,7 @@ async function start(){
   const {createAssistantService}=await import(pathToFileURL(path.join(projectRoot,'apps/service/index.mjs')).href);
   service=await createAssistantService({dataDir:dataRoot,runtime,secretStore:secretStore(),contractAvailable:!!contractExecutable(),builtinMcp:builtinMcp(),legacySources:legacySources()});
   const importIndex=process.argv.indexOf('--connect-wechat-source');
-  if(!smoke&&importIndex>=0){try{await service.importWechatConnection(wechatSource());await service.connectWechat();}catch{ /* The WeChat page retains its error; the desktop remains usable. */ }}
+  if(!smoke&&importIndex>=0){try{if(!(await service.getWechatState()).settings.connectionImported)await service.importWechatConnection(wechatSource(),{automatic:true});}catch{ /* The WeChat page retains its error; the desktop remains usable. */ }}
   await registerIPC();
   window=new BrowserWindow({width:1440,height:960,minWidth:900,minHeight:650,title:'小助手',backgroundColor:'#f8f7f2',show:false,
     webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true,spellcheck:false,devTools:!app.isPackaged}});
@@ -246,6 +266,7 @@ async function start(){
   window.on('close',event=>{if(!quitting){event.preventDefault();window.hide();}});
   await window.loadURL(entry);
   window.show();
+  if(!smoke)void service.resumeWechatOnStartup().catch(()=>{});
   const bitmap=Buffer.alloc(32*32*4);
   for(let y=0;y<32;y++)for(let x=0;x<32;x++){const i=(y*32+x)*4;const dx=x-15.5,dy=y-15.5;if(dx*dx+dy*dy<225){const white=Math.abs(dx)*0.65+Math.abs(dy)<7||Math.abs(dx)+Math.abs(dy)*0.65<7;bitmap[i]=white?235:68;bitmap[i+1]=white?246:93;bitmap[i+2]=white?248:30;bitmap[i+3]=255;}}
   const image=nativeImage.createFromBitmap(bitmap,{width:32,height:32,scaleFactor:1});

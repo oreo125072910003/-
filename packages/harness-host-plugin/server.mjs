@@ -11,6 +11,26 @@ const TASK = /^[a-f0-9-]{36}$/;
 const fault = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const inside = (root, target) => { const relative = path.relative(root, target); return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative); };
 const numeric = (value, fallback, min, max) => Number.isSafeInteger(value) && value >= min && value <= max ? value : fallback;
+const CHANNELS = Object.freeze({ desktop: '桌面', wechat: '微信', mail: '邮件' });
+
+function conversationInfo(value) {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).some(key => !['channel', 'displayName'].includes(key)) ||
+      typeof value.channel !== 'string' || !Object.hasOwn(CHANNELS, value.channel) ||
+      value.displayName !== undefined && (typeof value.displayName !== 'string' || Buffer.byteLength(value.displayName) > 1024)) {
+    throw fault('INVALID_CONVERSATION', '会话显示信息无效。');
+  }
+  // Display metadata never supplies a workspace, session identity, prompt or grants.
+  const displayName = (value.displayName || '').replace(/[\u0000-\u001f\u007f-\u009f\u200b\u200e\u200f\u202a-\u202e\u2060-\u206f\ufeff]/gu, '').replace(/\s+/gu, ' ').trim();
+  return { channel: value.channel, ...(displayName ? { displayName } : {}) };
+}
+function conversationTitle(conversation) {
+  const value = '小助手 · ' + CHANNELS[conversation?.channel || 'desktop'] + (conversation?.displayName ? ' · ' + conversation.displayName : '');
+  let title = '';
+  for (const character of value) { if (Buffer.byteLength(title + character) > 75) break; title += character; }
+  return title.trimEnd();
+}
 
 function equalToken(received, expected) {
   const a = Buffer.from(received || ''), b = Buffer.from(expected);
@@ -39,6 +59,7 @@ function addUsage(total, value) {
 }
 function visible(task) {
   return { taskId: task.id, sessionId: task.sessionId, status: task.status, nativeTerminal: task.nativeTerminal,
+    ...(task.groupId ? { groupId: task.groupId } : {}),
     ...(task.result ? { result: task.result } : {}),
     cancellation: { requested: Boolean(task.cancelReason), confirmed: task.nativeTerminal && Boolean(task.cancelReason) },
     createdAt: task.createdAt, updatedAt: task.updatedAt };
@@ -95,6 +116,41 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     stateQueue = job; return job;
   };
   const update = (task, status) => { task.status = status; task.updatedAt = new Date().toISOString(); };
+  const workspaceRegistry = () => ctx.get?.('workspaceRegistry') ?? ctx.workspaceRegistry;
+  async function nativeGroup(workspace, conversation, signal) {
+    const registry = workspaceRegistry();
+    // Direct older integrations without display metadata remain compatible. The
+    // production plugin injects workspaceRegistry; new conversation callers fail
+    // visibly rather than silently creating an unclassified model conversation.
+    if (!registry && !conversation) return null;
+    if (typeof registry?.resolveByPath !== 'function' || typeof registry?.create !== 'function') throw fault('SESSION_GROUP_UNAVAILABLE', 'Harness 工作空间分类服务尚未就绪。', 503);
+    signal.throwIfAborted();
+    let group = await registry.resolveByPath(workspace);
+    signal.throwIfAborted();
+    if (!group) group = await registry.create(workspace, conversationTitle(conversation));
+    signal.throwIfAborted();
+    if (!group || group.path !== workspace || typeof group.attachSession !== 'function' || !Array.isArray(group.sessionIds)) throw fault('SESSION_GROUP_INVALID', 'Harness 工作空间分类未通过核对。');
+    return group;
+  }
+  async function classifySession(task, group, conversation) {
+    if (!group) return;
+    task.controller.signal.throwIfAborted();
+    const session = task.agent.session, titles = ctx.get?.('sessionTitle') ?? ctx.sessionTitle;
+    const existing = titles?.get?.(session) ?? session.snapshotEvents?.().findLast(event => event.type === 'session/title')?.data;
+    if (!existing?.title) {
+      const title = conversationTitle(conversation);
+      if (typeof titles?.rename === 'function') titles.rename(session, title);
+      else if (typeof session.append === 'function') session.append('session/title', { title, messageSeqs: [], source: { kind: 'user' } });
+      else throw fault('SESSION_TITLE_UNAVAILABLE', 'Harness 会话命名服务尚未就绪。');
+    }
+    // Native attachSession validates the real stored header.cwd. Persist the
+    // header/title first, then attach only when not already accounted for.
+    if (await ctx.sessions.flush(session) === false) throw fault('SESSION_GROUP_SAVE_FAILED', 'Harness 会话分类尚未确认保存。');
+    task.controller.signal.throwIfAborted();
+    if (!group.sessionIds.includes(task.sessionId)) await group.attachSession(task.sessionId);
+    task.controller.signal.throwIfAborted();
+    task.groupId = String(group.id);
+  }
   function finish(task, status, result) {
     if (task.nativeTerminal) return;
     task.nativeTerminal = true; clearTimeout(task.timeout); clearTimeout(task.cancelTimer);
@@ -160,9 +216,10 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     if (typeof body.workspace !== 'string' || !path.isAbsolute(body.workspace)) throw fault('INVALID_WORKSPACE', '工作目录无效。');
     if (body.taskId !== undefined && (typeof body.taskId !== 'string' || !TASK.test(body.taskId))) throw fault('INVALID_TASK', '任务标识无效。');
     if (body.personaPrefix !== undefined && (typeof body.personaPrefix !== 'string' || Buffer.byteLength(body.personaPrefix) > 16384 || body.personaPrefix.includes('\0'))) throw fault('INVALID_PERSONA', '小助手个性设置须为不超过 16 KiB 的文字。');
+    const conversation = conversationInfo(body.conversation);
     let grants;
     try { grants = normalizeOwnerGrants(body); } catch (error) { throw fault(error.code, '主人能力授权格式无效，当前任务未启动。', 403); }
-    const digest = createHash('sha256').update(JSON.stringify([body.prompt, body.workspace, body.sessionId ?? null, grants, body.personaPrefix ?? null])).digest('hex');
+    const digest = createHash('sha256').update(JSON.stringify([body.prompt, body.workspace, body.sessionId ?? null, grants, body.personaPrefix ?? null, conversation ?? null])).digest('hex');
     if (body.taskId && tasks.has(body.taskId)) {
       const existing = tasks.get(body.taskId);
       if (existing.digest !== digest) throw fault('TASK_CONFLICT', '任务标识已被不同请求使用。', 409);
@@ -180,6 +237,7 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     const resumed = body.sessionId !== undefined;
     const sid = resumed ? body.sessionId : 'xzs-' + randomUUID().replaceAll('-', '');
     if (!SESSION.test(sid) || (resumed && (!sessions[sid] || sessions[sid].workspace !== workspace))) throw fault('SESSION_REFUSED', '只能继续由小助手创建的同一工作区会话。', 403);
+    if (resumed && workspaceRegistry()?.archivedSessionIds?.includes(sid)) throw fault('SESSION_ARCHIVED', '此小助手会话已归档，请在产品中开启新会话。', 409);
     if (active.has(sid)) throw fault('SESSION_BUSY', '该小助手会话仍在运行或等待停止确认。', 409);
     if (active.size >= maxConcurrent) throw fault('HOST_BUSY', '小助手 Harness 任务已达到并行上限。', 429);
     for (const [id, old] of tasks) if (old.nativeTerminal && Date.now() - Date.parse(old.updatedAt) > 15 * 60 * 1000) tasks.delete(id);
@@ -187,11 +245,12 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     const task = { id: body.taskId || randomUUID(), digest, grants, controller: new AbortController(), toolCallIds: new Set(), sessionId: sid, status: 'queued', nativeTerminal: false, createdAt: new Date().toISOString(), text: '' };
     task.updatedAt = task.createdAt; tasks.set(task.id, task); active.set(sid, task);
     task.timeout = setTimeout(() => requestCancel(task, 'RUNTIME_TIMEOUT'), turnTimeoutMs); task.timeout.unref?.();
-    void start(task, body, workspace, sid, resumed);
+    void start(task, body, workspace, sid, resumed, conversation);
     return visible(task);
   }
-  async function start(task, body, workspace, sid, resumed) {
+  async function start(task, body, workspace, sid, resumed, conversation) {
     try {
+      const group = await nativeGroup(workspace, conversation, task.controller.signal);
       const setup = async agentCtx => {
         const mounted = await ctx.agentPresets.mount(agentCtx, preset);
         if (mounted?.id !== preset) throw fault('SAFE_PRESET_UNAVAILABLE', '小助手独立文本安全预设尚未正确挂载。');
@@ -210,9 +269,14 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
       if (agent.ctx?.[TEXT_POLICY] !== true) throw fault('SAFE_PRESET_UNAVAILABLE', '小助手会话没有经过独立文本权限检查。');
       task.agent = agent;
       if (task.nativeTerminal) { if (closed) { await handles.get(sid)?.dispose?.(); handles.delete(sid); } return; }
+      await classifySession(task, group, conversation);
+      if (task.nativeTerminal) return;
       task.access = await bindOwnerAccess(agent.ctx, ctx, agent, { grants: task.grants, personaPrefix: body.personaPrefix, active: () => active.get(sid) === task && !task.nativeTerminal && !task.cancelReason && !task.turnEnded, signal: task.controller.signal });
       if (task.nativeTerminal) { task.access.dispose(); return; }
-      if (!resumed) { sessions[sid] = { workspace, createdAt: task.createdAt }; await persist(); }
+      if (!resumed || task.groupId && sessions[sid]?.groupId !== task.groupId) {
+        sessions[sid] = { ...sessions[sid], workspace, createdAt: sessions[sid]?.createdAt || task.createdAt, ...(task.groupId ? { groupId: task.groupId } : {}) };
+        await persist();
+      }
       if (task.nativeTerminal) return;
       task.submitted = true;
       agent.followup(createUserMessage({ content: [{ type: 'text', text: task.access.instructions + body.prompt }], source: { kind: 'xiaozhushou-desktop-host', form: 'direct', taskId: task.id, authority: task.grants.skills.length || task.grants.tools.length ? 'product-owner' : 'text-only' } }));
@@ -243,7 +307,7 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
       const url = new URL(req.url, 'http://' + expectedHost);
       if (url.search || url.hash) throw fault('INVALID_ROUTE', '请求路径无效。', 404);
       if (req.method === 'GET' && url.pathname === '/health') {
-        reply(200, { ok: true, protocol: HOST_PROTOCOL, project: 'xiaozhushou', provider, model, preset, productDataRoot: dataRoot, workspacesRoot, modelVerified, credentialsSource: 'harness-existing-login', activeTasks: active.size, toolPolicy: 'product-owner-task-grants-v1', capabilities: { text: true, resume: true, streaming: false, mcp: true, skills: true, ownerTaskGrants: true, defaultToolAccess: 'none', images: false, artifacts: false, cancel: 'native-owned-session' } }); return;
+        reply(200, { ok: true, protocol: HOST_PROTOCOL, project: 'xiaozhushou', provider, model, preset, productDataRoot: dataRoot, workspacesRoot, modelVerified, credentialsSource: 'harness-existing-login', activeTasks: active.size, toolPolicy: 'product-owner-task-grants-v1', capabilities: { text: true, resume: true, streaming: false, mcp: true, skills: true, ownerTaskGrants: true, sessionGroups: Boolean(workspaceRegistry()?.resolveByPath && workspaceRegistry()?.create), defaultToolAccess: 'none', images: false, artifacts: false, cancel: 'native-owned-session' } }); return;
       }
       if (req.method === 'GET' && url.pathname === '/catalog') { reply(200, await catalog()); return; }
       if (req.method === 'POST' && url.pathname === '/tasks') { reply(202, await submit(await readJson(req, 300 * 1024))); return; }

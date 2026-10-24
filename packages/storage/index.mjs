@@ -39,7 +39,11 @@ export async function createStore(dataDir) {
     if (result[0]?.values?.[0]?.[0] !== 'ok') throw new Error('SQLite 完整性检查失败');
     if(db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='metadata'").length){
       const version=db.exec("SELECT value FROM metadata WHERE key='schema_version'")[0]?.values?.[0]?.[0];
-      if(version&&!['1','2','3'].includes(version))throw new Error('数据版本高于当前程序，请使用匹配版本打开。');
+      if(version&&!['1','2','3','4'].includes(version))throw new Error('数据版本高于当前程序，请使用匹配版本打开。');
+      if(version&&version!=='4'){
+        const backup=path.join(dataDir,'assistant.pre-0.3.1.sqlite');
+        if(!fs.existsSync(backup))fs.copyFileSync(filename,backup,fs.constants.COPYFILE_EXCL);
+      }
     }
   } catch (error) {
     db?.close();releaseOwner();
@@ -108,9 +112,14 @@ export async function createStore(dataDir) {
       account_id TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, text TEXT NOT NULL,
       dedupe_key TEXT NOT NULL UNIQUE, delivery_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
       error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS wechat_attachments(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS mail_accounts(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS mail_messages(id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES mail_accounts(id),payload TEXT NOT NULL,task_id TEXT REFERENCES tasks(id));
     CREATE TABLE IF NOT EXISTS mail_drafts(id TEXT PRIMARY KEY,account_id TEXT NOT NULL REFERENCES mail_accounts(id),payload TEXT NOT NULL,status TEXT NOT NULL,error TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS dsh_conversations(id TEXT PRIMARY KEY,channel TEXT NOT NULL,
+      account_id TEXT NOT NULL,kind TEXT NOT NULL,target TEXT NOT NULL,title TEXT NOT NULL,
+      workspace TEXT NOT NULL UNIQUE,session_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+      UNIQUE(channel,account_id,kind,target));
   `);
     // A manually selected conversation can receive an outbound message before
     // any inbound record exists. Rebuild v2 outbox atomically to make its source
@@ -125,10 +134,11 @@ export async function createStore(dataDir) {
         DROP TABLE wechat_outbox_v2;`);
     }
     for(const table of ['wechat_messages','wechat_outbox'])if(!query(`PRAGMA table_info(${table})`).some(column=>column.name==='payload'))db.run(`ALTER TABLE ${table} ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'`);
-    db.run("INSERT INTO metadata(key,value) VALUES('schema_version','3') ON CONFLICT(key) DO UPDATE SET value='3'");
+    if(!query('PRAGMA table_info(tasks)').some(column=>column.name==='conversation_id'))db.run('ALTER TABLE tasks ADD COLUMN conversation_id TEXT REFERENCES dsh_conversations(id)');
+    db.run("INSERT INTO metadata(key,value) VALUES('schema_version','4') ON CONFLICT(key) DO UPDATE SET value='4'");
   });}catch(error){db.close();releaseOwner();throw error;}
   const schema = query("SELECT value FROM metadata WHERE key='schema_version'")[0]?.value;
-  if (schema !== '3') { db.close();releaseOwner();throw new Error('数据版本高于当前程序，请使用匹配版本打开。'); }
+  if (schema !== '4') { db.close();releaseOwner();throw new Error('数据版本高于当前程序，请使用匹配版本打开。'); }
   try{if(!query('PRAGMA table_info(tasks)').some(column=>column.name==='skill_ids'))transaction(()=>db.run("ALTER TABLE tasks ADD COLUMN skill_ids TEXT NOT NULL DEFAULT '[]'"));}
   catch(error){db.close();releaseOwner();throw error;}
   try{for(const [name,definition]of [['workflow_id',"TEXT NOT NULL DEFAULT 'single'"],['worker_result',"TEXT NOT NULL DEFAULT 'null'"]])if(!query('PRAGMA table_info(tasks)').some(column=>column.name===name))transaction(()=>db.run(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`));}
@@ -138,7 +148,7 @@ export async function createStore(dataDir) {
     return { id: row.id, title: row.title, prompt: row.prompt, kind: row.kind, status: row.status,
       progress: row.progress, summary: row.summary, error: row.error, createdAt: row.created_at,
       updatedAt: row.updated_at, workspace: row.workspace, attachments: JSON.parse(row.attachments),
-      attachmentNames: JSON.parse(row.attachments).map(a => a.name), sessionId: row.session_id, skillIds:JSON.parse(row.skill_ids||'[]'),workflowId:row.workflow_id||'single',workerResult:JSON.parse(row.worker_result||'null') };
+      attachmentNames: JSON.parse(row.attachments).map(a => a.name), sessionId: row.session_id, conversationId:row.conversation_id??null, skillIds:JSON.parse(row.skill_ids||'[]'),workflowId:row.workflow_id||'single',workerResult:JSON.parse(row.worker_result||'null') };
   }
   const wechatMessageSelect='SELECT id,account_id AS accountId,kind,conversation_id AS conversationId,conversation_name AS conversationName,sender_id AS senderId,sender_name AS senderName,text,external_id AS externalId,received_at AS receivedAt,task_id AS taskId,payload FROM wechat_messages';
   const wechatDeliverySelect='SELECT id,message_id AS messageId,account_id AS accountId,kind,target,text,delivery_id AS deliveryId,status,error,created_at AS createdAt,updated_at AS updatedAt,payload FROM wechat_outbox';
@@ -156,6 +166,15 @@ export async function createStore(dataDir) {
     filename,
     getSettings() { return Object.fromEntries(query('SELECT key,value FROM settings').map(r => [r.key, JSON.parse(r.value)])); },
     saveSettings(patch) { return transaction(() => { for (const [key, value] of Object.entries(patch)) db.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [key, JSON.stringify(value)]); }); },
+    getConversation(id){return query('SELECT id,channel,account_id AS accountId,kind,target,title,workspace,session_id AS sessionId,created_at AS createdAt,updated_at AS updatedAt FROM dsh_conversations WHERE id=?',[id])[0]??null;},
+    ensureConversation(value){
+      if(!/^conversation_[a-f0-9]{32}$/.test(value.id)||value.channel!=='wechat'||!['private','group'].includes(value.kind)||![value.accountId,value.target].every(item=>/^[1-9]\d{0,15}$/.test(item))||!path.isAbsolute(value.workspace)||typeof value.title!=='string'||!value.title.trim()||value.title.length>200)throw Error('会话记录无效。');
+      const existing=api.getConversation(value.id);
+      if(existing){if(['channel','accountId','kind','target','workspace'].some(key=>existing[key]!==value[key]))throw Error('会话记录与工作空间不一致。');return existing;}
+      return transaction(()=>{const at=new Date().toISOString();db.run('INSERT INTO dsh_conversations(id,channel,account_id,kind,target,title,workspace,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',[value.id,value.channel,value.accountId,value.kind,value.target,value.title,value.workspace,at,at]);return api.getConversation(value.id);});
+    },
+    bindTaskConversation(taskId,conversationId){return transaction(()=>{if(!api.getConversation(conversationId)||!api.getTask(taskId))throw Error('无法关联会话和任务。');db.run('UPDATE tasks SET conversation_id=? WHERE id=?',[conversationId,taskId]);return api.getTask(taskId);});},
+    saveConversationSession(id,sessionId){if(!/^xzs-[a-f0-9]{32}$/.test(sessionId))throw Error('DSH 会话编号无效。');return transaction(()=>{if(!api.getConversation(id))throw Error('会话不存在。');const other=query('SELECT id FROM dsh_conversations WHERE session_id=? AND id<>?',[sessionId,id])[0];if(other)throw Error('DSH 会话已属于其他聊天。');db.run('UPDATE dsh_conversations SET session_id=?,updated_at=? WHERE id=?',[sessionId,new Date().toISOString(),id]);return api.getConversation(id);});},
     createTask(task) {
       transaction(() => db.run('INSERT INTO tasks(id,title,prompt,kind,status,created_at,updated_at,workspace,attachments,skill_ids,workflow_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
         [task.id,task.title,task.prompt,task.kind,task.status,task.createdAt,task.createdAt,task.workspace,JSON.stringify(task.attachments),JSON.stringify(task.skillIds??[]),task.workflowId??'single']));
@@ -193,19 +212,28 @@ export async function createStore(dataDir) {
     getWechatMessage(id) {return mapWechat(query(wechatMessageSelect+' WHERE id=?',[id])[0]);},
     listWechatMessages() {return query(wechatMessageSelect+' ORDER BY rowid DESC LIMIT 500').map(mapWechat);},
     linkWechatTask(messageId,taskId) {return transaction(()=>{db.run('UPDATE wechat_messages SET task_id=? WHERE id=?',[taskId,messageId]);return api.getWechatMessage(messageId);});},
+    addWechatAttachment(attachment) {
+      if(!/^wxatt_[a-f0-9]{32}$/.test(attachment?.id??'')||!['image','file'].includes(attachment.mediaType)||!path.isAbsolute(attachment.path??'')||
+        typeof attachment.name!=='string'||!attachment.name||!Number.isSafeInteger(attachment.size)||attachment.size<1||!/^[a-f0-9]{64}$/.test(attachment.sha256??'')||typeof attachment.mime!=='string')throw Error('微信附件快照记录无效。');
+      return transaction(()=>{if(api.getWechatAttachment(attachment.id))throw Error('微信附件快照已经登记，不能覆盖。');db.run('INSERT INTO wechat_attachments(id,payload) VALUES(?,?)',[attachment.id,JSON.stringify(attachment)]);return api.getWechatAttachment(attachment.id);});
+    },
+    getWechatAttachment(id){const row=query('SELECT payload FROM wechat_attachments WHERE id=?',[id])[0];return row?JSON.parse(row.payload):null;},
+    listWechatAttachments(){return query('SELECT payload FROM wechat_attachments ORDER BY rowid DESC LIMIT 100').map(row=>JSON.parse(row.payload));},
+    getWechatDeliveryByKey(key){const row=query('SELECT id FROM wechat_outbox WHERE dedupe_key=?',[key])[0];return row?api.getWechatDelivery(row.id):null;},
     createWechatDelivery(delivery) {
       return transaction(()=>{
         const existing=query('SELECT id FROM wechat_outbox WHERE dedupe_key=?',[delivery.dedupeKey])[0];
         if(existing)return {inserted:false,delivery:api.getWechatDelivery(existing.id)};
         db.run('INSERT INTO wechat_outbox(id,message_id,account_id,kind,target,text,dedupe_key,delivery_id,status,created_at,updated_at,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-          [delivery.id,delivery.messageId??null,delivery.accountId,delivery.kind,delivery.target,delivery.text,delivery.dedupeKey,delivery.deliveryId,'sending',delivery.createdAt,delivery.createdAt,JSON.stringify({mediaType:delivery.mediaType??'text',stickerId:delivery.stickerId??'',requestId:delivery.requestId??''})]);
+          [delivery.id,delivery.messageId??null,delivery.accountId,delivery.kind,delivery.target,delivery.text,delivery.dedupeKey,delivery.deliveryId,'sending',delivery.createdAt,delivery.createdAt,JSON.stringify({mediaType:delivery.mediaType??'text',stickerId:delivery.stickerId??'',requestId:delivery.requestId??'',
+            ...(delivery.attachmentId?{attachmentId:delivery.attachmentId,name:delivery.name,size:delivery.size,sha256:delivery.sha256,mime:delivery.mime}:{})})]);
         return {inserted:true,delivery:api.getWechatDelivery(delivery.id)};
       });
     },
     getWechatDelivery(id) {return mapWechatDelivery(query(wechatDeliverySelect+' WHERE id=?',[id])[0]);},
     listWechatOutbox() {return query(wechatDeliverySelect+' ORDER BY rowid DESC LIMIT 500').map(mapWechatDelivery);},
     updateWechatDelivery(id,{status,error='',receipt}) {
-      if(!['sending','delivered','unconfirmed','failed'].includes(status))throw Error('微信投递状态无效。');
+      if(!['sending','delivered','unconfirmed','rejected','failed'].includes(status))throw Error('微信投递状态无效。');
       return transaction(()=>{db.run('UPDATE wechat_outbox SET status=?,error=?,updated_at=? WHERE id=?',[status,error,new Date().toISOString(),id]);if(receipt){const payload=JSON.parse(query('SELECT payload FROM wechat_outbox WHERE id=?',[id])[0]?.payload||'{}');db.run('UPDATE wechat_outbox SET payload=? WHERE id=?',[JSON.stringify({...payload,receipt}),id]);}return api.getWechatDelivery(id);});
     },
     listMailAccounts(){return query('SELECT payload FROM mail_accounts ORDER BY rowid').map(row=>JSON.parse(row.payload));},

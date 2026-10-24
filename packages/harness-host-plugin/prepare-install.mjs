@@ -38,8 +38,13 @@ export async function prepareHostedPluginInstall({ productDataRoot, workspacesRo
   if (await exists(path.join(destination, 'package.json')) && !await exists(markerFile)) throw new Error('HOST_INSTALL_DIRECTORY_NOT_OWNED');
   await writeFile(markerFile, 'xiaozhushou-harness-host-v1\n', { mode: 0o600 });
   const contents = await Promise.all(['package.json', 'index.mjs', 'server.mjs', 'text-policy.mjs', 'owner-access.mjs', 'locale/zh.json', 'locale/en.json', 'icon.svg'].map(async name => [name, await readFile(path.join(sourceDir, name), 'utf8')]));
-  const revision = createHash('sha256').update(contents.map(([name, text]) => name + '\0' + text).join('\0')).digest('hex').slice(0, 16);
-  for (const [name, content] of contents) { await mkdir(path.dirname(path.join(destination, name)), { recursive: true }); await writeFile(path.join(destination, name), content); }
+  const revision = createHash('sha256').update('revisioned-relative-imports-v1\0').update(contents.map(([name, text]) => name + '\0' + text).join('\0')).digest('hex').slice(0, 16);
+  // ESM caches each dependency by URL. Revising index alone can still run the
+  // previous server after an official live reload in the same Harness process.
+  for (const [name, source] of contents) {
+    const content=name.endsWith('.mjs')?source.replace(/(['"])(\.\/[a-z-]+\.mjs)\1/g,(_match,quote,module)=>quote+module+'?revision='+revision+quote):source;
+    await mkdir(path.dirname(path.join(destination, name)), { recursive: true }); await writeFile(path.join(destination, name), content);
+  }
   const tokenDir = path.join(dataRoot, 'harness-host'); await mkdir(tokenDir, { recursive: true });
   if (!inside(dataRoot, await realpath(tokenDir))) throw new Error('HOST_TOKEN_DIRECTORY_REFUSED');
   const tokenFile = path.join(tokenDir, 'bridge-token.txt');

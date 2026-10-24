@@ -16,11 +16,13 @@
 
 - `GET /health`：协议标识 `xiaozhushou-harness-host-v1`、原生 provider/model、产品路径、活动任务数和模型是否完成过回复。健康检查没有模型调用，不能证明账号真实可用。
 - `GET /catalog`：直接从原 Harness skills/tools 服务读取元数据，包含技能来源、可授权工具和授权契约。清单本身没有执行权限。
-- `POST /tasks`：`{taskId?,prompt,workspace,sessionId?,personaPrefix?,authority?,ownerGrants?}`；返回任务回执，不等待模型完成。重复 taskId/相同内容不会重复入队，不同内容会拒绝。
+- `POST /tasks`：`{taskId?,prompt,workspace,sessionId?,conversation?,personaPrefix?,authority?,ownerGrants?}`；返回任务回执，不等待模型完成。重复 taskId/相同内容不会重复入队，不同内容会拒绝。
 - `GET /tasks/:id`：返回任务状态。只有匹配自身 session 和 turn 的 `turn/end completed`，且会话 flush 成功，才能返回成功文字。
 - `DELETE /tasks/:id`：仅取消此产品任务拥有的 native agent。未收到结束确认时返回 `stop_unconfirmed`，保持会话锁，不声称已经停止。
 
 任务只可继续产品 `harness-host/sessions.json` 中登记的 `xzs-<32 hex>` 会话，工作目录必须位于指定产品工作区。同会话仅一轮，宿主默认最多并行 3 轮。输出、请求体、超时和记录数均有上限。当前不会提供 token streaming、图片或自动收集模型写出的成果。
+
+`conversation` 可为 `{channel:'wechat'|'desktop'|'mail',displayName?:string}`，仅用于显示分类和标题，不能指定路径、会话 ID、工具或授权。原生 `workspaceRegistry` 按已经校验的真实 `workspace` 路径查找或创建工作空间，再用 `attachSession` 校验会话 `header.cwd` 后归类。续聊复用已有原生会话和工作空间，保留已有组名及会话标题；归档会话不自动恢复。微信等持续会话应由产品为每个会话保持固定目录，例如 `tasks/conversations/wechat_<hash>`；成果文件仍可保存在独立任务目录。新建标题如“小助手 · 微信 · 测试联系人”，采用 75 字节 Unicode 安全截断；插件不向 stdout 输出联系人名称。最终任务回执可包含原生 `groupId`，映射保存在产品的 `harness-host/sessions.json`。分类不可用或未确认保存时，本轮不会提交模型消息。
 
 ## 复用原技能和插件
 

@@ -219,6 +219,9 @@ test('preparing plugin creates only product artifacts and preserves its token on
   const patch = parse(await readFile(path.join(installDirectory, 'cordis.patch.yml'), 'utf8'));
   assert.equal(patch[0].insert[0].config.provider, 'deepseek'); assert.match(patch[0].insert[0].name, /^file:\/\//);
   assert.equal(patch[0].insert[1].config.id, 'xiaozhushou-desktop-text-v1');
+  for(const [filename,dependency]of [['index.mjs','server.mjs'],['server.mjs','text-policy.mjs'],['server.mjs','owner-access.mjs']]){
+    assert((await readFile(path.join(installDirectory,filename),'utf8')).includes('./'+dependency+'?revision='+first.revision),'live reload must version every local module dependency');
+  }
   assert.equal(JSON.parse(await readFile(first.configFile, 'utf8')).endpoint, 'http://127.0.0.1:11345');
   await assert.rejects(prepareHostedPluginInstall({ productDataRoot: f.root, workspacesRoot: f.workspaces, installDirectory: path.join(os.tmpdir(), 'outside') }), /HOST_INSTALL_OUTSIDE_PRODUCT/);
 });

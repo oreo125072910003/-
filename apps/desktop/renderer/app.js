@@ -9,6 +9,7 @@ const icons = {
   attach: '<path d="m20 11-8 8a5 5 0 0 1-7-7l9-9a3.5 3.5 0 0 1 5 5l-9 9a2 2 0 0 1-3-3l8-8"/>',
   folder: '<path d="M3 7V5a2 2 0 0 1 2-2h5l3 3h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M3 9h18"/>',
   doc: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6Z"/><path d="M14 3v6h6M8 13h8m-8 4h5"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="1"/><circle cx="8" cy="8" r="2"/><path d="m3 17 5-5 4 4 4-6 5 7"/>',
   search: '<circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/>',
   mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
   chat: '<path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H4l-2 2v-9.5A8.5 8.5 0 0 1 10.5 4h2a8.5 8.5 0 0 1 8.5 7.5Z"/><path d="M7 11h10m-10 4h6"/>',
@@ -29,7 +30,7 @@ const api = window.assistant;
 const state = { page: 'home', bootstrap: null, settings: {}, tasks: [], filter: 'all', attachments: [], kind: 'agent', prompt: '', sending: false, loading: true, error: '', selectedTask: null, detail: null, detailLoading: false, detailError: '', settingsDirty: false,
   wechat: null, wechatError: '', wechatTab: 'inbox', selectedMessageId: null, selectedConversationKey: '', wechatReply: '', wechatReplyByConversation: {}, wechatBusy: '', wechatSettingsDraft: null,
   wechatContactKind: 'private', wechatContactKeyword: '', wechatContactResults: { private: [], groups: [] }, wechatContactNames: {}, wechatAllowedDraft: null, wechatContactsSearched: false,
-  wechatHistoryLoaded: {}, wechatImages: {}, wechatStickers: {}, wechatStickerPanel: false, wechatStickerQuery: '', wechatSendAttempts: {}, wechatAccountKey: '',
+  wechatHistoryLoaded: {}, wechatImages: {}, wechatStickers: {}, wechatStickerPanel: false, wechatStickerQuery: '', wechatSendAttempts: {}, wechatAttachmentsByConversation: {}, wechatAccountKey: '',
   mail: null, mailError: '', mailTab: 'inbox', mailAccountId: '', mailMessageId: null, mailBusy: '', mailCompose: { accountId: '', to: '', cc: '', bcc: '', subject: '', text: '', inReplyTo: '' }, mailSavedDraft: null, mailAccountDraft: null, mailDraftTasks: {}, mailAttachment: null,
   extensions: null, extensionsError: '', capabilityTab: 'overview', nativeCatalogQuery: '', extensionsBusy: '', selectedMcpId: null, mcpDiagnostics: {}, mcpToolSelections: {}, skillIds: [], workflowId: 'single', workflows: null, workflowsError: '', exportingFormat: '', dshAccess: null, dshAccessError: '', dshGrantDraft: null, dshGrantsDirty: false, dshGrantQuery: '' };
 const activeStatuses = new Set(['queued', 'running', 'validating', 'waiting_dependency']);
@@ -86,7 +87,7 @@ function renderShell() {
   const navGroups = [['工作', ['home', 'tasks', 'workers']], ['通信', ['wechat', 'mail']], ['管理', ['capabilities', 'settings']]];
   const navButton = ([id, image, title, subtitle]) => `<button class="nav-button ${state.page === id ? 'active' : ''}" data-action="navigate" data-page="${id}" aria-label="${title}" ${state.page === id ? 'aria-current="page"' : ''}><span class="nav-icon nav-icon-${id}">${icon(image)}</span><span class="nav-copy"><strong>${title}</strong><small>${subtitle}</small></span>${id === 'tasks' && state.tasks.length ? `<span class="count">${state.tasks.length}</span>` : ''}</button>`;
   app.innerHTML = `<div class="desktop-frame">
-    <header class="xp-titlebar"><span class="xp-program-icon">${icon('spark')}</span><strong>${escape(name)} - ${pageTitles[state.page]}</strong><span class="xp-edition">个人桌面助手 · ${escape(state.bootstrap?.appVersion || '预览版')}</span></header>
+    <header class="xp-titlebar"><span class="xp-program-icon">${icon('spark')}</span><strong>${escape(name)} DSH - ${pageTitles[state.page]}</strong><span class="xp-edition">个人桌面助手 · ${escape(state.bootstrap?.appVersion || '预览版')}</span></header>
     <div class="xp-commandbar" aria-label="快捷命令"><button data-action="navigate" data-page="home">${icon('doc')}新建工作</button><span class="toolbar-divider"></span><button data-action="navigate" data-page="wechat">${icon('chat')}微信通信</button><button data-action="open-workspace">${icon('folder')}工作文件夹</button><span class="toolbar-divider"></span><button data-action="refresh">${icon('refresh')}刷新</button><button data-action="navigate" data-page="settings">${icon('settings')}设置</button></div>
     <div class="app-shell"><aside class="sidebar" aria-label="主导航">${navGroups.map(([title, ids]) => `<section class="explorer-group nav-group"><h2>${title}</h2><nav class="nav" aria-label="${title}">${nav.filter(item => ids.includes(item[0])).map(navButton).join('')}</nav></section>`).join('')}
     <section class="explorer-group sidebar-system"><h2>本机状态</h2><div class="system-item">${icon('engine')}<span>小助手 DSH</span></div><div id="sidebar-runtime">${pill(runtime.label, runtime.style)}</div><p>任务与成果保存在这台电脑。</p><button class="text-button" data-action="navigate" data-page="settings">查看 DSH 连接</button></section><div class="sidebar-profile"><span class="avatar">${icon('heart')}</span><div><strong>${escape(name)}</strong><span>你的长期个人助手</span></div></div></aside>
@@ -112,7 +113,7 @@ function renderPage() {
 function renderHome() {
   const name = state.settings.assistantName || state.bootstrap?.identity?.name || '小助手';
   const greeting = new Date().getHours() < 6 ? '夜深了，慢慢来' : new Date().getHours() < 12 ? '早上好，新的一天' : new Date().getHours() < 18 ? '下午好，欢迎回来' : '晚上好，欢迎回来';
-  return `<div class="content-grid"><section class="main-column" aria-label="与助手一起工作"><div class="hero"><div class="welcome-computer" aria-hidden="true">${icon('home')}</div><div><div class="eyebrow">${greeting}</div><h1 class="hero-title">欢迎使用${escape(name)}</h1><p class="hero-subtitle">在这里交代工作、整理资料，或起草一份文字。</p></div></div>
+  return `<div class="content-grid"><section class="main-column" aria-label="与助手一起工作"><div class="hero"><div class="welcome-computer" aria-hidden="true">${icon('home')}</div><div><div class="eyebrow">${greeting}</div><h1 class="hero-title">${escape(name)} DSH，在这里陪你</h1><p class="hero-subtitle">把事情交给我：处理工作、整理资料，也可以接入微信替你回复。</p></div></div>
     <form class="composer" id="task-form"><div class="composer-top"><label class="composer-label" for="task-prompt">${icon('doc')}新建工作</label><span class="composer-mode" id="composer-mode">${state.kind === 'organize' ? '本地资料整理 · 无需 AI' : 'AI 对话与写作'}</span></div><div class="composer-body"><div class="task-type-field"><label for="task-type">工作类型</label><select id="task-type"><option value="agent" ${state.kind === 'agent' ? 'selected' : ''}>AI 对话与写作</option><option value="organize" ${state.kind === 'organize' ? 'selected' : ''}>本地资料整理</option><option value="literature" ${state.kind === 'literature' ? 'selected' : ''}>文献检索</option></select></div><label class="field-label" for="task-prompt">请描述你想完成的事情：</label><textarea id="task-prompt" name="prompt" maxlength="18000" placeholder="例如：帮我梳理这份材料，并拟一份回复。可通过下方按钮添加资料。" aria-describedby="submit-hint" ${state.sending ? 'disabled' : ''}></textarea><div class="attachment-format-hint">支持文字文件、Word（.docx）和可选中文字的 PDF；扫描件暂不能识别。</div><div id="attachments" class="attachment-list"></div><div id="work-mode-slot">${renderWorkMode()}</div><div id="skill-picker-slot">${renderSkillPicker()}</div><div class="composer-footer"><div class="compose-tools"><button class="secondary-button" type="button" data-action="attach" aria-label="添加资料" title="添加资料">${icon('attach')}添加资料</button><span class="hint" id="submit-hint">Ctrl + Enter 提交</span></div><button class="primary-button" id="send-button" type="submit" ${state.sending ? 'disabled' : ''}>${state.sending ? '正在创建…' : state.kind === 'organize' ? '开始整理' : '交给小助手'}${icon('arrow')}</button></div></div></form>
     <div class="quick-actions"><button class="quick-action" data-action="quick" data-kind="organize"><span class="quick-icon">${icon('folder')}</span><span><strong>整理资料</strong><small>生成真实文件清单</small></span></button><button class="quick-action" data-action="quick" data-kind="draft"><span class="quick-icon gold">${icon('doc')}</span><span><strong>起草一份文字</strong><small>把零散想法写清楚</small></span></button><button class="quick-action" data-action="quick" data-kind="chat"><span class="quick-icon blue">${icon('chat')}</span><span><strong>一起理清思路</strong><small>从一个问题开始</small></span></button><button class="quick-action" data-action="quick" data-kind="literature"><span class="quick-icon blue">${icon('search')}</span><span><strong>查找学术文献</strong><small>检索真实论文信息</small></span></button></div>
     <div class="section-heading"><h2>最近的工作<span class="small-count" id="recent-count">${state.tasks.length}</span></h2><button class="text-button" data-action="navigate" data-page="tasks">查看全部${icon('chevron')}</button></div><div id="recent-tasks">${renderTaskList(state.tasks.slice(0, 4), 'home')}</div>
@@ -126,7 +127,7 @@ function renderAside() {
   const pending = state.tasks.filter((task) => activeStatuses.has(task.status)).length;
   return `<section class="aside-card"><div class="aside-title"><h2>${icon('engine')}助手状态</h2></div><div class="aside-card-body"><div class="assistant-avatar"><span class="profile-icon">${icon('spark')}</span><div><strong>${escape(name)}</strong><small>你的长期个人助手</small></div></div><div class="readiness-row"><span>本地工作台</span><span class="value ${state.bootstrap ? 'ready' : 'wait'}"><span class="dot"></span>${state.bootstrap ? '已连接' : '等待连接'}</span></div><div class="readiness-row"><span>小助手 DSH</span><span class="value ${hasSharedHarnessAccount() ? 'ready' : 'wait'}">${hasSharedHarnessAccount() ? '已沿用登录' : '等待连接'}</span></div><div class="readiness-row"><span>当前任务</span><span class="value">${pending ? `${pending} 项待完成` : '暂无进行中任务'}</span></div><p class="aside-description">${escape(runtime.description)}</p><button class="text-button aside-link" data-action="navigate" data-page="settings">打开控制面板${icon('chevron')}</button></div></section>
   <section class="aside-card"><div class="aside-title"><h2>${icon('tasks')}工作统计</h2></div><div class="aside-card-body"><div class="overview-numbers"><div><strong>${state.tasks.length}</strong><small>项工作</small></div><div><strong>${state.bootstrap?.summary?.artifactCount ?? 0}</strong><small>份成果</small></div></div><button class="workspace-link" data-action="open-workspace">${icon('folder')}打开工作文件夹${icon('external')}</button></div></section>
-  <section class="aside-card"><div class="aside-title"><h2>${icon('chat')}通信入口</h2></div><div class="aside-card-body"><p class="aside-description">微信消息、会话和手动回复统一放在微信通信中。</p><button class="secondary-button" data-action="navigate" data-page="wechat">${icon('chat')}进入微信通信</button></div></section>`;
+  <section class="aside-card"><div class="aside-title"><h2>${icon('chat')}通信入口</h2></div><div class="aside-card-body"><p class="aside-description">在微信通信中选择聊天，开启小助手 DSH 自动回复，或随时自己写信。</p><button class="secondary-button" data-action="navigate" data-page="wechat">${icon('chat')}进入微信通信</button></div></section>`;
 }
 function renderTaskList(tasks, context = 'tasks') {
   if (state.loading) return '<div class="loading-block" role="status">正在读取工作记录…</div>';
@@ -355,7 +356,7 @@ function selectedWechatMessage() {
 }
 function wechatConnectionInfo() {
   const connection = state.wechat?.connection || {};
-  const labels = { offline: '未连接', connecting: '正在连接', ready: '本地连接就绪', error: '连接出错' };
+  const labels = { offline: '微信未连接', connecting: '正在连接微信', ready: '微信收发已连接', error: '微信连接出错' };
   return { state: connection.state || 'offline', label: labels[connection.state] || '未连接', style: connection.state === 'ready' ? '' : connection.state === 'error' ? 'error' : 'offline',
     detail: connection.detail || (state.wechat?.settings?.connectionImported ? '现有连接配置已导入，请手动连接。' : '先导入这台电脑现有的 WeChatAgent 连接配置。') };
 }
@@ -381,6 +382,17 @@ function renderWechatProfile() {
   const label = loginLabels[profile.loginState] || (connection.state === 'ready' ? '正在读取账号信息' : loginLabels[connection.state] || '微信未连接');
   return `<div class="wechat-account-card"><span class="wechat-account-avatar" aria-hidden="true">${profile.nickname ? escape(Array.from(profile.nickname)[0]) : icon('chat')}</span><div class="wechat-account-identity"><small>${cached ? '上次识别的微信账号' : '当前微信账号'}</small><h2>${escape(name)}</h2><div class="wechat-account-fields"><span>微信号：<strong>${escape(profile.alias || '尚未读取')}</strong></span>${profile.wxid ? `<span>账号标识：<strong>${escape(profile.wxid)}</strong></span>` : ''}</div></div><div class="wechat-account-status">${pill(label, verified ? '' : profile.loginState === 'error' ? 'error' : 'offline')}<small>${cached ? '当前状态以重新连接后的核验为准' : verified ? '已核对这台电脑当前登录的微信' : '连接后读取当前微信的账号信息'}</small><button class="text-button" data-action="wechat-profile-refresh" ${state.wechatBusy || connection.state !== 'ready' ? 'disabled' : ''}>${icon('refresh')}${state.wechatBusy === 'profile' ? '正在识别…' : '重新识别账号'}</button></div></div>`;
 }
+function renderWechatAutomation() {
+  const settings = state.wechat?.settings || {};
+  const automatic = state.wechat?.autoReply || {};
+  const enabled = settings.autoReply === true;
+  const status = automatic.state || (enabled ? 'idle' : 'disabled');
+  const labels = { disabled: '自动回复已关闭', paused: '自动回复已暂停', idle: '等待新消息', generating: '正在思考回复', sending: '正在发送回复', unconfirmed: '发送结果待核对', error: '自动回复需要处理', closed: '自动回复已停止' };
+  const label = !enabled && !['generating', 'sending', 'unconfirmed'].includes(status) ? '自动回复已关闭' : labels[status] || '正在同步回复状态';
+  const detail = [automatic.detail || (enabled ? '已开启，正在等待微信服务同步状态。' : '你可以在下方查看消息或自己写信。'), automatic.lastError].filter((value, index, values) => value && (index === 0 || !String(values[0]).includes(value))).join(' · ');
+  const busy = Boolean(state.wechatBusy) || !state.wechat;
+  return `<div class="wechat-automation" aria-label="小助手 DSH 自动回复设置"><div class="wechat-automation-options"><label for="wechat-auto-reply"><input id="wechat-auto-reply" type="checkbox" ${enabled ? 'checked' : ''} ${busy ? 'disabled' : ''} aria-describedby="wechat-automation-help"/><span>自动回复</span></label><label for="wechat-auto-connect"><input id="wechat-auto-connect" type="checkbox" ${settings.autoConnect === true ? 'checked' : ''} ${busy ? 'disabled' : ''}/><span>下次启动自动连接</span></label>${state.wechatBusy === 'autoReply' || state.wechatBusy === 'autoConnect' ? '<small>正在保存设置…</small>' : ''}</div><p id="wechat-automation-help">开启后，小助手 DSH 会回复已选择聊天中的新文字消息；历史消息不会补发。开关更改后立即保存。</p><div class="wechat-auto-status ${['error', 'unconfirmed'].includes(status) ? 'error' : ''}" data-state="${escape(status)}" role="status" aria-live="polite">${icon(['error', 'unconfirmed'].includes(status) ? 'info' : ['generating', 'sending'].includes(status) ? 'clock' : 'engine')}<strong>小助手 DSH · ${escape(label)}</strong><span>${escape(detail)}</span>${automatic.taskId ? `<button type="button" class="text-button" data-action="open-task" data-id="${escape(automatic.taskId)}">查看回复任务</button>` : ''}</div></div>`;
+}
 function renderWechat() {
   const connection = wechatConnectionInfo();
   const settings = state.wechat?.settings || {};
@@ -388,15 +400,15 @@ function renderWechat() {
   const connected = ['ready', 'connecting'].includes(connection.state);
   const allowedCount = (settings.allowedPrivate?.length || 0) + (settings.allowedGroups?.length || 0);
   const detail = connection.detail.replace(/\s*[（(]WECHAT_[A-Z_]+[）)]/g, '');
-  return `<div class="page-heading"><div><h1>${icon('chat')}微信通信</h1><p>连接自己的微信，选择好友与群聊，再集中收信和回复。</p></div></div>
+  return `<div class="page-heading"><div><h1>${icon('chat')}微信通信</h1><p>连接自己的微信，让小助手 DSH 在你选择的好友和群聊中收信、回复。</p></div></div>
     ${state.wechatError ? `<div class="load-error" role="alert">${escape(state.wechatError)}<button class="text-button" data-action="wechat-refresh">${icon('refresh')}重试</button></div>` : ''}
-    <section class="connection-panel"><div class="panel-heading"><h2>${icon('chat')}我的微信</h2>${pill(connection.label, connection.style)}</div>${renderWechatProfile()}<div class="wechat-connect-footer"><div class="connection-copy"><strong>${escape(detail)}</strong><p>${settings.connectionImported ? '已导入本机连接' : '首次使用请导入现有微信连接'} · 已选择 ${settings.allowedPrivate?.length || 0} 位好友、${settings.allowedGroups?.length || 0} 个群${!allowedCount ? ' · 尚不接收任何会话' : ''}</p></div><div class="wechat-connection-buttons"><button class="secondary-button" data-action="wechat-import" ${busy || connected ? 'disabled' : ''}>${icon('folder')}${state.wechatBusy === 'import' ? '正在导入…' : '导入现有微信连接'}</button>${connected ? `<button class="secondary-button" data-action="wechat-disconnect" ${busy ? 'disabled' : ''}>断开连接</button>` : `<button class="primary-button" data-action="wechat-connect" ${busy || !settings.connectionImported ? 'disabled' : ''}>${icon('engine')}${state.wechatBusy === 'connect' ? '正在连接…' : '连接我的微信'}</button>`}</div></div></section>
+    <section class="connection-panel"><div class="panel-heading"><h2>${icon('chat')}我的微信</h2>${pill(connection.label, connection.style)}</div>${renderWechatProfile()}<div class="wechat-connect-footer"><div class="connection-copy"><strong>${escape(detail)}</strong><p>${settings.connectionImported ? '已导入本机连接' : '首次使用请导入现有微信连接'} · 已选择 ${settings.allowedPrivate?.length || 0} 位好友、${settings.allowedGroups?.length || 0} 个群${!allowedCount ? ' · 尚不接收任何会话' : ''}</p></div><div class="wechat-connection-buttons"><button class="secondary-button" data-action="wechat-import" ${busy || connected ? 'disabled' : ''}>${icon('folder')}${state.wechatBusy === 'import' ? '正在导入…' : '导入现有微信连接'}</button>${connected ? `<button class="secondary-button" data-action="wechat-disconnect" ${busy ? 'disabled' : ''}>断开连接</button>` : `<button class="primary-button" data-action="wechat-connect" ${busy || !settings.connectionImported ? 'disabled' : ''}>${icon('engine')}${state.wechatBusy === 'connect' ? '正在连接…' : '连接我的微信'}</button>`}</div></div>${renderWechatAutomation()}</section>
     <div class="xp-tabs" role="tablist" aria-label="微信功能">${[['inbox', 'mail', '消息与回复'], ['contacts', 'heart', '好友与群聊'], ['settings', 'settings', '连接设置']].map(([id, image, title]) => `<button id="wechat-tab-${id}" role="tab" aria-selected="${state.wechatTab === id}" aria-controls="wechat-panel" class="${state.wechatTab === id ? 'active' : ''}" data-action="wechat-tab" data-tab="${id}">${icon(image)}${title}${id === 'inbox' ? `<span class="tab-count">${wechatMessages().length}</span>` : ''}</button>`).join('')}<button class="tab-refresh" data-action="wechat-refresh" title="刷新微信状态">${icon('refresh')}刷新</button></div>
     <section id="wechat-panel" class="tab-panel" role="tabpanel" aria-labelledby="wechat-tab-${state.wechatTab}">${state.wechatTab === 'settings' ? renderWechatSettings() : state.wechatTab === 'contacts' ? renderWechatContacts() : renderWechatInbox()}</section>`;
 }
 function renderWechatSettings() {
   const settings = state.wechatSettingsDraft || state.wechat?.settings || {};
-  return `<form id="wechat-settings-form"><div class="wechat-settings-intro">${icon('info')}<span>好友与群聊请在“好友与群聊”中按名字选择。这里保留本机连接的高级设置；保存时会应用新的连接参数。</span></div><fieldset ${state.wechatBusy ? 'disabled' : ''}><legend>本地通信接口（高级）</legend><p class="field-help">通常直接使用导入的设置。修改前请确认对应本机微信读取与发送服务正在运行。</p><div class="two-fields"><label class="field"><span>消息读取接口</span><input name="readerBaseUrl" type="url" value="${escape(settings.readerBaseUrl || '')}" placeholder="导入配置后显示" autocomplete="off" spellcheck="false"/></label><label class="field"><span>微信发送接口</span><input name="hookBaseUrl" type="url" value="${escape(settings.hookBaseUrl || '')}" placeholder="导入配置后显示" autocomplete="off" spellcheck="false"/></label></div></fieldset><div class="wechat-privacy-note">${icon('shield')}<span>连接凭据由桌面程序安全保存。当前仅接收已选择聊天的文字消息；回复仍由你点击发送。</span></div><div class="settings-footer"><p>更改连接参数后，小助手会重新连接微信。</p><button class="primary-button" type="submit" ${state.wechatBusy ? 'disabled' : ''}>${icon('check')}保存连接设置</button></div></form>`;
+  return `<form id="wechat-settings-form"><div class="wechat-settings-intro">${icon('info')}<span>好友与群聊请在“好友与群聊”中按名字选择。这里保留本机连接的高级设置；保存时会应用新的连接参数。</span></div><fieldset ${state.wechatBusy ? 'disabled' : ''}><legend>本地通信接口（高级）</legend><p class="field-help">通常直接使用导入的设置。修改前请确认对应本机微信读取与发送服务正在运行。</p><div class="two-fields"><label class="field"><span>消息读取接口</span><input name="readerBaseUrl" type="url" value="${escape(settings.readerBaseUrl || '')}" placeholder="导入配置后显示" autocomplete="off" spellcheck="false"/></label><label class="field"><span>微信发送接口</span><input name="hookBaseUrl" type="url" value="${escape(settings.hookBaseUrl || '')}" placeholder="导入配置后显示" autocomplete="off" spellcheck="false"/></label></div></fieldset><div class="wechat-privacy-note">${icon('shield')}<span>连接凭据由桌面程序安全保存。仅接收已选择聊天的文字消息；自动回复由上方开关控制，也可以随时自己写信。</span></div><div class="settings-footer"><p>更改连接参数后，小助手会重新连接微信。</p><button class="primary-button" type="submit" ${state.wechatBusy ? 'disabled' : ''}>${icon('check')}保存连接设置</button></div></form>`;
 }
 function wechatAllowedSelection() {
   if (!state.wechatAllowedDraft) state.wechatAllowedDraft = { private: [...(state.wechat?.settings?.allowedPrivate || [])].map(String), groups: [...(state.wechat?.settings?.allowedGroups || [])].map(String) };
@@ -423,6 +435,24 @@ function renderWechatStickerPicker(conversation) {
   const result = state.wechatStickers[conversation.key];
   return `<div class="wechat-sticker-picker"><form id="wechat-sticker-form"><label for="wechat-sticker-query">查找已有表情</label><input id="wechat-sticker-query" name="query" value="${escape(state.wechatStickerQuery)}" placeholder="输入表情关键词"/><button class="secondary-button compact" type="submit" ${state.wechatBusy ? 'disabled' : ''}>搜索</button></form><p>点击下方表情名称会直接发送给 ${escape(conversation.name)}。</p>${result?.enabled === false ? '<p class="field-help">当前微信接口未启用表情发送。</p>' : result?.stickers?.length ? `<div class="wechat-sticker-list">${result.stickers.map(sticker => `<button class="secondary-button" data-action="wechat-sticker-send" data-id="${escape(sticker.id)}" ${state.wechatBusy || !conversation.allowed || wechatConnectionInfo().state !== 'ready' ? 'disabled' : ''}>${escape(sticker.description || sticker.tags?.join('、') || '微信表情')}</button>`).join('')}</div>` : '<p class="field-help">没有找到可发送的表情。可以换一个关键词。</p>'}</div>`;
 }
+const wechatDeliveryLabels = { selected: '待发送', sent: '已提交发送', succeeded: '已提交发送', delivered: '已送达', sending: '正在发送', queued: '等待发送', rejected: '未发送', failed: '发送失败', uncertain: '结果待核对', unconfirmed: '结果待核对', unknown: '结果待核对' };
+function renderWechatOutgoing(outgoing) {
+  if (!['image', 'file'].includes(outgoing.mediaType)) return `<p class="message-text">${escape(outgoing.text || (outgoing.stickerId ? '微信表情' : ''))}</p>`;
+  return `<div class="wechat-outgoing-attachment">${icon(outgoing.mediaType === 'image' ? 'image' : 'doc')}<span><strong>${escape(outgoing.name || (outgoing.mediaType === 'image' ? '微信图片' : '微信文件'))}</strong><small>${outgoing.mediaType === 'image' ? '图片' : '文件'}${Number.isFinite(Number(outgoing.size)) ? ` · ${fileSize(outgoing.size)}` : ''}</small></span></div>`;
+}
+function wechatAttachmentStatus(conversation, attachment) {
+  const outgoing = (state.wechat?.outbox || []).find(item => item.kind === conversation.kind && String(item.target ?? item.conversationId) === conversation.id && (attachment.requestId ? item.requestId === attachment.requestId : item.attachmentId === attachment.id));
+  return outgoing || attachment;
+}
+function renderWechatAttachments(conversation) {
+  const disabled = Boolean(state.wechatBusy) || !conversation.allowed || wechatConnectionInfo().state !== 'ready';
+  const attachments = state.wechatAttachmentsByConversation[conversation.key] || [];
+  return `<section class="wechat-attachments" aria-label="发送图片与文件"><div class="wechat-attachments-toolbar"><strong>${icon('attach')}图片与文件</strong><button type="button" class="secondary-button compact" data-action="wechat-attachment-pick" data-media-type="image" ${disabled ? 'disabled' : ''}>${icon('image')}${state.wechatBusy === 'pick-image' ? '正在选择…' : '添加图片'}</button><button type="button" class="secondary-button compact" data-action="wechat-attachment-pick" data-media-type="file" ${disabled ? 'disabled' : ''}>${icon('folder')}${state.wechatBusy === 'pick-file' ? '正在选择…' : '添加文件'}</button></div>${attachments.length ? `<div class="wechat-attachment-list">${attachments.map(attachment => {
+    const delivery = wechatAttachmentStatus(conversation, attachment);
+    const status = delivery.status || 'selected';
+    return `<article class="wechat-selected-attachment" data-attachment-id="${escape(attachment.id)}" data-status="${escape(status)}">${icon(attachment.mediaType === 'image' ? 'image' : 'doc')}<div class="wechat-attachment-copy"><strong>${escape(attachment.name)}</strong><small>${attachment.mediaType === 'image' ? '图片' : '文件'} · ${fileSize(attachment.size)} · <span class="wechat-attachment-status">${escape(wechatDeliveryLabels[status] || '结果待核对')}</span></small>${delivery.error ? `<p class="send-error">${escape(delivery.error)}</p>` : ''}${status === 'rejected' ? '<p class="field-help">本次未提交给微信。处理上述原因后，可点击重新发送。</p>' : ['uncertain', 'unconfirmed', 'unknown'].includes(status) ? '<p class="field-help">请先在微信中核对结果，避免重复发送。</p>' : ''}</div><div class="wechat-attachment-actions"><button type="button" class="secondary-button compact" data-action="wechat-attachment-send" data-id="${escape(attachment.id)}" ${disabled || !['selected', 'rejected'].includes(status) ? 'disabled' : ''}>${status === 'selected' ? `发送${attachment.mediaType === 'image' ? '图片' : '文件'}` : status === 'rejected' ? '重新发送' : escape(wechatDeliveryLabels[status] || '结果待核对')}</button><button type="button" class="text-button" data-action="wechat-attachment-remove" data-id="${escape(attachment.id)}" aria-label="${['selected', 'rejected'].includes(status) ? '移除' : '收起'}${escape(attachment.name)}" ${state.wechatBusy ? 'disabled' : ''}>${['selected', 'rejected'].includes(status) ? '移除' : '收起'}</button></div></article>`;
+  }).join('')}</div>` : '<p class="wechat-attachments-help">从电脑中选择图片或文件，再单独发送；添加附件不会立即外发。</p>'}</section>`;
+}
 function renderWechatInbox() {
   const conversations = wechatConversations();
   const conversation = selectedWechatConversation();
@@ -433,11 +463,11 @@ function renderWechatInbox() {
   const thread = threadMessages.map(message => ({ type: message.outgoing === true || message.direction === 'outgoing' || message.isSelf ? 'history-outgoing' : 'incoming', time: message.receivedAt, message }));
   for (const outgoing of state.wechat?.outbox || []) if (ids.has(outgoing.messageId) || (String(outgoing.target ?? outgoing.conversationId) === conversation.id && outgoing.kind === conversation.kind)) thread.push({ type: 'outgoing', time: outgoing.createdAt, outgoing });
   thread.sort((a, b) => new Date(a.time) - new Date(b.time));
-  const outboxLabels = { sent: '已提交发送', succeeded: '已提交发送', delivered: '已送达', sending: '正在发送', queued: '等待发送', failed: '发送失败', uncertain: '结果待核对', unknown: '结果待核对' };
+  const outboxLabels = wechatDeliveryLabels;
   const connection = wechatConnectionInfo();
   const disabled = Boolean(state.wechatBusy) || connection.state !== 'ready' || !conversation.allowed;
   const loaded = state.wechatHistoryLoaded[conversation.key];
-  return `<div class="wechat-inbox"><aside class="conversation-pane" aria-label="微信会话"><div class="pane-caption">${icon('chat')}会话列表<span>${conversations.length}</span><button class="text-button" data-action="wechat-sessions" title="同步会话列表" ${state.wechatBusy ? 'disabled' : ''}>${icon('refresh')}</button></div><div class="conversation-list">${conversations.map(item => `<button class="conversation-row ${item.key === conversation.key ? 'active' : ''}" data-action="wechat-conversation" data-key="${escape(item.key)}"><span class="contact-avatar ${item.kind === 'group' ? 'group' : ''}">${icon(item.kind === 'group' ? 'grid' : 'chat')}</span><span class="conversation-copy"><strong>${escape(item.name)}</strong><small>${item.kind === 'group' ? '微信群聊' : '微信好友'}${item.allowed ? '' : ' · 未授权'}</small><span class="conversation-preview">${escape(item.messages[0]?.text || '点击查看历史或开始写信')}</span></span><span class="conversation-meta">${item.messages[0] ? `<time>${formatTime(item.messages[0].receivedAt)}</time>` : ''}${item.messages.length ? `<span class="message-count">${item.messages.length}</span>` : ''}</span></button>`).join('')}</div></aside><div class="message-pane"><header class="conversation-header"><div><h2>${escape(conversation.name)}</h2><p>${conversation.kind === 'group' ? '微信群聊' : '微信好友'} · ${conversation.allowed ? '已选择的聊天' : '不在当前接收范围，暂不能发送'}</p><details class="conversation-identity"><summary>会话标识（高级）</summary><code>${escape(conversation.id)}</code></details></div><button class="secondary-button compact" data-action="wechat-history" ${disabled ? 'disabled' : ''}>${icon('refresh')}${state.wechatBusy === 'history' ? '正在读取…' : loaded ? '刷新历史' : '查看历史'}</button></header><div class="message-thread" aria-label="会话消息">${loaded ? '<div class="history-range-note">显示最近最多 100 条消息；当前未提供更早消息翻页。</div>' : ''}${thread.length ? thread.map(entry => entry.type !== 'outgoing' ? `<article class="wechat-message ${entry.type === 'history-outgoing' ? 'outgoing' : 'incoming'} ${entry.message.id === selected?.id ? 'selected' : ''}"><div class="message-heading"><strong>${entry.type === 'history-outgoing' ? '我' : escape(wechatSenderName(entry.message))}</strong><time>${formatTime(entry.time, true)}</time>${entry.type === 'incoming' ? `<button class="text-button reply-target" data-action="wechat-target" data-id="${escape(entry.message.id)}">${entry.message.id === selected?.id ? '当前起草参考' : '作为起草参考'}</button>` : ''}</div>${entry.message.text ? `<div class="message-text">${escape(entry.message.text)}</div>` : ''}${renderWechatImages(entry.message, conversation)}</article>` : `<article class="wechat-message outgoing"><div class="message-heading"><strong>我</strong><time>${formatTime(entry.time, true)}</time><span class="outbox-status ${entry.outgoing.status === 'failed' ? 'failed' : ''}">${escape(outboxLabels[entry.outgoing.status] || '结果待核对')}</span></div><p class="message-text">${escape(entry.outgoing.text || (entry.outgoing.stickerId ? '微信表情' : ''))}</p>${entry.outgoing.error ? `<p class="send-error">${escape(entry.outgoing.error)}</p>` : ''}</article>`).join('') : `<div class="wechat-thread-empty">${icon('chat')}<strong>与 ${escape(conversation.name)} 的会话</strong><p>点击“查看历史”读取已有消息，或在下方直接写信。</p></div>`}</div><div class="reply-composer"><form id="wechat-reply-form"><div class="reply-caption"><label for="wechat-reply">写给 ${escape(conversation.name)}</label><div>${selected?.taskId ? `<button class="text-button" type="button" data-action="open-task" data-id="${escape(selected.taskId)}">查看起草任务</button>` : ''}${selected?.replyDraft ? '<button class="secondary-button compact" type="button" data-action="wechat-use-draft">填入 AI 草稿</button>' : ''}<button class="secondary-button compact" type="button" data-action="wechat-draft" ${state.wechatBusy || !selected || selected.outgoing === true || selected.direction === 'outgoing' || selected.isSelf ? 'disabled' : ''}>${icon('spark')}${state.wechatBusy === 'draft' ? '正在创建…' : '请 AI 起草'}</button><button class="secondary-button compact" type="button" data-action="wechat-stickers" ${disabled ? 'disabled' : ''}>${state.wechatStickerPanel ? '收起表情' : '表情'}</button></div></div><textarea id="wechat-reply" name="reply" maxlength="12000" placeholder="在这里编辑内容。请核对收件人，再点击发送。">${escape(state.wechatReply)}</textarea><div class="reply-footer"><small>${connection.state === 'ready' ? `发送给：${escape(conversation.name)} · 点击发送后才会提交` : '当前未连接，编辑的文字会保留在此页面。'}</small><button class="primary-button" type="submit" ${disabled || !state.wechatReply.trim() ? 'disabled' : ''}>${icon('arrow')}${state.wechatBusy === 'send' ? '正在发送…' : '发送到微信'}</button></div></form>${renderWechatStickerPicker(conversation)}</div></div></div>`;
+  return `<div class="wechat-inbox"><aside class="conversation-pane" aria-label="微信会话"><div class="pane-caption">${icon('chat')}会话列表<span>${conversations.length}</span><button class="text-button" data-action="wechat-sessions" title="同步会话列表" ${state.wechatBusy ? 'disabled' : ''}>${icon('refresh')}</button></div><div class="conversation-list">${conversations.map(item => `<button class="conversation-row ${item.key === conversation.key ? 'active' : ''}" data-action="wechat-conversation" data-key="${escape(item.key)}"><span class="contact-avatar ${item.kind === 'group' ? 'group' : ''}">${icon(item.kind === 'group' ? 'grid' : 'chat')}</span><span class="conversation-copy"><strong>${escape(item.name)}</strong><small>${item.kind === 'group' ? '微信群聊' : '微信好友'}${item.allowed ? '' : ' · 未授权'}</small><span class="conversation-preview">${escape(item.messages[0]?.text || '点击查看历史或开始写信')}</span></span><span class="conversation-meta">${item.messages[0] ? `<time>${formatTime(item.messages[0].receivedAt)}</time>` : ''}${item.messages.length ? `<span class="message-count">${item.messages.length}</span>` : ''}</span></button>`).join('')}</div></aside><div class="message-pane"><header class="conversation-header"><div><h2>${escape(conversation.name)}</h2><p>${conversation.kind === 'group' ? '微信群聊' : '微信好友'} · ${conversation.allowed ? '已选择的聊天' : '不在当前接收范围，暂不能发送'}</p><details class="conversation-identity"><summary>会话标识（高级）</summary><code>${escape(conversation.id)}</code></details></div><button class="secondary-button compact" data-action="wechat-history" ${disabled ? 'disabled' : ''}>${icon('refresh')}${state.wechatBusy === 'history' ? '正在读取…' : loaded ? '刷新历史' : '查看历史'}</button></header><div class="message-thread" aria-label="会话消息">${loaded ? '<div class="history-range-note">显示最近最多 100 条消息；当前未提供更早消息翻页。</div>' : ''}${thread.length ? thread.map(entry => entry.type !== 'outgoing' ? `<article class="wechat-message ${entry.type === 'history-outgoing' ? 'outgoing' : 'incoming'} ${entry.message.id === selected?.id ? 'selected' : ''}"><div class="message-heading"><strong>${entry.type === 'history-outgoing' ? '我' : escape(wechatSenderName(entry.message))}</strong><time>${formatTime(entry.time, true)}</time>${entry.type === 'incoming' ? `<button class="text-button reply-target" data-action="wechat-target" data-id="${escape(entry.message.id)}">${entry.message.id === selected?.id ? '当前起草参考' : '作为起草参考'}</button>` : ''}</div>${entry.message.text ? `<div class="message-text">${escape(entry.message.text)}</div>` : ''}${renderWechatImages(entry.message, conversation)}</article>` : `<article class="wechat-message outgoing"><div class="message-heading"><strong>我</strong><time>${formatTime(entry.time, true)}</time><span class="outbox-status ${entry.outgoing.status === 'failed' ? 'failed' : ''}">${escape(outboxLabels[entry.outgoing.status] || '结果待核对')}</span></div>${renderWechatOutgoing(entry.outgoing)}${entry.outgoing.error ? `<p class="send-error">${escape(entry.outgoing.error)}</p>` : ''}</article>`).join('') : `<div class="wechat-thread-empty">${icon('chat')}<strong>与 ${escape(conversation.name)} 的会话</strong><p>点击“查看历史”读取已有消息，或在下方直接写信。</p></div>`}</div><div class="reply-composer"><form id="wechat-reply-form"><div class="reply-caption"><label for="wechat-reply">手动写给 ${escape(conversation.name)}</label><div>${selected?.taskId ? `<button class="text-button" type="button" data-action="open-task" data-id="${escape(selected.taskId)}">查看起草任务</button>` : ''}${selected?.replyDraft ? '<button class="secondary-button compact" type="button" data-action="wechat-use-draft">填入 AI 草稿</button>' : ''}<button class="secondary-button compact" type="button" data-action="wechat-draft" ${state.wechatBusy || !selected || selected.outgoing === true || selected.direction === 'outgoing' || selected.isSelf ? 'disabled' : ''}>${icon('spark')}${state.wechatBusy === 'draft' ? '正在创建…' : '请 AI 起草'}</button><button class="secondary-button compact" type="button" data-action="wechat-stickers" ${disabled ? 'disabled' : ''}>${state.wechatStickerPanel ? '收起表情' : '表情'}</button></div></div><textarea id="wechat-reply" name="reply" maxlength="12000" placeholder="需要自己回复时，在这里写信并点击发送。">${escape(state.wechatReply)}</textarea><div class="reply-footer"><small>${connection.state === 'ready' ? `手动发送给：${escape(conversation.name)} · ${state.wechat?.settings?.autoReply ? "DSH 已开启自动回复" : "自动回复未开启"}` : '当前未连接，编辑的文字会保留在此页面。'}</small><button class="primary-button" type="submit" ${disabled || !state.wechatReply.trim() ? 'disabled' : ''}>${icon('arrow')}${state.wechatBusy === 'send' ? '正在发送…' : '发送文字'}</button></div></form>${renderWechatAttachments(conversation)}${renderWechatStickerPicker(conversation)}</div></div></div>`;
 }
 const mailProviders = { qq: { name: 'QQ 邮箱', imap: 'imap.qq.com', smtp: 'smtp.qq.com', smtpPort:465 }, '163': { name: '163 邮箱', imap: 'imap.163.com', smtp: 'smtp.163.com', smtpPort:465 }, gmail: { name: 'Gmail', imap: 'imap.gmail.com', smtp: 'smtp.gmail.com', smtpPort:465 }, outlook: { name: 'Outlook', imap: 'outlook.office365.com', smtp: 'smtp.office365.com', smtpPort:587 }, custom: { name: '其他邮箱 / 自定义', imap: '', smtp: '', smtpPort:465 } };
 function mailAddressText(addresses = []) { return addresses.map(item => typeof item === 'string' ? item : item.name ? `${item.name} <${item.address}>` : item.address || '').filter(Boolean).join('，'); }
@@ -540,7 +570,7 @@ function applyWechatState(value) {
   if (account && state.wechatAccountKey && account !== state.wechatAccountKey) {
     state.selectedMessageId = null; state.selectedConversationKey = ''; state.wechatReply = ''; state.wechatReplyByConversation = {};
     state.wechatContactResults = { private: [], groups: [] }; state.wechatContactNames = {}; state.wechatAllowedDraft = null; state.wechatContactsSearched = false;
-    state.wechatHistoryLoaded = {}; state.wechatImages = {}; state.wechatStickers = {}; state.wechatStickerPanel = false; state.wechatSendAttempts = {};
+    state.wechatHistoryLoaded = {}; state.wechatImages = {}; state.wechatStickers = {}; state.wechatStickerPanel = false; state.wechatSendAttempts = {}; state.wechatAttachmentsByConversation = {};
   }
   if (account) state.wechatAccountKey = account;
   state.wechat = value;
@@ -748,6 +778,51 @@ function wechatSendRequest(key, value) {
   state.wechatSendAttempts[key] = { value, requestId };
   return requestId;
 }
+async function pickWechatAttachments(mediaType) {
+  const conversation = selectedWechatConversation();
+  if (!conversation?.allowed || state.wechatBusy || wechatConnectionInfo().state !== 'ready' || !['image', 'file'].includes(mediaType)) return;
+  const account = state.wechatAccountKey;
+  await wechatOperation(`pick-${mediaType}`, async () => {
+    const chosen = await invoke('pickWechatAttachments', { mediaType });
+    if (!chosen?.length) return;
+    if (account !== state.wechatAccountKey) throw new Error('微信账号已改变，请在当前账号下重新选择附件。');
+    if (!Array.isArray(chosen) || chosen.some(item => typeof item.id !== 'string' || !item.id || typeof item.name !== 'string' || !Number.isSafeInteger(item.size) || item.size < 0 || item.mediaType !== mediaType)) throw new Error('附件选择结果无效，请重新选择。');
+    const attachments = state.wechatAttachmentsByConversation[conversation.key] ||= [];
+    for (const item of chosen) if (!attachments.some(attachment => attachment.id === item.id)) attachments.push({ id: item.id, name: item.name, size: item.size, mediaType: item.mediaType, status: 'selected' });
+  });
+}
+async function sendWechatAttachment(id) {
+  const conversation = selectedWechatConversation();
+  if (!conversation?.allowed || state.wechatBusy || wechatConnectionInfo().state !== 'ready') return;
+  const attachment = state.wechatAttachmentsByConversation[conversation.key]?.find(item => item.id === id);
+  if (!attachment) return;
+  const status = wechatAttachmentStatus(conversation, attachment).status;
+  if (!['selected', 'rejected'].includes(status)) return;
+  const requestKey = `attachment:${conversation.key}:${attachment.id}`;
+  if (status === 'rejected') delete state.wechatSendAttempts[requestKey];
+  attachment.requestId = wechatSendRequest(requestKey, attachment.id);
+  attachment.status = 'sending';
+  attachment.error = '';
+  await wechatOperation('attachment-send', async () => {
+    try {
+      const delivery = await invoke('sendWechatAttachment', { kind: conversation.kind, target: conversation.id, attachmentId: attachment.id, requestId: attachment.requestId });
+      attachment.status = delivery?.status || 'unconfirmed';
+      attachment.error = delivery?.error || '';
+      notify(attachment.status === 'delivered' ? `${attachment.mediaType === 'image' ? '图片' : '文件'}已送达。` : delivery?.error || '附件发送已有记录，请查看回执；结果待核对时不会重复发送。', attachment.status !== 'delivered');
+    } catch (error) {
+      attachment.status = 'uncertain';
+      attachment.error = error.message || '未能确认附件发送结果，请先核对微信记录。';
+      throw error;
+    }
+  });
+}
+function removeWechatAttachment(id) {
+  if (state.wechatBusy) return;
+  const conversation = selectedWechatConversation();
+  if (!conversation) return;
+  state.wechatAttachmentsByConversation[conversation.key] = (state.wechatAttachmentsByConversation[conversation.key] || []).filter(item => item.id !== id);
+  renderWechatPreservingFocus();
+}
 async function sendWechatSticker(stickerId) {
   const conversation = selectedWechatConversation();
   if (!conversation?.allowed || state.wechatBusy) return;
@@ -764,6 +839,16 @@ function readWechatSettings(form) {
   const current = state.wechatSettingsDraft || state.wechat?.settings || {};
   const ids = key => [...new Set(String(data.get(key) || '').split(/[\s,，;；]+/).map(id => id.trim()).filter(Boolean))];
   return { allowedPrivate: data.has('allowedPrivate') ? ids('allowedPrivate') : current.allowedPrivate || [], allowedGroups: data.has('allowedGroups') ? ids('allowedGroups') : current.allowedGroups || [], readerBaseUrl: data.has('readerBaseUrl') ? String(data.get('readerBaseUrl') || '').trim() : current.readerBaseUrl || '', hookBaseUrl: data.has('hookBaseUrl') ? String(data.get('hookBaseUrl') || '').trim() : current.hookBaseUrl || '' };
+}
+async function saveWechatAutomation(key, enabled) {
+  if (!['autoReply', 'autoConnect'].includes(key) || state.wechatBusy) return;
+  await wechatOperation(key, async () => {
+    await invoke('saveWechatSettings', { [key]: enabled });
+    const actual = await invoke('getWechatState');
+    applyWechatState(actual);
+    if (actual?.settings?.[key] !== enabled) throw new Error('微信设置尚未保存，请重试。');
+    notify(key === 'autoReply' ? enabled ? '小助手 DSH 自动回复已开启。' : '小助手 DSH 自动回复已关闭。' : enabled ? '下次启动小助手时会自动连接微信。' : '下次启动自动连接已关闭。');
+  });
 }
 async function saveWechatSettings(event) {
   event.preventDefault();
@@ -951,6 +1036,7 @@ document.addEventListener('input', (event) => {
   }
 });
 document.addEventListener('change', (event) => {
+  if (event.target.id === 'wechat-auto-reply' || event.target.id === 'wechat-auto-connect') { void saveWechatAutomation(event.target.id === 'wechat-auto-reply' ? 'autoReply' : 'autoConnect', event.target.checked); return; }
   if(event.target.id==='mail-account-filter'){state.mailAccountId=event.target.value;state.mailMessageId=null;renderPage();}
   if(event.target.id==='mail-compose-account'){state.mailCompose=readMailComposeForm(event.target.closest('form'));state.mailSavedDraft=null;renderMailPreservingFocus();}
   if(event.target.closest('#mail-account-form')){state.mailAccountDraft=readMailAccountForm(event.target.closest('form'));if(event.target.id==='mail-provider'){const preset=mailProviders[event.target.value]||mailProviders.custom;Object.assign(state.mailAccountDraft,{imapHost:preset.imap,imapPort:993,imapSecure:true,smtpHost:preset.smtp,smtpPort:preset.smtpPort,smtpSecure:preset.smtpPort===465});}if(['mail-provider','mail-auth-type','mail-smtp-enabled','mail-separate-smtp','mail-smtp-auth-type'].includes(event.target.id))renderMailPreservingFocus();}
@@ -1057,11 +1143,14 @@ document.addEventListener('click', async (event) => {
     else if (action === 'wechat-sessions') await loadWechatSessions();
     else if (action === 'wechat-history') await loadWechatHistory();
     else if (action === 'wechat-image') await previewWechatImage(button.dataset.imageId);
+    else if (action === 'wechat-attachment-pick') await pickWechatAttachments(button.dataset.mediaType);
+    else if (action === 'wechat-attachment-send') await sendWechatAttachment(button.dataset.id);
+    else if (action === 'wechat-attachment-remove') removeWechatAttachment(button.dataset.id);
     else if (action === 'wechat-stickers') { state.wechatStickerPanel = !state.wechatStickerPanel; renderPage(); if (state.wechatStickerPanel) await searchWechatStickers(); }
     else if (action === 'wechat-sticker-send') await sendWechatSticker(button.dataset.id);
     else if (action === 'wechat-refresh') { await refresh(); if (!state.wechatError) notify('微信状态已刷新。'); }
     else if (action === 'wechat-profile-refresh') await wechatOperation('profile', async () => { await invoke('refreshWechatProfile'); notify('微信账号信息已重新读取。'); });
-    else if (action === 'wechat-import') await wechatOperation('import', async () => { const result = await invoke('importWechatConnection'); if (result?.settings?.connectionImported) { state.wechatSettingsDraft = null; state.wechatAllowedDraft = null; notify('已导入现有连接。请先连接自己的微信，再按名字选择好友与群聊。'); } });
+    else if (action === 'wechat-import') await wechatOperation('import', async () => { const result = await invoke('importWechatConnection'); if (result?.settings?.connectionImported) { state.wechatSettingsDraft = null; state.wechatAllowedDraft = null; notify(result?.connection?.state === 'ready' ? '已连接现有微信，并开启新消息自动回复。你可以按名字调整允许的好友与群聊。' : '已导入现有连接，可在微信页查看连接状态并按名字选择好友与群聊。'); } });
     else if (action === 'wechat-connect') await wechatOperation('connect', () => invoke('connectWechat'));
     else if (action === 'wechat-disconnect') await wechatOperation('disconnect', () => invoke('disconnectWechat'));
     else if (action === 'wechat-draft') {

@@ -34,6 +34,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
   const active = new Map();
   const queued = [];
   const attachmentGrants = new Set();
+  const wechatAttachmentGrants = new Set();
   const taskSources = new Map();
   const exportsActive = new Map();
   let stopping = false, closed = false, inspection = null, inspectedAt = 0;
@@ -90,7 +91,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
   async function inspect() {
     try {
       if(!inspection || Date.now()-inspectedAt>15000){inspection = await (hosted?runtime.inspectHostedRuntime:runtime.inspectRuntime)(await runtimeOptions());inspectedAt=Date.now();}
-      if(hosted)return{...inspection,core:'dsh',identity:'小助手 DSH',runtimeMode:'hosted'};
+      if(hosted)return{...inspection,core:'dsh',identity:'小助手 DSH',runtimeMode:'hosted',detail:inspection.detail+(inspection.available&&inspection.capabilities?.sessionGroups!==true?' 当前 Harness 插件仍为旧版；完整退出并重开 Harness 后，新聊天会按工作空间分类。':'')};
       const key = !!(await secretStore?.get('deepseek-api-key'));
       return { ...inspection, credentialsConfigured:key || !!inspection.credentialsConfigured,
         detail:inspection.detail + (inspection.available && !key && !inspection.credentialsConfigured ? ' 请在设置中连接模型账户；检测到程序不代表模型已连通。' : '') };
@@ -101,7 +102,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       {id:'organize',name:'本地资料整理',description:'生成资料目录、文件校验和文本预览，保存为成果。',status:'available',detail:'无需模型账户；不修改原件。'},
       {id:'agent',name:'小助手 DSH',description:'由小助手 DSH 统一完成对话、写作与协作任务。',status:inspection?.available?'configured':'unavailable',detail:hosted?'复用 Harness 现有登录，无需另填 API Key。其他模型与 API 由小助手作为辅助能力调用。':'DSH 执行器需完成配置。'},
       {id:'literature',name:'文献检索',description:'查询 Crossref 与 arXiv，保存来源记录和 BibTeX。',status:'available',detail:'实际联网检索元数据和来源摘要，失败来源会单独显示。'},
-      {id:'wechat',name:'微信',description:'复用现有微信账号核验、授权会话收信与文字回复。',status:'available',detail:'在微信页导入本机现有连接。AI 只起草，发送由你在桌面决定；收到服务器回执才标记已送达。'},
+      {id:'wechat',name:'微信',description:'复用微信账号、联系人和授权聊天，由小助手 DSH 自动回复新消息。',status:'available',detail:'设置后自动连接与回复；每聊天保留独立上下文，历史消息不会补发。发送结果以实际回执为准。'},
       {id:'mail',name:'多账号邮箱',description:'导入标准 IMAP/SMTP 账号，只读收信、隔离附件与手动发信。',status:'available',detail:'支持标准协议密码/授权码和已获得的 OAuth 令牌。账号能否接入取决于邮箱开放协议与授权；不会自动发送。'},
       {id:'contract',name:'合同工作',description:'使用模板、预览和金额校验生成合同。',status:contractAvailable?'available':'pending',detail:contractAvailable?'可打开独立的本地合同表单工具。内置合成开发模板，正式工作请导入并核对自己的模板。':'合同工具尚未构建或未随当前版本安装。'},
       {id:'skills',name:'技能与专业帮手',description:'导入经过检查的 Skill 方法与本机 MCP 插件。',status:'available',detail:'可管理、检测本机 stdio 插件，按任务选择已启用技能。技能正文不授予权限，尚未向模型开放任意工具。'}
@@ -215,7 +216,10 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     event(task.id,'status','已请求 Harness 执行本任务，模型答复将保存为成果。');
     const fullPrompt=task.prompt+(skillContexts.length?'\n\n'+skillContexts.map(skill=>skill.text).join('\n\n'):'')+(snippets.length?'\n\n'+snippets.join('\n\n'):'');
     if(Buffer.byteLength(fullPrompt)>256*1024)throw Error('本次任务与技能资料超过引擎输入上限，请减少资料后重试。');
-    const result=await runCoreTask({prompt:fullPrompt,workspace:task.workspace,signal,
+    const conversation=task.conversationId?store.getConversation(task.conversationId):null;
+    if(task.conversationId&&!conversation)throw Error('微信会话记录缺失，未建立新的临时会话。');
+    const result=await runCoreTask({prompt:fullPrompt,workspace:conversation?.workspace??task.workspace,signal,
+      ...(conversation?{sessionId:conversation.sessionId??undefined,conversation:{channel:'wechat',displayName:conversation.title}}:{}),
       settings:{...options,persona:`你的名字是${current.assistantName}。${current.persona}`,personaPrefix:`你的名字是${current.assistantName}。${current.persona}`},
       onEvent:entry=>{if(signal.aborted)return;event(task.id,entry.type||'status',entry.message||'正在执行');}});
     inspection=null;
@@ -223,6 +227,9 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     signal.throwIfAborted();
     if(!result.ok)throw new Error(result.error?.message||result.error||'Harness 未确认任务完成。');
     if(typeof result.finalText!=='string'||!result.finalText.trim())throw new Error('引擎未返回可保存的答复。');
+    // A failed native setup may return a proposed ID before it owns a resumable
+    // session. Keep any earlier valid binding and accept new IDs on success.
+    if(conversation&&result.sessionId)store.saveConversationSession(conversation.id,result.sessionId);
     update(task.id,{status:'validating',progress:'正在保存和核对答复',...(result.sessionId?{sessionId:result.sessionId}:{})});
     const text=result.finalText.trim();
     writeResult(task,'小助手答复.md',`# ${markdownText(task.title)}\n\n${text}\n`);
@@ -265,6 +272,9 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     dataDir:root,
     onChange(callback){events.on('change',callback);return()=>events.off('change',callback);},
     grantAttachments(paths){for(const filename of paths)attachmentGrants.add(path.resolve(filename));},
+    grantWechatAttachments(paths){for(const filename of paths)wechatAttachmentGrants.add(path.resolve(filename));},
+    stageWechatAttachment(value){return wechat.stageAttachment(value);},
+    sendWechatAttachment(value){return wechat.sendAttachment(value);},
     async getBootstrap(){const state=await inspect();const caps=capabilities();return{appVersion:APP_VERSION,identity:{name:settings().assistantName,core:'dsh',persona:settings().persona},runtime:state,summary:store.counts(),capabilities:caps};},
     listTasks(){return store.listTasks();},
     getWorkflowsState(){return{workers:coordinator.listWorkers(),workflows:coordinator.listWorkflows()};},
@@ -286,7 +296,36 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     enableSkill(id){return extensionChange(()=>extensions.enableSkill(id,ownerContext));},
     disableSkill(id){return extensionChange(()=>extensions.disableSkill(id,ownerContext));},
     getWechatState(){return wechat.getState();},
-    importWechatConnection(directory){return wechat.importConnection(directory);},
+    async resumeWechatOnStartup(){
+      const imported=await wechat.getState();if(!imported.settings.connectionImported)return imported;
+      const saved=store.getSettings().wechatConnection??{},automatic={},patch={};
+      for(const name of ['autoReply','autoConnect'])if(typeof saved[name]!=='boolean')automatic[name]=true;
+      if(Object.keys(automatic).length)await wechat.saveSettings(automatic);
+      // Retain existing chat authorizations; only fill missing trigger rules from
+      // the already selected legacy source, never from incoming message text.
+      const legacy=legacySources.find(item=>item.kind==='wechatagent');
+      if(legacy&&['wakeMode','wakeWords','chatModes'].some(name=>saved[name]===undefined)){
+        try{const file=path.join(legacy.path,'config','wechatagent.json');if(fs.statSync(file).size<=131072){const original=JSON.parse(fs.readFileSync(file,'utf8').replace(/^\uFEFF/,''));const old=original.wechat??{};
+          if(saved.wakeMode===undefined)patch.wakeMode=old.wake_mode??'mention';
+          if(saved.wakeWords===undefined)patch.wakeWords=old.wake_words??[];
+          if(saved.chatModes===undefined)patch.chatModes=old.chatModes??{};
+        }}catch{ /* The saved default remains restricted to explicit mentions. */ }
+      }
+      if(Object.keys(patch).length){
+        try{await wechat.saveSettings(patch);}
+        catch{
+          const fallback={};for(const [name,value]of Object.entries({wakeMode:'mention',wakeWords:[],chatModes:{}}))if(saved[name]===undefined)fallback[name]=value;
+          await wechat.saveSettings(fallback);
+        }
+      }
+      const current=await wechat.getState();return current.settings.autoConnect?wechat.connect():current;
+    },
+    async importWechatConnection(directory,{automatic=false}={}){
+      const imported=await wechat.importConnection(directory);
+      if(!automatic)return imported;
+      await wechat.saveSettings({autoReply:true,autoConnect:true});
+      return api.resumeWechatOnStartup();
+    },
     saveWechatSettings(patch){return wechat.saveSettings(patch);},
     connectWechat(){return wechat.connect();},
     disconnectWechat(){return wechat.disconnect();},
@@ -330,9 +369,19 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       }
       return api.getTask(task.id);
     },
-    async createTask(value,context=ownerContext){
+    async createTask(value,context=ownerContext,conversationInfo){
       if(stopping)throw new Error('小助手正在退出，请稍后重试。');
       const input=taskInput(value);
+      let conversation;
+      if(conversationInfo){
+        if(context!==externalContext||input.kind!=='agent'||input.workflowId!=='single'||input.attachmentPaths.length||input.skillIds.length)throw Error('会话来源不受支持。');
+        const message=store.getWechatMessage(safeId(conversationInfo.replyToMessageId));
+        if(!message||message.outgoing||message.accountId!==conversationInfo.accountId||message.kind!==conversationInfo.kind||message.conversationId!==conversationInfo.target||conversationInfo.conversationKey!==`wechat:${message.kind}:${message.conversationId}`)throw Error('会话与收到的微信消息不一致。');
+        const fingerprint=createHash('sha256').update(JSON.stringify([message.accountId,message.kind,message.conversationId])).digest('hex').slice(0,32);
+        const workspace=path.join(workspaces,'conversations','wechat_'+fingerprint);fs.mkdirSync(workspace,{recursive:true});
+        if(fs.lstatSync(workspace).isSymbolicLink()||!inside(fs.realpathSync.native(workspaces),fs.realpathSync.native(workspace)))throw Error('会话工作空间不在小助手目录内。');
+        conversation=store.ensureConversation({id:'conversation_'+fingerprint,channel:'wechat',accountId:message.accountId,kind:message.kind,target:message.conversationId,title:message.conversationName.slice(0,160)||'微信会话',workspace:fs.realpathSync.native(workspace)});
+      }
       for(const id of input.skillIds)await extensions.loadSkillContext(id,ownerContext);
       if(input.kind==='organize'&&!input.attachmentPaths.length)throw new Error('请先添加至少一份需要整理的资料。');
       if(input.attachmentPaths.some(p=>!path.isAbsolute(p)))throw new Error('资料必须是已选择的完整文件路径。');
@@ -354,6 +403,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
           attachments.push({name,path:destination,size:fs.statSync(destination).size});
         }
         const task=store.createTask({id,title:input.prompt.replace(/\s+/g,' ').slice(0,48),prompt:input.prompt,kind:input.kind,status:'queued',createdAt:stamp(),workspace,attachments,skillIds:input.skillIds,workflowId:input.workflowId});
+        if(conversation)store.bindTaskConversation(id,conversation.id);
         taskSources.set(id,context===ownerContext?'desktop':'wechat');
         event(id,'created','任务和资料副本已保存。');queued.push(id);setImmediate(()=>void pump());return task;
       } catch(error){
@@ -384,7 +434,13 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     async close(){if(closed)return;stopping=true;await wechat.close();await mail.close();for(const id of queued.splice(0)){update(id,{status:'interrupted',progress:'退出前尚未执行',error:'任务未自动重放。'});}for(const controller of active.values())controller.abort();const deadline=Date.now()+15000;while(active.size&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,30));if(active.size)throw new Error('执行器尚未退出，数据存储保留打开，请重试退出。');await Promise.allSettled([...exportsActive.values()]);await coordinator.close();await migration.close();await extensions.close();store.close();closed=true;events.removeAllListeners();},
   };
   const wechat = createWechatController({store,dataDir:root,secretStore,bridgeFactory:wechatBridgeFactory,
-    createTask:value=>api.createTask(value,externalContext),getTask:id=>api.getTask(id),onChange:changes});
+    authorizeAttachment:filename=>wechatAttachmentGrants.delete(path.resolve(filename)),
+    createTask:(value,conversationInfo)=>api.createTask(value,externalContext,conversationInfo),getTask:id=>api.getTask(id),
+    cancelTask:id=>api.cancelTask(id),readTaskReply:async id=>{
+      const task=findTask(id);if(task.status!=='succeeded')throw Error('小助手尚未完成回复。');
+      const artifact=store.getArtifacts(id).find(item=>item.name==='小助手答复.md');if(!artifact)throw Error('完整回复文件缺失。');
+      return fs.readFileSync(api.resolveArtifact(artifact.id),'utf8').replace(/^# [^\n]*\r?\n\r?\n/,'').trim();
+    },onChange:changes});
   const mail=createMailController({store,dataDir:root,secretStore,onChange:changes,...mailOptions});
   return api;
 }
