@@ -1,0 +1,115 @@
+{
+  "date": "2026-10-25",
+  "source": "G:\\CodexProjects\\电脑管理\\contract-helper\\desktop\\qa\\upgrade-2.4\\source-2.3",
+  "reason": "Existing primary MCP source exactly matches this 2.3 snapshot",
+  "primary_mcp_original_sha256": "ea3e2da4f55f8eb8d1f6527d86456e69c81a5952ed86808e3af8f6950cf64da5",
+  "source_mcp_sha256": "ea3e2da4f55f8eb8d1f6527d86456e69c81a5952ed86808e3af8f6950cf64da5",
+  "files": [
+    {
+      "file": "AiService.cs",
+      "source_sha256": "766c3fc10cde757d53fb9b42d0b60663ae0df001041ca8fa998f61ddc055d3d2",
+      "restored_sha256": "bf1a7df95e6d6f14faa31dd65ca7fc8f2399ffe9109b9694040321cfe62522a1",
+      "unchanged_from_source": false
+    },
+    {
+      "file": "BatchImport.cs",
+      "source_sha256": "8163f6d11b328e43bc80c75349fc14ef3344e1b5fc17a5676b7b6e29ce8e144f",
+      "restored_sha256": "8163f6d11b328e43bc80c75349fc14ef3344e1b5fc17a5676b7b6e29ce8e144f",
+      "unchanged_from_source": true
+    },
+    {
+      "file": "ContractEngine.cs",
+      "source_sha256": "39c0bd4bf012e7e4bebb1392618aea65ced4c28efdd4c7473dfd08c390b8f143",
+      "restored_sha256": "39c0bd4bf012e7e4bebb1392618aea65ced4c28efdd4c7473dfd08c390b8f143",
+      "unchanged_from_source": true
+    },
+    {
+      "file": "ContractLibrary.cs",
+      "source_sha256": "e613691ee0a3b3142cd94b348ae8a3f876ae33d89af299897c4ed43973b6212b",
+      "restored_sha256": "83954888672583cbdcaa083b46dc79faf529f1e6cce123b5149b5c0c3f64e839",
+      "unchanged_from_source": false
+    },
+    {
+      "file": "DeepSeekSetup.cs",
+      "source_sha256": "9d212e5ded9849651d456014c8574702209055e459999749d37fc6dcb80d84f7",
+      "restored_sha256": "9d212e5ded9849651d456014c8574702209055e459999749d37fc6dcb80d84f7",
+      "unchanged_from_source": true
+    },
+    {
+      "file": "DesktopTests.cs",
+      "source_sha256": "2cd4793b66981bc73d06590b50562de215970382c56f4c5bf7d2b09dd8f00ba2",
+      "restored_sha256": "7e1e033a94877f5ddb3031f370a7281d73e5e75b746792e836900c7082cac335",
+      "unchanged_from_source": false
+    },
+    {
+      "file": "EmbeddedContent.cs",
+      "source_sha256": "bfba3ebca3d82bb6e3304b94bdc47fb04c1e1436e5d091e5f6fc6dbd1f0d5dcf",
+      "restored_sha256": "0809c0fac3aadca7c5ad7c6023537c8ec68abc314aecf6d11cef5708e7805023",
+      "unchanged_from_source": false
+    },
+    {
+      "file": "HelpDialog.cs",
+      "source_sha256": "2e074ef49ceb39c38378d57864c81cac2b753284b6c770e7b0d3db35d5b9b0ab",
+      "restored_sha256": "2e074ef49ceb39c38378d57864c81cac2b753284b6c770e7b0d3db35d5b9b0ab",
+      "unchanged_from_source": true
+    },
+    {
+      "file": "LibraryDialogs.cs",
+      "source_sha256": "c2663861b643a61d6458065146581d28bc167653dd31f5979f01730a9dab0a8c",
+      "restored_sha256": "c2663861b643a61d6458065146581d28bc167653dd31f5979f01730a9dab0a8c",
+      "unchanged_from_source": true
+    },
+    {
+      "file": "MainForm.cs",
+      "source_sha256": "9b9974455ea6f4db7cf94419f6398b06dbfa8e850050cc6b26d2aba55f1e8f3a",
+      "restored_sha256": "caae8e5e999f249f1803053ea700457f846314aed9ca28928d49aca8aaef16bd",
+      "unchanged_from_source": false
+    },
+    {
+      "file": "MaterialCatalog.cs",
+      "source_sha256": "2cd6a9bd725b73ecbe61f28e8cce2f28d370d46b8bb2e9550c206560702fd7fb",
+      "restored_sha256": "2cd6a9bd725b73ecbe61f28e8cce2f28d370d46b8bb2e9550c206560702fd7fb",
+      "unchanged_from_source": true
+    },
+    {
+      "file": "MaterialImport.cs",
+      "source_sha256": "56a1a86486bde993ef332ad6c5726b64b30b0f5c78a5020c7b240b5375cd8141",
+      "restored_sha256": "56a1a86486bde993ef332ad6c5726b64b30b0f5c78a5020c7b240b5375cd8141",
+      "unchanged_from_source": true
+    },
+    {
+      "file": "Preferences.cs",
+      "source_sha256": "526d4c0e7e61fcf40c39aa0689f8a79840b4420536f9b49b27ff682fc57ef581",
+      "restored_sha256": "92261c54eba11a254918fa365b8a97db8c3882fe23d3e57d025ab87935af8137",
+      "unchanged_from_source": false
+    },
+    {
+      "file": "TemplateRules.cs",
+      "source_sha256": "3745d03b05e7748549b71cbe14a596b7b6df62e798becf379e8a81dbdc52265d",
+      "restored_sha256": "5540930249a970e72363ea22f7bee4201ddba260fb5ba9c33e75cffe3277c786",
+      "unchanged_from_source": false
+    },
+    {
+      "file": "XpStyle.cs",
+      "source_sha256": "974ed058acee1bdc4bb6fcb7388da059fca11f6d3ee2a896ab2ea9fb3c7329d0",
+      "restored_sha256": "974ed058acee1bdc4bb6fcb7388da059fca11f6d3ee2a896ab2ea9fb3c7329d0",
+      "unchanged_from_source": true
+    },
+    {
+      "file": "build.ps1",
+      "source_sha256": "1e0b14033e09d2c005d64d51cdbf2fde8346b8a19155411e7c13cbbeab524a0c",
+      "restored_sha256": "e21d005190a2cf6ad2bf5e33ec8e0553ea821b3c73dab6e612bc3ae6e94e45d3",
+      "unchanged_from_source": false
+    }
+  ],
+  "resources": "Document/JSON fixtures generated from synthetic data by generate_dev_assets.py; OCR and draft prompts copied from same source snapshot, no credentials",
+  "excluded": [
+    "real contracts",
+    "purchase data",
+    "personal contacts",
+    "bank accounts",
+    "API configuration",
+    "logs",
+    "generated contracts"
+  ]
+}

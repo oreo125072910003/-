@@ -25,7 +25,7 @@
       "phase": "M0",
       "title": "确定 Harness 接入与版本兼容",
       "priority": "P0",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": [],
       "estimate_person_days": {
         "min": 1,
@@ -50,14 +50,19 @@
       "review_refs": [
         "CR08",
         "CR10"
-      ]
+      ],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "已验证0.2.1-rc.2正式CLI及隔离SDK握手，真实模型和完整工具权限仍待验证。"
+      }
     },
     {
       "id": "T02",
       "phase": "M0",
       "title": "补齐合同 MCP 的源码和资源",
       "priority": "P0",
-      "status": "planned",
+      "status": "ready_for_review",
       "depends_on": [],
       "estimate_person_days": {
         "min": 1,
@@ -80,14 +85,19 @@
       ],
       "review_refs": [
         "CR07"
-      ]
+      ],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "匹配2.3源码已恢复；合成资源干净构建及MCP流程通过，正式模板与版面另归T23。"
+      }
     },
     {
       "id": "T03",
       "phase": "M0",
       "title": "建立可复现基线与回归样例",
       "priority": "P0",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": [],
       "estimate_person_days": {
         "min": 1,
@@ -109,14 +119,19 @@
         "他人能按说明重复语法及关键行为检查。",
         "每个审查问题有对应任务；源码、离线检查、真机与安装构建结果分开记录。"
       ],
-      "review_refs": []
+      "review_refs": [],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "已实现预览版中对应的部分能力，完整任务验收条件尚未全部满足。"
+      }
     },
     {
       "id": "T04",
       "phase": "M1",
       "title": "建立产品工程和独立数据目录",
       "priority": "P1",
-      "status": "planned",
+      "status": "ready_for_review",
       "depends_on": [
         "T03"
       ],
@@ -139,14 +154,19 @@
         "新 Windows 用户或不同盘符下路径解析可用。",
         "源码仓库不包含运行数据库、凭据和聊天记录。"
       ],
-      "review_refs": []
+      "review_refs": [],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "新桌面与服务工程、产品数据目录和发布文件清单已形成。"
+      }
     },
     {
       "id": "T05",
       "phase": "M1",
       "title": "定义统一事件和结果契约",
       "priority": "P1",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": [
         "T03"
       ],
@@ -171,14 +191,19 @@
       ],
       "review_refs": [
         "CR06"
-      ]
+      ],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "已实现预览版中对应的部分能力，完整任务验收条件尚未全部满足。"
+      }
     },
     {
       "id": "T06",
       "phase": "M1",
       "title": "实现密钥和网络边界",
       "priority": "P1",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": [
         "T04"
       ],
@@ -205,14 +230,19 @@
       "review_refs": [
         "CR03",
         "CR04"
-      ]
+      ],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "已实现预览版中对应的部分能力，完整任务验收条件尚未全部满足。"
+      }
     },
     {
       "id": "T07",
       "phase": "M1",
       "title": "实现身份和权限网关",
       "priority": "P1",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": [
         "T05"
       ],
@@ -239,14 +269,19 @@
       "review_refs": [
         "CR02",
         "CR10"
-      ]
+      ],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "已实现预览版中对应的部分能力，完整任务验收条件尚未全部满足。"
+      }
     },
     {
       "id": "T08",
       "phase": "M1",
       "title": "实现持久存储和迁移",
       "priority": "P1",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": [
         "T04",
         "T05"
@@ -272,14 +307,19 @@
       ],
       "review_refs": [
         "CR01"
-      ]
+      ],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "已实现预览版中对应的部分能力，完整任务验收条件尚未全部满足。"
+      }
     },
     {
       "id": "T09",
       "phase": "M1",
       "title": "实现 Harness 运行适配器",
       "priority": "P1",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": [
         "T01",
         "T04",
@@ -309,14 +349,19 @@
       ],
       "review_refs": [
         "CR08"
-      ]
+      ],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "已实现预览版中对应的部分能力，完整任务验收条件尚未全部满足。"
+      }
     },
     {
       "id": "T10",
       "phase": "M1",
       "title": "实现持久任务和检查点",
       "priority": "P1",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": [
         "T07",
         "T08",
@@ -344,14 +389,19 @@
       ],
       "review_refs": [
         "CR01"
-      ]
+      ],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "已实现预览版中对应的部分能力，完整任务验收条件尚未全部满足。"
+      }
     },
     {
       "id": "T11",
       "phase": "M1",
       "title": "实现成果库和统一出站队列",
       "priority": "P1",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": [
         "T05",
         "T07",
@@ -381,14 +431,19 @@
         "CR01",
         "CR02",
         "CR06"
-      ]
+      ],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "已实现预览版中对应的部分能力，完整任务验收条件尚未全部满足。"
+      }
     },
     {
       "id": "T12",
       "phase": "M1",
       "title": "实现进程监督和执行隔离",
       "priority": "P1",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": [
         "T06",
         "T07",
@@ -417,7 +472,12 @@
       ],
       "review_refs": [
         "CR10"
-      ]
+      ],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "已实现预览版中对应的部分能力，完整任务验收条件尚未全部满足。"
+      }
     },
     {
       "id": "T13",
@@ -461,7 +521,7 @@
       "phase": "M1",
       "title": "拆分并修复电脑桥接核心",
       "priority": "P1",
-      "status": "planned",
+      "status": "in_progress",
       "depends_on": [
         "T05",
         "T13",
@@ -492,14 +552,19 @@
         "CR06",
         "CR08",
         "CR09"
-      ]
+      ],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "已实现预览版中对应的部分能力，完整任务验收条件尚未全部满足。"
+      }
     },
     {
       "id": "T15",
       "phase": "M1",
       "title": "交付桌面窗口和任务体验",
       "priority": "P1",
-      "status": "planned",
+      "status": "ready_for_review",
       "depends_on": [
         "T04",
         "T05",
@@ -526,7 +591,12 @@
         "双击开发版能聊天、附资料、看进度和打开成果；重启后记录保留。",
         "无明文密钥暴露到渲染界面；远程页面不能调用本地文件或 shell。"
       ],
-      "review_refs": []
+      "review_refs": [],
+      "implementation_evidence": {
+        "date": "2026-10-25",
+        "record": "../../开发记录/20261025_桌面预览版交付.md",
+        "note": "已构建可运行Windows预览版并通过实际界面提交与持久成果验收；完整产品页面继续扩展。"
+      }
     },
     {
       "id": "T16",
@@ -1356,5 +1426,6 @@
       ],
       "review_refs": []
     }
-  ]
+  ],
+  "last_implementation_update": "2026-10-25"
 }

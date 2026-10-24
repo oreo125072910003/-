@@ -12,6 +12,8 @@
 *.key
 
 # Runtime data and local dependencies
+/config/runtime-locations.json
+/.assistant-data/
 node_modules/
 .venv/
 venv/

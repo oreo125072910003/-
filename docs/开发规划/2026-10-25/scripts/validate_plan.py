@@ -32,7 +32,9 @@ def main() -> None:
     for task in tasks:
         visit(task["id"])
         assert task["implementation"] and task["deliverables"] and task["acceptance"]
-        assert task["status"] == "planned"
+        assert task["status"] in {"planned", "in_progress", "blocked", "ready_for_review", "accepted"}
+        if task["status"] != "planned":
+            assert task.get("implementation_evidence"), f"Missing implementation evidence: {task['id']}"
         estimate = task["estimate_person_days"]
         assert 0 < estimate["min"] <= estimate["max"]
 
@@ -66,6 +68,7 @@ def main() -> None:
     for kind in ("js_syntax", "python_ast"):
         assert str(evidence[kind]["passed"]) in review
     result = {"ok": True, "task_count": len(tasks), "core_task_count": len(core),
+              "task_status_counts": {status: sum(task["status"] == status for task in tasks) for status in sorted({task["status"] for task in tasks})},
               "optional_task_count": len(tasks) - len(core), "dependency_graph": "acyclic",
               "review_findings_covered": len(coverage), "local_links_checked": links,
               "core_estimate_person_days": registry["core_estimate_person_days"]}

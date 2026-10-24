@@ -1,0 +1,4 @@
+# Keep document bytes intact when Git performs Windows line-ending conversion.
+*.pdf binary
+*.docx binary
+*.xlsx binary

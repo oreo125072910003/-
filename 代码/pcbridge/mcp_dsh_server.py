@@ -44,6 +44,10 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 SERVER_NAME = "dsh-pc-bridge"
 SERVER_VERSION = "0.1.0"
+# Only advertise the protocol revision implemented by this compatibility server.
+# Full connection lifecycle and SDK migration remain a separate task.
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-03-26",)
+MAX_READ_FILE_BYTES = 1024 * 1024
 DEFAULT_PORT = 8765
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "config.json"
@@ -171,6 +175,10 @@ def share_file(src: Path, cfg: dict) -> str:
 # ----------------------------------------------------------------------------- 文本工具
 
 def decode_text(raw: bytes) -> str:
+    for marker, encoding in ((b"\xff\xfe\x00\x00", "utf-32"), (b"\x00\x00\xfe\xff", "utf-32"),
+                             (b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16")):
+        if raw.startswith(marker):
+            return raw.decode(encoding, "replace")
     for enc in ("utf-8-sig", "utf-8", "gbk"):
         try:
             return raw.decode(enc)
@@ -407,6 +415,16 @@ JOBS_LOCK = threading.Lock()
 
 
 # ----------------------------------------------------------------------------- 工具实现
+
+class ToolExecutionError(Exception):
+    """A known business failure; the MCP boundary must mark it as isError."""
+
+
+def job_tool_result(job: Job, cfg: dict) -> str:
+    text = job.render(cfg)
+    if not job.result or not job.result.get("ok"):
+        raise ToolExecutionError(text)
+    return text
 
 def tool_pc_status(cfg: dict) -> str:
     root = Path(cfg["workspace_root"])
@@ -698,7 +716,7 @@ def tool_run_agent(args: dict, cfg: dict) -> str:
     timeout = max(10, min(timeout, 3600))
 
     if DSH_CMD is None:
-        return (
+        raise ToolExecutionError(
             "❌ 这台电脑上没找到 dsh 命令,任务没法执行。\n"
             f"{DSH_HINT}\n"
             "解决:在 DeepSeek Harness 桌面版里启用命令行工具,或设置环境变量 DSH_CMD 指向它。"
@@ -718,7 +736,7 @@ def tool_run_agent(args: dict, cfg: dict) -> str:
 
     if job.done.wait(wait):
         job.answered_inline = True
-        return job.render(cfg)
+        return job_tool_result(job, cfg)
     return (
         f"⏳ 已经开始在电脑上跑了,大约需要几十秒到几分钟。\n"
         f"job_id = {job.id}\n"
@@ -734,18 +752,22 @@ def tool_job_status(args: dict, cfg: dict) -> str:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
     if job is None:
-        return f"没有这个任务: {job_id}\n{_describe_jobs(cfg)}"
+        raise ToolExecutionError(f"没有这个任务: {job_id}\n{_describe_jobs(cfg)}")
     if job.done.is_set():
+        if not job.result or not job.result.get("ok"):
+            return job_tool_result(job, cfg)
         if job.pushed:
             return "这个任务已经完成,结果已由电脑直接发到微信了,不用再重复一遍。"
-        return job.render(cfg)
+        return job_tool_result(job, cfg)
     # 默认就在这一次调用里再等一会儿,避免模型用密集轮询把工具调用次数烧光
     wait = int(args.get("wait_seconds") or 75)
     wait = max(5, min(wait, 110))
     if job.done.wait(wait):
+        if not job.result or not job.result.get("ok"):
+            return job_tool_result(job, cfg)
         if job.pushed:
             return "这个任务已经完成,结果已由电脑直接发到微信了,不用再重复一遍。"
-        return job.render(cfg)
+        return job_tool_result(job, cfg)
     return (
         f"⏳ 仍在运行,已 {round(time.time() - job.started)}s。\n"
         f"job_id={job_id}\n"
@@ -756,9 +778,9 @@ def tool_job_status(args: dict, cfg: dict) -> str:
 def tool_list_dir(args: dict, cfg: dict) -> str:
     target = resolve_path(args.get("path") or ".", cfg)
     if not target.exists():
-        return f"路径不存在: {target}"
+        raise ToolExecutionError(f"路径不存在: {target}")
     if not target.is_dir():
-        return f"不是目录: {target}"
+        raise ToolExecutionError(f"不是目录: {target}")
     entries = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
     lines = [f"{target}  ({len(entries)} 项)"]
     for entry in entries[:300]:
@@ -776,12 +798,21 @@ def tool_list_dir(args: dict, cfg: dict) -> str:
 
 
 def tool_read_file(args: dict, cfg: dict) -> str:
+    limit = args.get("max_bytes", 400_000)
+    if type(limit) is not int or not 1 <= limit <= MAX_READ_FILE_BYTES:
+        raise ValueError(f"max_bytes 须为 1 至 {MAX_READ_FILE_BYTES} 之间的整数")
     target = resolve_path(args.get("path") or "", cfg)
     if not target.is_file():
-        return f"文件不存在: {target}"
-    limit = int(args.get("max_bytes") or 400_000)
-    raw = target.read_bytes()[:limit]
-    return truncate(f"{target}（{target.stat().st_size:,} B）\n\n{decode_text(raw)}", cfg["max_output_chars"])
+        raise ToolExecutionError(f"文件不存在: {target}")
+    with target.open("rb") as stream:
+        raw = stream.read(limit)
+        size = os.fstat(stream.fileno()).st_size
+    # NUL without a UTF-16/32 BOM usually signals a binary file. Do not dump it
+    # into model context as text; export/preview tools handle binary artifacts.
+    if b"\x00" in raw and not raw.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")):
+        raise ToolExecutionError("该文件看起来是二进制文件，请使用对应预览或导出工具。")
+    note = f"；只读取前 {limit:,} B" if size > limit else ""
+    return truncate(f"{target}（{size:,} B{note}）\n\n{decode_text(raw)}", cfg["max_output_chars"])
 
 
 def tool_write_file(args: dict, cfg: dict) -> str:
@@ -794,7 +825,7 @@ def tool_write_file(args: dict, cfg: dict) -> str:
 
 def tool_shell(args: dict, cfg: dict) -> str:
     if not cfg.get("allow_shell"):
-        return (
+        raise ToolExecutionError(
             "shell 工具未启用(默认关闭)。\n"
             "确实需要就改 config.json 的 allow_shell = true;"
             "更推荐用 run_local_agent,让 dsh 在沙箱里执行,安全和可追溯性都更好。"
@@ -807,7 +838,10 @@ def tool_shell(args: dict, cfg: dict) -> str:
                          str(Path(cfg["workspace_root"])), timeout)
     out = (result["stdout"] or "") + (("\n--- stderr ---\n" + result["stderr"]) if result["stderr"].strip() else "")
     flag = "✅" if result["ok"] else f"❌ exit={result['code']}"
-    return truncate(f"{flag} {result['elapsed']}s\n\n{out.strip() or '(无输出)'}", cfg["max_output_chars"])
+    text = truncate(f"{flag} {result['elapsed']}s\n\n{out.strip() or '(无输出)'}", cfg["max_output_chars"])
+    if not result["ok"]:
+        raise ToolExecutionError(text)
+    return text
 
 
 def _reader_recent(talker: str, cfg: dict, limit: int = 6):
@@ -1071,11 +1105,11 @@ def _send_file_verified(src: Path, cfg: dict, target_title: str = "", talker: st
 def tool_export_file(args: dict, cfg: dict) -> str:
     src = resolve_path(args.get("path") or "", cfg)
     if not src.is_file():
-        return "【发送失败】文件不存在: %s" % src
+        raise ToolExecutionError("【发送失败】文件不存在: %s" % src)
     size = src.stat().st_size
     limit_mb = int(cfg.get("max_export_mb") or 50)
     if size > limit_mb * 1024 * 1024:
-        return "【发送失败】文件太大(%s B),超过 %d MB 上限。" % (f"{size:,}", limit_mb)
+        raise ToolExecutionError("【发送失败】文件太大(%s B),超过 %d MB 上限。" % (f"{size:,}", limit_mb))
 
     private_wxid = cfg.get("wechat_target_wxid") or "wxid_h0t6y5w6yke022"
     explicit = str(args.get("target") or "").strip()
@@ -1085,37 +1119,37 @@ def tool_export_file(args: dict, cfg: dict) -> str:
         wxid, name = resolve_target_chat(target, cfg)
 
     if explicit and not wxid:
-        return "【发送失败】找不到聊天: %s" % explicit
+        raise ToolExecutionError("【发送失败】找不到聊天: %s" % explicit)
 
     if not cfg.get("wechat_native_file", True):
-        return "【没有发送】文件发送通道被配置关闭(wechat_native_file=false)。"
+        raise ToolExecutionError("【没有发送】文件发送通道被配置关闭(wechat_native_file=false)。")
 
     # 群/其他联系人:用已校准(标题指纹存在)的会话发,没校准就拒发,绝不静默改发私聊
     if wxid and wxid != private_wxid:
         ref = _title_ref_path(name or "")
         if not ref.is_file():
-            return ("【没有发送】「%s」还没校准会话标题指纹,为防发错聊天,文件没有发出去。"
+            raise ToolExecutionError("【没有发送】「%s」还没校准会话标题指纹,为防发错聊天,文件没有发出去。"
                     "先在电脑上把这个聊天打开一次,再用 export_file 重试(或先用 send_image/文字)。"
                     % (name or target))
         status, detail = _send_file_verified(src, cfg, target_title=name, talker=wxid)
         if status == "ok":
             return "【真实文件消息已送达】" + detail
         if status == "unverified":
-            return "【已尝试发送但未确认】" + detail
-        return "【发送失败,文件没有发出去】" + detail
+            raise ToolExecutionError("【已尝试发送但未确认，请勿自动重发】" + detail)
+        raise ToolExecutionError("【发送失败,文件没有发出去】" + detail)
 
     if not target and not explicit:
-        return ("【没有发送】当前聊天不明确(多个聊天同时活跃),文件很容易发错地方,所以没有发。"
+        raise ToolExecutionError("【没有发送】当前聊天不明确(多个聊天同时活跃),文件很容易发错地方,所以没有发。"
                 "请显式传 target(群名或「私聊」)后再发一次。")
 
     status, detail = _send_file_verified(src, cfg)
     if status == "ok":
         return "【真实文件消息已送达】" + detail
     if status == "unverified":
-        return "【已尝试发送但未确认】" + detail
+        raise ToolExecutionError("【已尝试发送但未确认，请勿自动重发】" + detail)
     if status == "pages_ok":
-        return "【文件发送失败,已改发图片】" + detail
-    return "【发送失败,文件没有发出去】" + detail
+        raise ToolExecutionError("【文件发送失败,已改发图片，请勿自动重发】" + detail)
+    raise ToolExecutionError("【发送失败,文件没有发出去】" + detail)
 
 
 WECHAT_PROJECT = Path(r"G:\wechat-deepseek\data\workspace")
@@ -1336,18 +1370,18 @@ def wechat_send_native(src: Path, cfg: dict, mode: str, skip_title: bool = False
 def tool_send_image(args: dict, cfg: dict) -> list:
     src = resolve_path(args.get("path") or "", cfg)
     if not src.is_file():
-        return [{"type": "text", "text": f"图片不存在: {src}"}]
+        raise ToolExecutionError(f"图片不存在: {src}")
     suffix = src.suffix.lower()
     mime = MIME_BY_SUFFIX.get(suffix)
     if mime is None:
-        return [{"type": "text", "text": f"不是图片文件: {src.name}(支持 png/jpg/jpeg/gif/webp/bmp)"}]
+        raise ToolExecutionError(f"不是图片文件: {src.name}(支持 png/jpg/jpeg/gif/webp/bmp)")
     caption = (args.get("caption") or "").strip()
     private_wxid = cfg.get("wechat_target_wxid") or "wxid_h0t6y5w6yke022"
     explicit = str(args.get("target") or "").strip()
     target = _pick_target(args, cfg)
     target_wxid, target_name = resolve_target_chat(target, cfg) if target else ("", "")
     if explicit and not target_wxid:
-        return [{"type": "text", "text": f"找不到聊天「{explicit}」,图片没有发出去。"}]
+        raise ToolExecutionError(f"找不到聊天「{explicit}」,图片没有发出去。")
 
     # 优先:hook 原生图片消息(按 wxid 定向,不抢焦点、不会发错会话)
     if cfg.get("wechat_hook_image", True) and src.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
@@ -1361,11 +1395,13 @@ def tool_send_image(args: dict, cfg: dict) -> list:
     # 退一步:UI 自动化(需要窗口停在目标会话;只有目标是主人私聊时才用)
     if cfg.get("wechat_native_image", True) and (not target or target_wxid == private_wxid):
         sent = wechat_send_native(src, cfg, "image")
-        if sent and sent != "__TITLE_MISMATCH__":
+        if sent and sent not in ("__TITLE_MISMATCH__", "__WINDOW_BLANK__"):
             text = sent + ("\n" + caption if caption else "")
             return [{"type": "text", "text": text + "\n图片已经在微信里了,回复里不用再贴链接。"}]
         if sent == "__TITLE_MISMATCH__":
-            return [{"type": "text", "text": "微信当前不在主人私聊,为了不发错地方,图片没有发出去。让主人把微信切回私聊再试。"}]
+            raise ToolExecutionError("微信当前不在主人私聊,为了不发错地方,图片没有发出去。让主人把微信切回私聊再试。")
+        if sent == "__WINDOW_BLANK__":
+            raise ToolExecutionError("微信窗口白屏，图片没有确认发送，请恢复客户端后检查聊天记录，勿自动重发。")
 
     # 退路:图片内容 + 备用链接
     size = src.stat().st_size
@@ -1568,18 +1604,18 @@ def tool_gpt_draw(args: dict, cfg: dict) -> str:
     """用本机 ChatGPT 账号画图(异步):先返回,画好后自动把图片发进微信。"""
     prompt = (args.get("prompt") or args.get("description") or "").strip()
     if not prompt:
-        return "prompt 不能为空"
+        raise ValueError("prompt 不能为空")
     engine = (args.get("engine") or cfg.get("gpt_draw_engine") or "free").strip().lower()
     target = _pick_target(args, cfg)
     where = "微信"
     if target:
         wxid, name = resolve_target_chat(target, cfg)
         if not wxid:
-            return "找不到聊天: " + target
+            raise ToolExecutionError("找不到聊天: " + target)
         where = name
     if engine in ("gpt", "chatgpt", "codex"):
         if _codex_cmd(cfg) is None:
-            return "这台电脑上没找到 codex CLI,GPT 画图通道不可用。"
+            raise ToolExecutionError("这台电脑上没找到 codex CLI,GPT 画图通道不可用。")
         threading.Thread(target=_gpt_draw_worker, args=(prompt, cfg, target), daemon=True).start()
         return ("🎨 用 GPT 画了(大约 1-2 分钟,会消耗你的 GPT 额度),画好直接发到%s。\n主题: " % where + prompt)
     threading.Thread(target=_free_draw_worker, args=(prompt, cfg, target), daemon=True).start()
@@ -1593,7 +1629,7 @@ def tool_fetch_paper(args: dict, cfg: dict) -> str:
 
     query = (args.get("query") or args.get("doi") or args.get("title") or "").strip()
     if not query:
-        return "请给出 DOI、标题或 arXiv 编号"
+        raise ValueError("请给出 DOI、标题或 arXiv 编号")
     out_dir = Path(cfg.get("papers_dir") or r"F:\\deepseek工作区\\papers")
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1738,23 +1774,25 @@ def tool_fetch_paper(args: dict, cfg: dict) -> str:
         msg.append("这台电脑的校园网 IP 也没拿到(可能未订阅该刊,或出版商要求网页登录)。")
     if notes:
         msg.append("细节:" + ";".join(notes[:4]))
-    return "\n".join(msg)
+    raise ToolExecutionError("\n".join(msg))
 
 
 def tool_ask_gpt(args: dict, cfg: dict) -> str:
     """通过用户电脑上的 ChatGPT(Codex CLI) 提问,返回它的回答。"""
     prompt = (args.get("prompt") or args.get("question") or "").strip()
     if not prompt:
-        return "prompt 不能为空"
+        raise ValueError("prompt 不能为空")
     timeout = int(args.get("timeout_seconds") or cfg.get("gpt_timeout_sec") or 240)
     timeout = max(30, min(timeout, 600))
     if _codex_cmd(cfg) is None:
-        return "这台电脑上没找到 codex CLI,GPT 通道不可用。"
+        raise ToolExecutionError("这台电脑上没找到 codex CLI,GPT 通道不可用。")
     result = _codex_run(prompt, cfg, timeout)
 
     raw = (result.get("stdout") or "") + "\n" + (result.get("stderr") or "")
     if not result.get("ok") and not raw.strip():
-        return "GPT 没有返回内容(CLI 退出异常)。"
+        raise ToolExecutionError("GPT 没有返回内容(CLI 退出异常)。")
+    if not result.get("ok"):
+        raise ToolExecutionError("GPT 执行失败: " + truncate(raw.strip(), cfg["max_output_chars"]))
 
     lines = raw.splitlines()
     answer = ""
@@ -1781,7 +1819,7 @@ def tool_ask_gpt(args: dict, cfg: dict) -> str:
     if not answer:
         answer = raw.strip()
     if not answer:
-        return "GPT 返回了空内容。"
+        raise ToolExecutionError("GPT 返回了空内容。")
     return answer
 
 
@@ -1793,7 +1831,7 @@ def tool_fetch_player_stats(args: dict, cfg: dict) -> str:
     want = (args.get("category") or "all").strip().lower()
     keys = list(sections) if want in ("all", "") else [want] if want in sections else []
     if not keys:
-        return "不支持的分类: %s(可选 pts/reb/asts/stl/blk/all)" % want
+        raise ValueError("不支持的分类: %s(可选 pts/reb/asts/stl/blk/all)" % want)
     lines = ["【NBA 球员数据榜】虎扑中文数据"]
     ok = False
     for key in keys:
@@ -1810,7 +1848,7 @@ def tool_fetch_player_stats(args: dict, cfg: dict) -> str:
         for rank, name, team, val in rows:
             lines.append("%d. %s(%s) %g" % (rank, name, team, val))
     if not ok:
-        return "球员数据没拉到,稍后再试。"
+        raise ToolExecutionError("球员数据没拉到,稍后再试。")
     return "\n".join(lines)
 
 
@@ -1826,7 +1864,7 @@ def tool_fetch_scores(args: dict, cfg: dict) -> str:
             return zh + "\n(数据源: 虎扑)"
     path = ESPN_PATHS.get(sport)
     if not path:
-        return ("不支持的赛事: %s\n可选: %s" % (sport, ", ".join(sorted(ESPN_PATHS))))
+        raise ValueError("不支持的赛事: %s\n可选: %s" % (sport, ", ".join(sorted(ESPN_PATHS))))
     url = "https://site.api.espn.com/apis/site/v2/sports/%s/scoreboard" % path
     if date:
         url += "?dates=" + date
@@ -1854,7 +1892,7 @@ def tool_fetch_scores(args: dict, cfg: dict) -> str:
             if attempt < 2:
                 time.sleep(0.8)
     if payload is None:
-        return "查询失败(%s): %s\n(网络抖动,已重试 3 次)换个日期或换个赛事再试。" % (sport, last_err)
+        raise ToolExecutionError("查询失败(%s): %s\n(网络抖动,已重试 3 次)换个日期或换个赛事再试。" % (sport, last_err))
 
     events = payload.get("events") or []
     if not events:
@@ -2087,7 +2125,7 @@ def screenshot_url(url: str, out, cfg: dict, width=None, height=None) -> dict:
 def tool_screenshot_url(args: dict, cfg: dict) -> str:
     url = (args.get("url") or "").strip()
     if not url:
-        return "url 不能为空"
+        raise ValueError("url 不能为空")
     raw_out = str(args.get("path") or "").strip()
     if raw_out:
         out = resolve_path(raw_out, cfg)
@@ -2096,7 +2134,7 @@ def tool_screenshot_url(args: dict, cfg: dict) -> str:
             "shot_%s_%s.png" % (time.strftime("%Y%m%d_%H%M%S"), uuid.uuid4().hex[:4]))
     res = screenshot_url(url, out, cfg, args.get("width"), args.get("height"))
     if not res.get("ok"):
-        return ("【截图失败】%s\n所有尝试都没拿到非空白截图(常见原因:网站要登录/要过人机验证/"
+        raise ToolExecutionError("【截图失败】%s\n所有尝试都没拿到非空白截图(常见原因:网站要登录/要过人机验证/"
                 "强依赖交互,或被本机代理拦成反爬挑战页)。建议改用公开数据接口(如 fetch_scores)"
                 "或换数据源,不要交空白图。" % res.get("error", ""))
     return ("【截图成功·已校验非空白】%s\n尺寸 %d x %d,大小 %s B,近白像素占比 %.4f,"
@@ -2260,10 +2298,10 @@ def read_web_page(url: str, cfg: dict, max_chars: int = 6000) -> dict:
 def tool_read_web_page(args: dict, cfg: dict) -> str:
     url = (args.get("url") or "").strip()
     if not url:
-        return "url 不能为空"
+        raise ValueError("url 不能为空")
     result = read_web_page(url, cfg, args.get("max_chars"))
     if not result.get("ok"):
-        return ("【读取失败】%s\n原因: %s\n不要编造正文;可以请对方把正文复制发来,"
+        raise ToolExecutionError("【读取失败】%s\n原因: %s\n不要编造正文;可以请对方把正文复制发来,"
                 "或换一个公开数据接口。" % (url, result.get("error", "")))
     return ("【网页正文·已读取】%s\n标题: %s\n方式: %s,共 %s 字%s\n---\n%s" % (
         result["url"], result["title"] or "(无标题)", result["method"],
@@ -2408,7 +2446,7 @@ TOOLS = [
         "description": "读取这台电脑上的文本文件。",
         "inputSchema": {
             "type": "object",
-            "properties": {"path": {"type": "string"}, "max_bytes": {"type": "integer"}},
+            "properties": {"path": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": MAX_READ_FILE_BYTES}},
             "required": ["path"],
             "additionalProperties": False,
         },
@@ -2526,6 +2564,8 @@ TOOL_HANDLERS = {
 def call_tool(params: dict, cfg: dict) -> dict:
     name = params.get("name") or ""
     arguments = params.get("arguments") or {}
+    if not isinstance(arguments, dict):
+        return {"content": [{"type": "text", "text": "工具参数须为对象"}], "isError": True}
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
         return {"content": [{"type": "text", "text": f"没有这个工具: {name}"}], "isError": True}
@@ -2568,9 +2608,10 @@ def handle_rpc(message: dict, cfg: dict) -> dict | None:
 
     try:
         if method == "initialize":
-            requested = params.get("protocolVersion") or "2025-03-26"
+            requested = params.get("protocolVersion")
             result = {
-                "protocolVersion": requested,
+                "protocolVersion": (requested if requested in SUPPORTED_PROTOCOL_VERSIONS
+                                    else SUPPORTED_PROTOCOL_VERSIONS[0]),
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                 "instructions": (

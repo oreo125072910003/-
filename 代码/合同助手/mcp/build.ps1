@@ -1,4 +1,4 @@
-﻿param([string]$OutputFolder = '成品_合同助手2.3')
+﻿param([string]$OutputFolder = 'out\development')
 $ErrorActionPreference = 'Stop'
 $desktopRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'desktop'
 $outputDir = Join-Path $desktopRoot $OutputFolder
