@@ -11,6 +11,18 @@ namespace WeixinSend { bool SendStickerFile(const std::string&,const std::string
 namespace WeixinSendXML { void Initialize() {} bool ForwardXmlMessage(const std::string&,const std::string&) { ExitProcess(9);return false; } }
 namespace WeChatAgentSticker { bool StartTrace(const std::string&) {ExitProcess(9);return false;} std::string TraceJson(){return "{}";} }
 int wmain(int argc, wchar_t** argv) {
+#ifdef WECHATAGENT_IMAGE_PROBE
+    if (argc == 5 && std::wstring(argv[1]) == L"--image-probe") {
+        ConfigureWeChatAgentImageProbe(argv[2], argv[3], argv[4]);
+        httplib::Server server;
+        RegisterWeChatAgentRoutes(server);
+        int port = server.bind_to_any_port("127.0.0.1");
+        if (port <= 0) return 4;
+        std::cout << port << std::endl;
+        server.listen_after_bind();
+        return 0;
+    }
+#endif
     if (argc != 2) return 2;
     HANDLE file = CreateFileW(argv[1], GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
     if (file == INVALID_HANDLE_VALUE) return 3;

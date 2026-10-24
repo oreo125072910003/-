@@ -10,6 +10,11 @@
 #include <vector>
 #include <regex>
 #include <sstream>
+#include <memory>
+#include <map>
+#include <functional>
+#include <stdexcept>
+#include <atomic>
 #include <bcrypt.h>
 #pragma comment(lib,"bcrypt.lib")
 #include "httplib.h"
@@ -148,6 +153,225 @@ static std::set<std::string> DatabaseAccounts() {
     return accounts;
 }
 
+namespace {
+// Keep the driver disabled in production: the reviewed upstream image builder
+// overwrites UTF-16 path length/capacity with UTF-8 byte counts. Its vtables and
+// ownership ABI have not been verified against a real 4.1.10.27 image send.
+// Never call WeixinSend::SendImage just because an address is executable.
+struct ImageDriver {
+    std::filesystem::path root;
+    std::function<bool()> ready = [] { return false; };
+    std::function<std::string()> version = CoreVersion;
+    std::function<std::set<std::string>()> accounts = DatabaseAccounts;
+    std::function<bool(const std::string&, const std::wstring&)> submit;
+};
+static std::shared_ptr<ImageDriver> imageDriver = std::make_shared<ImageDriver>();
+struct ImageFault : std::runtime_error {
+    int status;
+    ImageFault(const char* code, int value = 400) : std::runtime_error(code), status(value) {}
+};
+struct PinnedHandle {
+    HANDLE value = INVALID_HANDLE_VALUE;
+    explicit PinnedHandle(HANDLE handle) : value(handle) {}
+    ~PinnedHandle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+    PinnedHandle(const PinnedHandle&) = delete;
+    PinnedHandle& operator=(const PinnedHandle&) = delete;
+};
+using Pin = std::shared_ptr<PinnedHandle>;
+struct ImageSnapshot { std::vector<Pin> pins; std::filesystem::path path; };
+
+static std::wstring StrictWide(const std::string& text) {
+    if (text.empty() || text.size() > 4096 || text.find('\0') != std::string::npos) throw ImageFault("IMAGE_INVALID_UTF8");
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    if (count <= 0) throw ImageFault("IMAGE_INVALID_UTF8");
+    std::wstring wide(count, L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), wide.data(), count) != count) throw ImageFault("IMAGE_INVALID_UTF8");
+    return wide;
+}
+static std::filesystem::path ImagePath(const std::wstring& value) {
+    if (value.size() < 4 || value.size() > 1024 || !iswalpha(value[0]) || value[1] != L':' ||
+        (value[2] != L'\\' && value[2] != L'/') || value.find(L':', 2) != std::wstring::npos || value.find(L'\0') != std::wstring::npos) throw ImageFault("IMAGE_PATH_REFUSED");
+    std::filesystem::path result(value);
+    for (const auto& part : result.relative_path()) {
+        auto name = part.native();
+        if (name.empty() || name == L"." || name == L".." || name.back() == L'.' || name.back() == L' ' ||
+            name.find_first_of(L"<>\"|?*") != std::wstring::npos) throw ImageFault("IMAGE_PATH_REFUSED");
+    }
+    return result.lexically_normal();
+}
+static bool SamePath(const std::filesystem::path& left, const std::filesystem::path& right) {
+    return _wcsicmp(left.native().c_str(), right.native().c_str()) == 0;
+}
+static Pin PinFile(const std::filesystem::path& path, bool directory) {
+    HANDLE value = CreateFileW(path.c_str(), directory ? FILE_READ_ATTRIBUTES : GENERIC_READ,
+        directory ? FILE_SHARE_READ | FILE_SHARE_WRITE : FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT | (directory ? FILE_FLAG_BACKUP_SEMANTICS : 0), nullptr);
+    if (value == INVALID_HANDLE_VALUE) throw ImageFault("IMAGE_PATH_UNAVAILABLE");
+    auto pin = std::make_shared<PinnedHandle>(value);
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
+    if (GetFileType(value) != FILE_TYPE_DISK || !GetFileInformationByHandleEx(value, FileAttributeTagInfo, &attributes, sizeof(attributes)) ||
+        attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT || bool(attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != directory) throw ImageFault("IMAGE_PATH_REFUSED");
+    return pin;
+}
+static std::vector<Pin> PinChain(const std::filesystem::path& path, bool directory) {
+    std::vector<Pin> pins;
+    auto current = path.root_path();
+    pins.push_back(PinFile(current, true));
+    for (const auto& part : path.relative_path()) {
+        current /= part;
+        pins.push_back(PinFile(current, !SamePath(current, path) || directory));
+    }
+    return pins;
+}
+static std::vector<unsigned char> ReadPinned(const Pin& file, size_t limit) {
+    LARGE_INTEGER length{};
+    if (!GetFileSizeEx(file->value, &length) || length.QuadPart <= 0 || length.QuadPart > static_cast<LONGLONG>(limit)) throw ImageFault("IMAGE_FILE_SIZE_REFUSED");
+    std::vector<unsigned char> bytes(static_cast<size_t>(length.QuadPart));
+    DWORD count = 0;
+    if (!ReadFile(file->value, bytes.data(), static_cast<DWORD>(bytes.size()), &count, nullptr) || count != bytes.size()) throw ImageFault("IMAGE_FILE_READ_FAILED");
+    return bytes;
+}
+static std::string ImageHash(const unsigned char* bytes, size_t length) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0) throw ImageFault("IMAGE_HASH_FAILED", 503);
+    unsigned char digest[32]{};
+    auto result = BCryptHash(algorithm, nullptr, 0, const_cast<PUCHAR>(bytes), static_cast<ULONG>(length), digest, 32);
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (result < 0) throw ImageFault("IMAGE_HASH_FAILED", 503);
+    static const char hex[] = "0123456789abcdef";
+    std::string value;
+    for (auto byte : digest) { value += hex[byte >> 4]; value += hex[byte & 15]; }
+    return value;
+}
+static std::string ImageHash(const std::string& value) { return ImageHash(reinterpret_cast<const unsigned char*>(value.data()), value.size()); }
+static ImageSnapshot InspectImage(const ImageDriver& driver, const json& data) {
+    auto root = ImagePath(driver.root.native());
+    auto image = ImagePath(StrictWide(data.at("path").get<std::string>()));
+    auto name = StrictWide(data.at("name").get<std::string>());
+    if (!SamePath(image.parent_path().parent_path(), root / L"wechat" / L"outgoing") || image.filename().native() != name ||
+        !std::regex_match(Utf8(image.parent_path().filename().native()), std::regex("wxatt_[a-f0-9]{32}")) ||
+        !data.at("size").is_number_unsigned() || data.at("size").get<uint64_t>() == 0 || data.at("size").get<uint64_t>() > 8 * 1024 * 1024) throw ImageFault("IMAGE_SNAPSHOT_REFUSED");
+    auto pins = PinChain(image, false);
+    auto bytes = ReadPinned(pins.back(), 8 * 1024 * 1024);
+    if (bytes.size() != data.at("size").get<uint64_t>() || ImageHash(bytes.data(), bytes.size()) != data.at("sha256").get<std::string>()) throw ImageFault("IMAGE_INTEGRITY_FAILED");
+    auto extension = image.extension().native();
+    for (auto& value : extension) value = towlower(value);
+    auto mime = data.at("mime").get<std::string>();
+    bool png = bytes.size() >= 8 && !memcmp(bytes.data(), "\x89PNG\r\n\x1a\n", 8);
+    bool jpeg = bytes.size() >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff;
+    if (!(png && extension == L".png" && mime == "image/png") && !(jpeg && (extension == L".jpg" || extension == L".jpeg") && mime == "image/jpeg")) throw ImageFault("IMAGE_FORMAT_UNSUPPORTED");
+    return { std::move(pins), image };
+}
+static void WriteImageState(const std::filesystem::path& filename, const json& record, bool first) {
+    auto text = record.dump();
+    // CREATE_NEW is the durable one-shot reservation. A damaged or interrupted
+    // record is retained, never removed to turn an unknown outcome into a retry.
+    auto destination = first ? filename : std::filesystem::path(filename.native() + L".next");
+    HANDLE value = CreateFileW(destination.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+    if (value == INVALID_HANDLE_VALUE) throw ImageFault("IMAGE_STATE_UNAVAILABLE", 503);
+    bool saved = false;
+    { PinnedHandle pin(value); DWORD count = 0;
+      saved = WriteFile(value, text.data(), static_cast<DWORD>(text.size()), &count, nullptr) && count == text.size() && FlushFileBuffers(value); }
+    if (!saved || (!first && !MoveFileExW(destination.c_str(), filename.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))) throw ImageFault("IMAGE_STATE_UNAVAILABLE", 503);
+}
+static void ImageReply(httplib::Response& response, int status, const char* code, bool attempted = false) {
+    response.status = status;
+    response.set_content(json{{"ret", 1}, {"error", code}, {"attempted", attempted}, {"retryable", false}}.dump(), "application/json");
+}
+static void RegisterImageRoute(httplib::Server& server, std::function<bool(const httplib::Request&, httplib::Response&)> authorized,
+    std::shared_ptr<ImageDriver> driver) {
+    // Held snapshot handles prevent replacement or writes while native work may
+    // still consume its path. The bounded driver lifetime is the Hook process.
+    auto held = std::make_shared<std::map<std::string, ImageSnapshot>>();
+    server.Post("/SendImgMsg", [authorized, driver, held](const httplib::Request& request, httplib::Response& response) {
+        if (!authorized(request, response)) return;
+        bool attempted = false;
+        try {
+            // No config, path lookup, directory creation or ledger writes happen
+            // for production requests while the ABI is explicitly unsupported.
+            if (!driver->ready() || !driver->submit) { ImageReply(response, 503, "IMAGE_NATIVE_ABI_UNVERIFIED"); return; }
+            auto account = request.get_header_value("X-WeChatAgent-Account");
+            auto identity = [&] {
+                auto accounts = driver->accounts();
+                if (driver->version() != "4.1.10.27" || account.empty() || accounts.size() != 1 || !accounts.count(account)) throw ImageFault("IMAGE_ACCOUNT_OR_VERSION_MISMATCH", 409);
+            };
+            identity();
+            auto data = json::parse(request.body);
+            const std::set<std::string> keys = {"wxidorgid", "path", "name", "size", "sha256", "mime", "deliveryId"};
+            if (!data.is_object() || data.size() != keys.size()) throw ImageFault("IMAGE_REQUEST_INVALID");
+            for (auto it = data.begin(); it != data.end(); ++it) if (!keys.count(it.key())) throw ImageFault("IMAGE_REQUEST_INVALID");
+            auto target = data.at("wxidorgid").get<std::string>(), id = data.at("deliveryId").get<std::string>();
+            if (!std::regex_match(target, std::regex("[A-Za-z0-9_.@-]{1,256}")) ||
+                !std::regex_match(id, std::regex("[a-f0-9]{64}")) || !std::regex_match(data.at("sha256").get<std::string>(), std::regex("[a-f0-9]{64}"))) throw ImageFault("IMAGE_REQUEST_INVALID");
+            std::unique_lock<std::timed_mutex> lock(sendMutex, std::defer_lock);
+            if (!lock.try_lock_for(std::chrono::seconds(1))) throw ImageFault("IMAGE_SENDER_BUSY", 429);
+            identity();
+            auto root = ImagePath(driver->root.native());
+            auto rootPins = PinChain(root / L"wechat", true);
+            auto ledger = root / L"wechat" / L"native-image-deliveries";
+            if (!CreateDirectoryW(ledger.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) throw ImageFault("IMAGE_STATE_UNAVAILABLE", 503);
+            auto ledgerPin = PinFile(ledger, true);
+            auto key = ImageHash(json::array({account, id}).dump()), fingerprint = ImageHash(data.dump());
+            auto filename = ledger / (key + ".json");
+            auto attributes = GetFileAttributesW(filename.c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES) {
+                attempted = true; // Existing/damaged state is never proof of no submission.
+                auto bytes = ReadPinned(PinFile(filename, false), 16384);
+                auto record = json::parse(bytes.begin(), bytes.end());
+                if (record.at("version") != 1 || record.at("deliveryId") != id || !record.at("fingerprint").is_string() ||
+                    !record.at("state").is_string()) throw ImageFault("IMAGE_STATE_INVALID", 409);
+                if (record.at("fingerprint") != fingerprint) throw ImageFault("IMAGE_DELIVERY_CONFLICT", 409);
+                if (record.at("state") == "accepted") {
+                    response.set_content(json{{"ret", 0}, {"retmsg", "accepted"}, {"attempted", true}, {"reused", true}, {"deliveryId", id}, {"delivered", false}}.dump(), "application/json"); return;
+                }
+                throw ImageFault("IMAGE_DELIVERY_UNCONFIRMED", 409);
+            }
+            if (GetLastError() != ERROR_FILE_NOT_FOUND) throw ImageFault("IMAGE_STATE_UNAVAILABLE", 503);
+            if (held->size() >= 128) throw ImageFault("IMAGE_INFLIGHT_LIMIT", 429);
+            auto snapshot = InspectImage(*driver, data);
+            identity();
+            if (!driver->ready()) throw ImageFault("IMAGE_NATIVE_ABI_UNVERIFIED", 503);
+            auto record = json{{"version", 1}, {"deliveryId", id}, {"fingerprint", fingerprint}, {"state", "unknown"}};
+            attempted = true; // Set before reservation: any storage failure stays conservative.
+            WriteImageState(filename, record, true);
+            auto path = snapshot.path.native();
+            held->emplace(key, std::move(snapshot));
+            if (!driver->submit(target, path)) throw ImageFault("IMAGE_DELIVERY_UNCONFIRMED", 502);
+            record["state"] = "accepted";
+            WriteImageState(filename, record, false);
+            // Acceptance only. No invented server ID, delivery receipt or claim
+            // of successful sending; the product must use exact new DB evidence.
+            response.set_content(json{{"ret", 0}, {"retmsg", "accepted"}, {"attempted", true}, {"reused", false}, {"deliveryId", id}, {"delivered", false}}.dump(), "application/json");
+        } catch (const ImageFault& error) { ImageReply(response, error.status, error.what(), attempted); }
+        catch (...) { ImageReply(response, attempted ? 409 : 400, attempted ? "IMAGE_DELIVERY_UNCONFIRMED" : "IMAGE_REQUEST_INVALID", attempted); }
+    });
+}
+}
+
+#ifdef WECHATAGENT_IMAGE_PROBE
+void ConfigureWeChatAgentImageProbe(const std::filesystem::path& root, const std::filesystem::path& control, const std::filesystem::path& audit) {
+    auto driver = std::make_shared<ImageDriver>();
+    driver->root = ImagePath(root.native());
+    auto settings = [control] { std::ifstream input(control); return json::parse(input); };
+    driver->ready = [settings] { return settings().value("ready", false); };
+    driver->version = [settings] { return settings().value("version", ""); };
+    auto checks = std::make_shared<std::atomic<unsigned int>>(0);
+    driver->accounts = [settings, checks] {
+        auto options = settings(); auto check = ++*checks;
+        return options.contains("accountsAfterChecks") && check > options.value("changeAfterChecks", 0u)
+            ? options.at("accountsAfterChecks").get<std::set<std::string>>() : options.at("accounts").get<std::set<std::string>>();
+    };
+    driver->submit = [settings, audit](const std::string& target, const std::wstring& path) {
+        auto options = settings();
+        { std::ofstream output(audit, std::ios::app); output << json{{"target", target}, {"path", Utf8(path)}, {"utf16Length", path.size()}}.dump() << '\n'; output.flush(); if (!output) throw std::runtime_error("probe audit failed"); }
+        if (options.value("outcome", "") == "crash") ExitProcess(8);
+        Sleep(options.value("delayMs", 0u));
+        return options.value("outcome", "") == "accepted";
+    };
+    imageDriver = std::move(driver);
+}
+#endif
+
 void RegisterWeChatAgentRoutes(httplib::Server& server) {
     std::ifstream file(std::filesystem::path(ModulePath()).parent_path() / L"wechatagent-hook.token");
     std::string token;
@@ -168,9 +392,11 @@ void RegisterWeChatAgentRoutes(httplib::Server& server) {
         if (!authorized(req, res)) return;
         json data = {{"backend", "wechat-hook"}, {"integration", "WeChatAgent-1"},
             {"version", CoreVersion()}, {"pid", GetCurrentProcessId()}, {"databaseAccounts", DatabaseAccounts()}, {"nativeStickerSend",StickerReady()},
-            {"initialization", "deferred-module-v1"}, {"startupState", WeChatAgentInitState()}};
+            {"initialization", "deferred-module-v1"}, {"startupState", WeChatAgentInitState()},
+            {"nativeImageSend", false}, {"imageSendStatus", "IMAGE_NATIVE_ABI_UNVERIFIED"}};
         res.set_content(data.dump(), "application/json");
     });
+    RegisterImageRoute(server, authorized, imageDriver);
     server.Post("/SendStickerMsg",[authorized](const httplib::Request& req,httplib::Response& res){
         if(!authorized(req,res))return;
         try{
