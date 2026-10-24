@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "task_count": 40,
+  "core_task_count": 35,
+  "optional_task_count": 5,
+  "dependency_graph": "acyclic",
+  "review_findings_covered": 10,
+  "local_links_checked": 14,
+  "core_estimate_person_days": {
+    "min": 49,
+    "max": 98
+  }
+}

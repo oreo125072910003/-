@@ -1,0 +1,67 @@
+{
+  "checked_at": "2026-10-25T00:46:48.630158+08:00",
+  "commit": "6403cb2662d8d8288386f8a44ef9a874c553a516",
+  "scope": "tracked primary project, pcbridge and contract-helper; historical installation copy excluded",
+  "mode": "syntax + isolated function reproduction; no project imports/services/network/model calls",
+  "node_version": "v24.16.0",
+  "js_syntax": {
+    "checked": 93,
+    "passed": 93,
+    "failed": []
+  },
+  "python_ast": {
+    "checked": 29,
+    "passed": 29,
+    "failed": []
+  },
+  "reproductions": {
+    "R01_failure_string_not_error": {
+      "observed_isError": false,
+      "expected_isError_for_failure": true,
+      "reproduced": true
+    },
+    "R02_unsupported_protocol_echo": {
+      "requested": "2099-01-01",
+      "returned": "2099-01-01",
+      "reproduced": true
+    },
+    "R03_loopback_url_passes_validation": {
+      "network_was_mocked": true,
+      "observed_urls": [
+        "http://127.0.0.1:9876/private"
+      ],
+      "returned_ok": true,
+      "reproduced": true
+    },
+    "R04_read_limit_applied_after_full_read": {
+      "fake_file_bytes_read": 1048576,
+      "requested_limit": 16,
+      "reproduced": true
+    }
+  },
+  "contract_build_prerequisites": {
+    "desktop_directory_exists": false,
+    "missing": [
+      "build.ps1",
+      "ContractEngine.cs",
+      "TemplateRules.cs",
+      "AiService.cs",
+      "BatchImport.cs",
+      "ContractLibrary.cs",
+      "MaterialCatalog.cs",
+      "MaterialImport.cs",
+      "Preferences.cs",
+      "EmbeddedContent.cs"
+    ]
+  },
+  "not_tested": [
+    "Windows EXE build",
+    "live WeChat send/receive",
+    "live mail accounts",
+    "installed Harness SDK compatibility",
+    "contract build or business accuracy",
+    "MCP interoperability",
+    "end-to-end task recovery",
+    "security penetration test"
+  ]
+}
