@@ -1,17 +1,20 @@
 # dsh-pc-bridge —— 让微信小助手调用这台电脑
 
-## 当前源码契约（0.2.0，2026-10-25）
+## 当前源码契约（0.2.1，2026-10-25）
 
 下文 2026-10-22 的环境和发送示例是历史记录，不代表当前运行副本已部署或通过全部验收。实际部署版本必须比较 `/health` 的 `version`、`pid` 和 `sourceSha256`，再验证 Harness 登记和实际工具执行。
 
-- `run_local_agent` 仍通过 DSH 执行，`gpt_draw` 仍可生成本机图片。未指定收件人时只保存本机结果，返回 `job_id`，用 `local_agent_status` 查询。任务状态与交付状态分别记录，服务重启不自动重跑旧任务。
-- 独立微信通知必须显式提供 `account`（reader 的 `accountDirectory`）、`target_kind`（`private` / `group`）、`target`（稳定 wxid 或全局唯一精确名称）及 `request_id`。不得从最近聊天、名称子串或主人别名推断收件人。请求 ID 重用不得更换目标或内容。
-- 接纳时绑定账号、会话类型和 wxid；每次提交前重新核对 reader 和 Hook 的实时账号。联系人不跨调用缓存。目录达到 reader 的 500 项上限、重名、映射不明或换号时拒绝。
-- 出站账本保存在本目录 `state/delivery-outbox.sqlite3`。提交前持久化；`ret=0`、`SENT` 或异常不能证明送达；只有新的、目标账号与聊天内的原生服务端回执才能成为 `delivered`。结果不明保留 `unconfirmed`，不自动重试、换通道、转图片或改收件人。
-- 不传目标的 `send_image` 只返回本次 MCP 的图片内容，不独立发送微信。原生图片 ABI 未验证时拒绝独立图片外发。旧 UI 只能比较标题，无法证明稳定身份，因此 `export_file` 拒绝旧 UI 提交，须使用产品的受控附件入口。
+- 旧 MCP 只有共享服务令牌，没有可验证的可信宿主会话授权通道。电脑控制在服务内部关闭；`allow_shell`、`allow_outside_workspace`、`control_enabled`、请求内的 `account`、`scope`、`executionPolicy` 均不能解锁。此服务没有新增控制桥。
+- 仅公开 **7 个业务工具**：`fetch_paper`、`gpt_draw`、`fetch_player_stats`、`fetch_scores`、`pc_status`、`screenshot_url`、`read_web_page`。`run_local_agent`、`local_agent_status`、`run_local_shell`、`list_local_dir`、`read_local_file`、`write_local_file`、`export_file`、`send_image` 不登记 schema；原始 MCP 请求及直接 handler 调用也一律拒绝，不能凭旧工具名称绕过。
+- `ask_gpt` 与 `gpt_draw(engine=gpt)` 的通用 CLI 分支关闭。`gpt_draw` 只接受 `engine=free`，同步请求固定图片 HTTP 接口，限制尺寸和响应字节，直接向本次调用返回图片或下载链接；不创建 Job、不启动通知 watcher、不独立发微信。旧配置中的默认画图引擎不生效。
+- 网页截图只接受 `http/https`，拒绝 `file://`；输出限于工作区 `screenshots/` 内尚不存在的 PNG，不能覆盖任意工作区文件。图片随工具结果返回，大图返回限时下载链接，不再指示调用已禁用的 `send_image`。论文下载同样返回限时单文件链接。
+- 所有查询产物路径在规范化之后必须留在工作区；旧越界开关不生效，目录链接也不能绕过。图片、论文和浏览器临时目录使用同一边界。`pc_status` 仅保留固定的版本诊断；网页工具仅以固定浏览器参数处理指定网页，不开放任意命令。
+- 旧交付账本与 Job 快照保留兼容数据和内部回归；没有公开查询或恢复执行入口，不重跑旧 Job，也不启动旧推送。F04/F05 的显式身份绑定、单次提交和不重发约束继续测试，但不表示旧发送功能开放。
 - 下载链接使用独立签名密钥与一小时期限，仅授权链接内的单个文件，不能用于 MCP、SSE 或健康接口。旧的控制令牌下载链接失效，勿把 `config.json` 或本机 `state/` 发给审核方。
 
-离线业务回归：`python tests/pcbridge_regression.py`。本轮外部运行副本和看门狗的部署状态、真实探针及未验项见 `docs/开发记录/20261025_MCP工具缺失排查.md`。独立托管不等于 Harness 工具能在任意重启后永久自愈。
+离线业务回归：`python tests/pcbridge_regression.py`。`--selftest` 仅验证静态工具契约，不再启动 DSH agent。健康契约为 `version=0.2.1`、`toolCount=7`、`deliveryPolicy=legacy-control-disabled-v1`、`controlPolicy=no-trusted-session-control-transport-v1`，另带 `disabledTools`。发布准备脚本将这些预期写入清单。旧 0.2.0/16 工具候选已经作废，不可继续部署。
+
+本轮外部运行副本和看门狗的部署状态、真实探针及未验项见 `docs/开发记录/20261025_MCP工具缺失排查.md`。当前修复包未部署；工具目录、内部测试与实际调用分别验收，独立托管不等于任意重启后永久自愈。
 
 ---
 

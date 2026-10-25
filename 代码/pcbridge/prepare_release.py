@@ -6,6 +6,7 @@ are changed. The final coordinated deployment must check before hashes again.
 from __future__ import annotations
 
 import argparse
+import ast
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -17,6 +18,29 @@ def digest(file: Path) -> str:
     return hashlib.sha256(file.read_bytes()).hexdigest()
 
 
+def candidate_contract(candidate: Path) -> dict:
+    """Read declared constants without importing or running server/config code."""
+    tree = ast.parse(candidate.read_text(encoding="utf-8"))
+    values = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        name = node.targets[0].id
+        if name not in {"SERVER_VERSION", "BUSINESS_QUERY_TOOLS", "DISABLED_CONTROL_TOOLS", "DISABLED_AUXILIARY_TOOLS"}:
+            continue
+        expression = node.value
+        if isinstance(expression, ast.Call) and isinstance(expression.func, ast.Name) and expression.func.id == "frozenset":
+            expression = expression.args[0]
+        values[name] = ast.literal_eval(expression)
+    return {
+        "version": values["SERVER_VERSION"], "toolCount": len(values["BUSINESS_QUERY_TOOLS"]),
+        "businessTools": sorted(values["BUSINESS_QUERY_TOOLS"]),
+        "disabledTools": sorted(values["DISABLED_CONTROL_TOOLS"] | values["DISABLED_AUXILIARY_TOOLS"]),
+        "deliveryPolicy": "legacy-control-disabled-v1",
+        "controlPolicy": "no-trusted-session-control-transport-v1",
+    }
+
+
 def prepare(runtime_directory: Path, output: Path, *, source_directory: Path | None = None) -> dict:
     source = (source_directory or Path(__file__).resolve().parent).resolve(strict=True)
     runtime = runtime_directory.resolve(strict=True)
@@ -24,6 +48,7 @@ def prepare(runtime_directory: Path, output: Path, *, source_directory: Path | N
     candidate = source / target.name
     if not target.is_file() or target.is_symlink() or not candidate.is_file() or candidate.is_symlink():
         raise ValueError("REGULAR_SOURCE_AND_RUNTIME_REQUIRED")
+    contract = candidate_contract(candidate)
     output = output.resolve()
     # The prepared package must never overwrite the source or live runtime.
     if output == source or source in output.parents or output == runtime or runtime in output.parents:
@@ -41,13 +66,16 @@ def prepare(runtime_directory: Path, output: Path, *, source_directory: Path | N
     manifest = {
         "format": 1, "preparedAt": datetime.now(timezone.utc).isoformat(),
         "state": "prepared_not_deployed", "targetDirectory": str(runtime),
+        "candidateContract": contract,
         "files": [{"name": target.name, "beforeSha256": before, "candidateSha256": after}],
         "untouched": ["config.json", "state/", "shared/", "logs", "watchdog", "Harness", "WeChat", "scheduled tasks"],
         "deploymentGate": [
             "coordinate the pcbridge-only maintenance window; check active jobs and the real Python PID/path",
             "verify the live source still has beforeSha256; keep its credentials and user data unchanged",
             "replace only the named server after coordinated supervision/process handling",
-            "verify health version/pid/sourceSha256 and actual MCP initialize, schemas, bounded read and missing-file error",
+            "verify health version/pid/sourceSha256 and actual MCP initialize, seven business schemas and control-disabled policies",
+            "verify raw MCP controls remain isError with permissive configuration and forged scope/account/executionPolicy; do not run real control probes",
+            "verify business query results and confined artifacts; arbitrary file read/write, shell, agent, export/image sending and generic CLI remain denied",
             "verify Harness registration and scoped tool execution; do not equate catalog presence with availability",
             "record runtime manifest and rollback evidence; no automatic replay of old jobs or unconfirmed deliveries",
         ],

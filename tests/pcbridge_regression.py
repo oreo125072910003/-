@@ -44,11 +44,11 @@ class BridgeRegression(unittest.TestCase):
     def call(self, name, **arguments):
         return bridge.call_tool({"name": name, "arguments": arguments}, self.cfg)
 
-    def test_missing_runtime_is_tool_error(self):
+    def test_control_denied_before_runtime_detection(self):
         with patch.object(bridge, "DSH_CMD", None):
             result = self.call("run_local_agent", task="offline fixture")
         self.assertTrue(result["isError"])
-        self.assertIn("没找到 dsh", result["content"][0]["text"])
+        self.assertIn("LEGACY_CONTROL_CONTEXT_UNAVAILABLE", result["content"][0]["text"])
 
     def test_disabled_shell_is_tool_error(self):
         self.assertTrue(self.call("run_local_shell", command="must not run")["isError"])
@@ -83,7 +83,9 @@ class BridgeRegression(unittest.TestCase):
         with patch.dict(bridge.JOBS, {job.id: job}, clear=True):
             result = self.call("local_agent_status", job_id=job.id)
         self.assertTrue(result["isError"])
-        self.assertIn("fixture failure", result["content"][0]["text"])
+        self.assertIn("LEGACY_CONTROL_CONTEXT_UNAVAILABLE", result["content"][0]["text"])
+        with self.assertRaisesRegex(bridge.ToolExecutionError, "fixture failure"):
+            bridge.job_tool_result(job, self.cfg)
 
     def test_protocol_does_not_echo_unknown_version(self):
         for wanted in ("2099-01-01", "2025-03-26", None):
@@ -111,27 +113,32 @@ class BridgeRegression(unittest.TestCase):
 
         with patch.object(Path, "open", tracked_open), \
              patch.object(Path, "read_bytes", side_effect=AssertionError("unbounded read")):
-            result = self.call("read_local_file", path="large.txt", max_bytes=16)
-        self.assertFalse(result["isError"])
+            result = bridge._read_workspace_file({"path": "large.txt", "max_bytes": 16}, self.cfg)
         self.assertEqual(calls, [16])
-        self.assertIn("4,194,305 B", result["content"][0]["text"])
+        self.assertIn("4,194,305 B", result)
 
     def test_invalid_read_limits_rejected_before_open(self):
         for value in (-1, 0, 1024 * 1024 + 1, True, "16", 1.5, None):
             with self.subTest(value=value), patch.object(Path, "open", side_effect=AssertionError("must not read")):
-                self.assertTrue(self.call("read_local_file", path="absent", max_bytes=value)["isError"])
+                with self.assertRaises(ValueError):
+                    bridge._read_workspace_file({"path": "absent", "max_bytes": value}, self.cfg)
 
     def test_binary_rejected_and_bom_text_supported(self):
         (self.root / "binary.dat").write_bytes(b"binary\x00fixture")
-        self.assertTrue(self.call("read_local_file", path="binary.dat")["isError"])
+        with self.assertRaises(bridge.ToolExecutionError):
+            bridge._read_workspace_file({"path": "binary.dat"}, self.cfg)
         (self.root / "utf16.txt").write_bytes("测试内容".encode("utf-16"))
-        result = self.call("read_local_file", path="utf16.txt")
-        self.assertFalse(result["isError"])
-        self.assertIn("测试内容", result["content"][0]["text"])
+        result = bridge._read_workspace_file({"path": "utf16.txt"}, self.cfg)
+        self.assertIn("测试内容", result)
 
-    def test_normal_read_and_write_remain_success(self):
-        self.assertFalse(self.call("write_local_file", path="hello.txt", content="你好")["isError"])
-        self.assertIn("你好", self.call("read_local_file", path="hello.txt")["content"][0]["text"])
+    def test_read_write_control_has_no_file_effect(self):
+        target = self.root / "hello.txt"
+        target.write_text("private sentinel", encoding="utf-8")
+        self.assertTrue(self.call("write_local_file", path="hello.txt", content="overwrite")["isError"])
+        result = self.call("read_local_file", path="hello.txt")
+        self.assertTrue(result["isError"])
+        self.assertNotIn("private sentinel", str(result))
+        self.assertEqual(target.read_text(encoding="utf-8"), "private sentinel")
 
     def test_web_and_screenshot_business_failures(self):
         with patch.object(bridge, "read_web_page", return_value={"ok": False, "error": "offline failure"}):
@@ -159,7 +166,248 @@ class BridgeRegression(unittest.TestCase):
             result = self.call("export_file", path="fixture.txt")
         self.assertTrue(result["isError"])
         self.assertEqual(sender.call_count, 0)
-        self.assertIn("LEGACY_UI_IDENTITY_UNVERIFIED", result["content"][0]["text"])
+        self.assertIn("LEGACY_CONTROL_CONTEXT_UNAVAILABLE", result["content"][0]["text"])
+
+
+class LegacyControlBoundary(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="pcbridge-boundary-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        self.sentinel = self.root / "outside.txt"
+        self.sentinel.write_text("OUTSIDE_SECRET_SENTINEL", encoding="utf-8")
+        self.cfg = {**bridge.DEFAULT_CONFIG, "workspace_root": str(self.workspace),
+                    "token": "fixture-service-token", "allow_shell": True,
+                    "allow_outside_workspace": True, "control_enabled": True,
+                    "gpt_draw_engine": "gpt", "delivery_outbox": str(self.root / "outbox.sqlite3")}
+        self.arguments = {"path": str(self.sentinel), "content": "must-not-write",
+                          "command": "must-not-run", "task": "must-not-start",
+                          "account": "forged", "target": "forged", "target_kind": "private",
+                          "request_id": "forged", "scope": {"computerControl": True},
+                          "executionPolicy": {"computerControl": True}, "control_enabled": True}
+        for name, value in (("SCRIPT_DIR", self.root), ("SHARED_DIR", self.root / "shared"), ("JOBS", {})):
+            mock = patch.object(bridge, name, value); mock.start(); self.addCleanup(mock.stop)
+        for name in ("run_capture", "wechat_hook_send_text", "wechat_hook_send_image",
+                     "wechat_push_text", "_watch_job", "_codex_cmd", "_find_browser"):
+            mock = patch.object(bridge, name, side_effect=AssertionError("unexpected control action"))
+            mock.start(); self.addCleanup(mock.stop)
+        for name in ("subprocess.run", "subprocess.Popen", "urllib.request.urlopen"):
+            mock = patch(name, side_effect=AssertionError("unexpected process/network"))
+            mock.start(); self.addCleanup(mock.stop)
+
+    def call(self, name, arguments=None):
+        return bridge.call_tool({"name": name, "arguments": arguments or {}}, self.cfg)
+
+    def test_permissive_config_and_forged_claims_cannot_unlock_raw_calls(self):
+        with patch.object(bridge, "resolve_path", side_effect=AssertionError("must not even inspect path")), \
+             patch.object(bridge.Job, "start", side_effect=AssertionError("must not start job")):
+            for name in bridge.DISABLED_CONTROL_TOOLS:
+                with self.subTest(name=name):
+                    result = self.call(name, self.arguments)
+                    self.assertTrue(result["isError"])
+                    self.assertIn("LEGACY_CONTROL_CONTEXT_UNAVAILABLE", str(result))
+                    self.assertNotIn("OUTSIDE_SECRET_SENTINEL", str(result))
+        self.assertEqual(self.sentinel.read_text(encoding="utf-8"), "OUTSIDE_SECRET_SENTINEL")
+        self.assertEqual(bridge.JOBS, {})
+
+    def test_direct_control_handlers_cannot_bypass_dispatch(self):
+        with patch.object(bridge, "resolve_path", side_effect=AssertionError("must not inspect path")), \
+             patch.object(bridge.Job, "start", side_effect=AssertionError("must not start job")):
+            for name in bridge.DISABLED_CONTROL_TOOLS:
+                with self.subTest(name=name), self.assertRaisesRegex(bridge.ToolExecutionError, "LEGACY_CONTROL_CONTEXT_UNAVAILABLE"):
+                    bridge.TOOL_HANDLERS[name](self.arguments, self.cfg)
+
+    def test_general_cli_query_aliases_are_denied(self):
+        for name, arguments in (("ask_gpt", {"prompt": "read outside"}),
+                                ("gpt_draw", {"prompt": "draw", "engine": "gpt"})):
+            with self.subTest(name=name):
+                result = self.call(name, arguments)
+                self.assertTrue(result["isError"])
+                self.assertIn("LEGACY_TEXT_WORKER_POLICY_UNAVAILABLE", str(result))
+        for invoke in (lambda: bridge.tool_ask_gpt({"prompt": "read"}, self.cfg),
+                       lambda: bridge._codex_run("read", self.cfg, 1),
+                       lambda: bridge._gpt_draw_worker("draw", self.cfg, None)):
+            with self.assertRaisesRegex(bridge.ToolExecutionError, "LEGACY_TEXT_WORKER_POLICY_UNAVAILABLE"):
+                invoke()
+
+    def test_legacy_job_cannot_spawn_a_general_agent(self):
+        with patch.object(bridge, "DSH_CMD", ["fixture-dsh"]):
+            job = bridge.Job("must not run", 10, self.cfg)
+            job._run()
+        self.assertTrue(job.done.is_set())
+        self.assertFalse(job.result["ok"])
+        self.assertIn("LEGACY_CONTROL_CONTEXT_UNAVAILABLE", job.result["stderr"])
+
+    def test_path_boundary_cannot_be_disabled_by_config(self):
+        for path in (str(self.sentinel), "../outside.txt"):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "WORKSPACE_PATH_DENIED"):
+                bridge.resolve_path(path, self.cfg)
+
+    def test_canonical_path_blocks_directory_links(self):
+        link = self.workspace / "linked"
+        try:
+            link.symlink_to(self.root, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest("host cannot create synthetic directory link: " + str(exc.winerror))
+        with self.assertRaisesRegex(ValueError, "WORKSPACE_PATH_DENIED"):
+            bridge.resolve_path("linked/outside.txt", self.cfg)
+
+    def test_only_seven_business_schemas_are_exposed(self):
+        listed = bridge.handle_rpc({"id": 1, "method": "tools/list"}, self.cfg)["result"]["tools"]
+        self.assertEqual({tool["name"] for tool in listed}, {
+            "fetch_paper", "gpt_draw", "fetch_player_stats", "fetch_scores",
+            "pc_status", "screenshot_url", "read_web_page"})
+        schema = next(tool for tool in listed if tool["name"] == "gpt_draw")["inputSchema"]
+        self.assertEqual(schema["properties"]["engine"]["enum"], ["free"])
+        self.assertFalse(schema["additionalProperties"])
+
+    def test_malformed_raw_calls_and_rpc_do_not_crash(self):
+        for params in (None, [], {"name": []}, {"name": {"x": 1}},
+                       {"name": "fetch_scores", "arguments": []},
+                       {"name": "fetch_scores", "arguments": None}):
+            with self.subTest(params=params):
+                self.assertTrue(bridge.call_tool(params, self.cfg)["isError"])
+        for message in ({"id": 1, "method": ["tools/call"]},
+                        {"id": 1, "method": "tools/call", "params": [1]}):
+            self.assertIn("error", bridge.handle_rpc(message, self.cfg))
+
+    def test_raw_http_controls_denied_even_with_service_credential(self):
+        handler = type("FixtureBoundaryHandler", (bridge.BridgeHandler,), {"cfg": self.cfg})
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        self.addCleanup(connection.close)
+        headers = {"Authorization": "Bearer " + self.cfg["token"], "Content-Type": "application/json"}
+        for name in sorted(bridge.DISABLED_CONTROL_TOOLS):
+            body = json.dumps({"jsonrpc": "2.0", "id": name, "method": "tools/call",
+                               "params": {"name": name, "arguments": self.arguments}})
+            connection.request("POST", "/mcp", body=body, headers=headers)
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            result = json.loads(response.read())["result"]
+            self.assertTrue(result["isError"])
+            self.assertIn("LEGACY_CONTROL_CONTEXT_UNAVAILABLE", str(result))
+            self.assertNotIn("OUTSIDE_SECRET_SENTINEL", str(result))
+        connection.request("GET", "/health", headers=headers)
+        health = json.loads(connection.getresponse().read())
+        self.assertEqual(health["version"], "0.2.1")
+        self.assertEqual(health["toolCount"], 7)
+        self.assertEqual(health["deliveryPolicy"], "legacy-control-disabled-v1")
+        self.assertEqual(set(health["disabledTools"]), bridge.DISABLED_CONTROL_TOOLS | {"ask_gpt"})
+        self.assertEqual(self.sentinel.read_text(encoding="utf-8"), "OUTSIDE_SECRET_SENTINEL")
+
+    def test_free_image_returns_synchronously_without_jobs_cli_or_delivery(self):
+        reads = []; urls = []
+        class ImageResponse(io.BytesIO):
+            headers = {"Content-Type": "image/png"}
+            def read(self, count=-1):
+                reads.append(count)
+                return super().read(count)
+        def fetch(request, **kwargs):
+            urls.append(request.full_url)
+            return ImageResponse(b"synthetic image bytes")
+        with patch("urllib.request.urlopen", side_effect=fetch), \
+             patch.object(bridge.Job, "start", side_effect=AssertionError("no jobs")):
+            result = self.call("gpt_draw", {"prompt": "a/b?x=y"})
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(result["content"][0]["type"], "image")
+        self.assertTrue(urls[0].startswith("https://image.pollinations.ai/prompt/a%2Fb%3Fx%3Dy?"))
+        self.assertEqual(reads, [8 * 1024 * 1024 + 1])
+        self.assertEqual(bridge.JOBS, {})
+        self.assertEqual(len(list((self.workspace / "generated").glob("*.png"))), 1)
+
+    def test_free_image_rejects_oversize_response(self):
+        response = io.BytesIO(b"x" * (8 * 1024 * 1024 + 1))
+        response.headers = {"Content-Type": "image/png"}
+        with patch("urllib.request.urlopen", return_value=response):
+            result = self.call("gpt_draw", {"prompt": "draw"})
+        self.assertTrue(result["isError"])
+        self.assertFalse((self.workspace / "generated").exists())
+
+    def test_free_image_cannot_accept_independent_recipient(self):
+        result = self.call("gpt_draw", {"prompt": "draw", **self.arguments})
+        self.assertTrue(result["isError"])
+        self.assertIn("LEGACY_CONTROL_CONTEXT_UNAVAILABLE", str(result))
+
+    def test_query_output_configuration_cannot_escape_workspace(self):
+        self.cfg["gpt_output_dir"] = str(self.root / "outside-generated")
+        self.cfg["papers_dir"] = str(self.root / "outside-papers")
+        with patch("urllib.request.build_opener", side_effect=AssertionError("no network setup")):
+            for name, args in (("gpt_draw", {"prompt": "draw"}),
+                               ("fetch_paper", {"query": "10.0000/fixture"})):
+                result = self.call(name, args)
+                self.assertTrue(result["isError"])
+                self.assertIn("WORKSPACE_PATH_DENIED", str(result))
+        self.assertFalse((self.root / "outside-generated").exists())
+        self.assertFalse((self.root / "outside-papers").exists())
+
+    def test_screenshot_cannot_read_local_file_or_write_arbitrary_artifact(self):
+        for url in (self.sentinel.as_uri(), "file://server/share/secret", "data:text/html,secret"):
+            result = self.call("screenshot_url", {"url": url})
+            self.assertTrue(result["isError"])
+            self.assertIn("SCREENSHOT_URL_DENIED", str(result))
+        for path in (str(self.sentinel), "arbitrary.py", "screenshots/arbitrary.py"):
+            result = self.call("screenshot_url", {"url": "https://example.test", "path": path})
+            self.assertTrue(result["isError"])
+        artifact = self.workspace / "screenshots" / "old.png"
+        artifact.parent.mkdir(); artifact.write_bytes(b"do not overwrite")
+        result = self.call("screenshot_url", {"url": "https://example.test", "path": "screenshots/old.png"})
+        self.assertTrue(result["isError"])
+        self.assertEqual(artifact.read_bytes(), b"do not overwrite")
+        self.assertEqual(self.sentinel.read_text(encoding="utf-8"), "OUTSIDE_SECRET_SENTINEL")
+
+    def test_screenshot_success_returns_result_without_legacy_sender(self):
+        image = self.workspace / "screenshots" / "new.png"
+        def render(url, out, cfg, *args):
+            self.assertEqual(Path(out), image)
+            image.parent.mkdir(); image.write_bytes(b"synthetic png")
+            return {"ok": True}
+        with patch.object(bridge, "screenshot_url", side_effect=render):
+            result = self.call("screenshot_url", {"url": "https://example.test", "path": "screenshots/new.png"})
+        self.assertFalse(result["isError"])
+        self.assertEqual(result["content"][1]["type"], "image")
+        self.assertIn("未独立发送微信", result["content"][0]["text"])
+
+    def test_paper_download_uses_new_scoped_artifact_and_download_link(self):
+        class Response(io.BytesIO):
+            headers = {"Content-Type": "application/pdf"}
+            def geturl(self): return "https://arxiv.org/pdf/0000.00000"
+        class Opener:
+            def open(self, request, **kwargs):
+                if "semanticscholar.org" in request.full_url:
+                    return Response(b"{}")
+                return Response(b"%PDF-1.4 synthetic fixture")
+        with patch("urllib.request.build_opener", return_value=Opener()):
+            result = self.call("fetch_paper", {"query": "arxiv:0000.00000"})
+        self.assertFalse(result["isError"], result)
+        artifacts = list((self.workspace / "papers").glob("*.pdf"))
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0].read_bytes(), b"%PDF-1.4 synthetic fixture")
+        self.assertIn("download=", result["content"][0]["text"])
+        self.assertNotIn(self.cfg["token"], str(result))
+        self.assertNotIn("export_file", str(result))
+
+    def test_static_selftest_cannot_launch_agent(self):
+        self.assertEqual(bridge.selftest(self.cfg), 0)
+
+    def test_release_manifest_matches_query_only_candidate_without_mutating_runtime(self):
+        release_spec = importlib.util.spec_from_file_location("pcbridge_release_tested", SOURCE.with_name("prepare_release.py"))
+        release = importlib.util.module_from_spec(release_spec); release_spec.loader.exec_module(release)
+        runtime = self.root / "runtime"; runtime.mkdir()
+        (runtime / SOURCE.name).write_bytes(b"old server fixture")
+        (runtime / "config.json").write_text("private config fixture", encoding="utf-8")
+        manifest = release.prepare(runtime, self.root / "prepared")
+        self.assertEqual(manifest["state"], "prepared_not_deployed")
+        self.assertEqual(manifest["candidateContract"]["version"], bridge.SERVER_VERSION)
+        self.assertEqual(manifest["candidateContract"]["toolCount"], len(bridge.TOOLS))
+        self.assertEqual(set(manifest["candidateContract"]["businessTools"]), bridge.BUSINESS_QUERY_TOOLS)
+        self.assertEqual((runtime / SOURCE.name).read_bytes(), b"old server fixture")
+        self.assertEqual((runtime / "config.json").read_text(encoding="utf-8"), "private config fixture")
+        self.assertEqual({p.name for p in (self.root / "prepared" / "rollback").iterdir()}, {SOURCE.name})
+        self.assertEqual({p.name for p in (self.root / "prepared" / "candidate").iterdir()}, {SOURCE.name})
 
 
 class DeliverySafety(unittest.TestCase):
@@ -324,7 +572,7 @@ class DeliverySafety(unittest.TestCase):
         self.assertEqual(send.call_count, 1)
         self.assertFalse(job.pushed)
         with patch.dict(bridge.JOBS, {job.id: job}, clear=True):
-            text = bridge.tool_job_status({"job_id": job.id}, self.cfg)
+            text = bridge._legacy_job_status({"job_id": job.id}, self.cfg)
         self.assertIn("unconfirmed", text)
         self.assertNotIn("结果已由电脑直接发到微信", text)
 
@@ -346,14 +594,14 @@ class DeliverySafety(unittest.TestCase):
              patch.object(bridge, "wechat_hook_send_image", return_value={"state": "unconfirmed", "code": "LOST"}):
             result = bridge.call_tool({"name": "send_image", "arguments": {"path": str(file)}}, self.cfg)
         self.assertTrue(result["isError"])
-        self.assertIn("unconfirmed", result["content"][0]["text"])
+        self.assertIn("LEGACY_CONTROL_CONTEXT_UNAVAILABLE", result["content"][0]["text"])
 
-    def test_no_target_image_returns_only_to_request(self):
+    def test_no_target_image_read_is_also_denied(self):
         file = self.root / "fixture.png"; file.write_bytes(b"synthetic-image")
         with patch.object(bridge, "wechat_hook_send_image", side_effect=AssertionError("not a direct send")):
             result = bridge.call_tool({"name": "send_image", "arguments": {"path": str(file)}}, self.cfg)
-        self.assertFalse(result["isError"])
-        self.assertEqual(result["content"][0]["type"], "image")
+        self.assertTrue(result["isError"])
+        self.assertIn("LEGACY_CONTROL_CONTEXT_UNAVAILABLE", result["content"][0]["text"])
 
     def test_download_capability_is_file_scoped_expires_and_cannot_control(self):
         file = self.root / "fixture.txt"; file.write_text("download fixture", encoding="utf-8")

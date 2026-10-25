@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-dsh-pc-bridge —— 把本机工具(经由 DSH headless)通过 MCP 暴露给手机端的微信 Agent。
+dsh-pc-bridge —— 供 DSH 调用的受限业务查询 MCP。
 
 设计要点
 --------
@@ -9,8 +9,8 @@ dsh-pc-bridge —— 把本机工具(经由 DSH headless)通过 MCP 暴露给手
 * 同时提供两种 MCP HTTP 传输,模块支持哪种都能连:
     - 旧式 HTTP+SSE :  GET  /sse?token=...      (先下发 endpoint 事件,再 POST /messages?sessionId=...)
     - Streamable HTTP:  POST /mcp?token=...
-* 真正干活的是本机的 `dsh --profile headless "<任务>"`,它自带文件 / 命令 / Office / 网页等全套工具,
-  所以主工具只有一个 run_local_agent,其余几个是给模型快速试探、排障用的轻量工具。
+* 旧共享令牌不能证明当前账号/会话的电脑授权，因此控制入口关闭。
+  仅公开查询和同步生成的业务结果，不运行通用 agent，不独立发送微信。
 * 默认只绑 127.0.0.1;要让手机连,显式 --host 0.0.0.0,此时必须带 token。
 
 自检(不联网、不需要手机):
@@ -47,7 +47,7 @@ from typing import NamedTuple
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 SERVER_NAME = "dsh-pc-bridge"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.2.1"
 # Only advertise the protocol revision implemented by this compatibility server.
 # Full connection lifecycle and SDK migration remain a separate task.
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-03-26",)
@@ -77,11 +77,11 @@ DEFAULT_CONFIG = {
     "host": "127.0.0.1",
     "port": DEFAULT_PORT,
     "token": "",
-    # 允许 agent / 文件工具触碰的根目录;留空 = 脚本的上一级目录
+    # 查询产物根目录；留空 = 脚本的上一级目录
     "workspace_root": "",
-    # 是否允许 run_local_shell 直接执行命令(默认关,走 dsh 更安全)
+    # 兼容旧配置字段；不能重新启用控制入口
     "allow_shell": False,
-    # 文件工具是否允许越出 workspace_root
+    # 兼容旧字段；查询产物始终不能越出 workspace_root
     "allow_outside_workspace": False,
     # 单次 dsh 任务的最长执行秒数
     "agent_timeout_sec": 600,
@@ -386,12 +386,10 @@ def resolve_path(raw: str, cfg: dict) -> Path:
     if not target.is_absolute():
         target = root / target
     target = target.resolve()
-    if not cfg.get("allow_outside_workspace"):
-        if target != root and root not in target.parents:
-            raise ValueError(
-                f"路径越界: {target} 不在工作区 {root} 之内。"
-                f"(要放开就改 config.json 的 allow_outside_workspace)"
-            )
+    # A process configuration boolean is not per-call/session authority.
+    # Canonicalize first so junctions/symlinks cannot escape the fixed root.
+    if target != root and root not in target.parents:
+        raise ValueError("WORKSPACE_PATH_DENIED：路径不在服务工作区内。")
     return target
 
 
@@ -436,20 +434,7 @@ class Job:
             if self.runner:
                 self.result = self.runner(self)
                 return
-            env = dict(os.environ)
-            env.update(proxy_env(self.cfg))
-            env.update(dict(DSH_EXTRA_ENV))
-            mode = self.cfg.get("nested_permission_mode")
-            if mode:
-                env["DSH_PERMISSION_MODE"] = str(mode)
-            self.result = run_capture(
-                dsh_args(self.task),
-                str(Path(self.cfg["workspace_root"])),
-                self.timeout,
-                env,
-            )
-            if self.result['ok'] and not (self.result['stdout'].strip() or self.result['stderr'].strip()):
-                self.result.update(ok=False, stderr='执行进程没有返回任何内容；任务未确认完成，请查看执行日志。')
+            _deny_legacy_control("run_local_agent")
         except Exception as exc:  # noqa: BLE001 - 任何异常都要变成可读结果
             self.result = {"ok": False, "code": None, "stdout": "", "stderr": f"执行异常: {exc}", "elapsed": 0.0}
         finally:
@@ -479,6 +464,29 @@ class ToolExecutionError(Exception):
     """A known business failure; the MCP boundary must mark it as isError."""
 
 
+# This legacy transport has one shared service credential and cannot verify
+# a trusted host's account/conversation-scoped computer grant. Consequently it
+# does NOT expose a control channel. JSON fields, global config and possession
+# of the MCP token cannot substitute for that absent authority.
+DISABLED_CONTROL_TOOLS = frozenset({
+    "run_local_agent", "local_agent_status", "run_local_shell", "list_local_dir",
+    "read_local_file", "write_local_file", "export_file", "send_image",
+})
+DISABLED_AUXILIARY_TOOLS = frozenset({"ask_gpt"})
+BUSINESS_QUERY_TOOLS = frozenset({
+    "fetch_paper", "gpt_draw", "fetch_player_stats", "fetch_scores",
+    "pc_status", "screenshot_url", "read_web_page",
+})
+
+
+def _deny_legacy_control(name: str):
+    raise ToolExecutionError("LEGACY_CONTROL_CONTEXT_UNAVAILABLE：" + name + " 已拒绝；此传输不能验证可信宿主的会话控制授权，配置开关或请求自称授权均不能启用。")
+
+
+def _deny_legacy_worker():
+    raise ToolExecutionError("LEGACY_TEXT_WORKER_POLICY_UNAVAILABLE：未验证工具隔离的通用 CLI 不开放给业务查询。")
+
+
 def job_tool_result(job: Job, cfg: dict) -> str:
     text = job.render(cfg)
     if not job.result or not job.result.get("ok"):
@@ -494,8 +502,8 @@ def tool_pc_status(cfg: dict) -> str:
         f"工作区: {root} ({'存在' if root.exists() else '不存在!'})",
         f"局域网地址: {lan_ip()}",
         f"dsh 命令: {' '.join(DSH_CMD) if DSH_CMD else '未找到'} —— {DSH_HINT}",
-        f"shell 工具: {'开启' if cfg.get('allow_shell') else '关闭'}",
-        f"越界访问: {'允许' if cfg.get('allow_outside_workspace') else '禁止'}",
+        "电脑控制: 关闭（旧传输没有可信会话授权通道）",
+        "越界访问: 禁止（配置开关不能扩大查询范围）",
     ]
     if DSH_CMD:
         probe = run_capture(list(DSH_CMD) + ["--version"], str(root), 25, DSH_EXTRA_ENV)
@@ -670,49 +678,15 @@ def _watch_job(job: "Job", cfg: dict) -> None:
 
 
 def tool_run_agent(args: dict, cfg: dict) -> str:
-    task = (args.get("task") or "").strip()
-    if not task:
-        raise ValueError("task 不能为空")
-    raw_task = task
-    hint = _agent_hint(cfg)
-    if hint:
-        task = hint + "\n\n" + task
-    wait = int(args.get("wait_seconds") or cfg.get("sync_wait_sec") or 8)
-    wait = max(3, min(wait, 30))
-    timeout = int(args.get("timeout_seconds") or cfg["agent_timeout_sec"])
-    timeout = max(10, min(timeout, 3600))
-
-    if DSH_CMD is None:
-        raise ToolExecutionError(
-            "❌ 这台电脑上没找到 dsh 命令,任务没法执行。\n"
-            f"{DSH_HINT}\n"
-            "解决:在 DeepSeek Harness 桌面版里启用命令行工具,或设置环境变量 DSH_CMD 指向它。"
-        )
-
-    job = Job(task, timeout, cfg)
-    job.target = _pick_target(args, cfg)
-    job.target_key = _chat_key_for_target(cfg, job.target)
-    job.label = raw_task[:120]
-    with JOBS_LOCK:
-        JOBS[job.id] = job
-        # 顺手清理一天前的旧任务
-        for old in [k for k, v in JOBS.items() if time.time() - v.started > 86400]:
-            JOBS.pop(old, None)
-    job.start()
-    threading.Thread(target=_watch_job, args=(job, cfg), daemon=True).start()
-
-    if job.done.wait(wait):
-        job.answered_inline = True
-        return job_tool_result(job, cfg)
-    return (
-        f"⏳ 已经开始在电脑上跑了,大约需要几十秒到几分钟。\n"
-        f"job_id = {job.id}\n"
-        f"{_notify_hint(cfg) if job.target else '未指定收件身份；结果只保存在本机，用 local_agent_status 查询。'}\n"
-        f"任务: {raw_task}"
-    )
+    _deny_legacy_control("run_local_agent")
 
 
 def tool_job_status(args: dict, cfg: dict) -> str:
+    _deny_legacy_control("local_agent_status")
+
+
+def _legacy_job_status(args: dict, cfg: dict) -> str:
+    # Internal migration diagnostic only; never registered as an MCP handler.
     job_id = (args.get("job_id") or "").strip()
     if not job_id:
         return _describe_jobs(cfg)
@@ -779,28 +753,16 @@ def _job_status_result(job: Job, cfg: dict) -> str:
 
 
 def tool_list_dir(args: dict, cfg: dict) -> str:
-    target = resolve_path(args.get("path") or ".", cfg)
-    if not target.exists():
-        raise ToolExecutionError(f"路径不存在: {target}")
-    if not target.is_dir():
-        raise ToolExecutionError(f"不是目录: {target}")
-    entries = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
-    lines = [f"{target}  ({len(entries)} 项)"]
-    for entry in entries[:300]:
-        if entry.is_dir():
-            lines.append(f"  [目录] {entry.name}/")
-        else:
-            try:
-                size = entry.stat().st_size
-            except OSError:
-                size = -1
-            lines.append(f"  [文件] {entry.name}  ({size:,} B)" if size >= 0 else f"  [文件] {entry.name}")
-    if len(entries) > 300:
-        lines.append(f"  …其余 {len(entries) - 300} 项省略")
-    return truncate("\n".join(lines), cfg["max_output_chars"])
+    _deny_legacy_control("list_local_dir")
 
 
 def tool_read_file(args: dict, cfg: dict) -> str:
+    _deny_legacy_control("read_local_file")
+
+
+def _read_workspace_file(args: dict, cfg: dict) -> str:
+    # Bounded workspace reader for internal artifact processing/tests only.
+    # It is intentionally absent from TOOL_HANDLERS and tools/list.
     limit = args.get("max_bytes", 400_000)
     if type(limit) is not int or not 1 <= limit <= MAX_READ_FILE_BYTES:
         raise ValueError(f"max_bytes 须为 1 至 {MAX_READ_FILE_BYTES} 之间的整数")
@@ -819,32 +781,11 @@ def tool_read_file(args: dict, cfg: dict) -> str:
 
 
 def tool_write_file(args: dict, cfg: dict) -> str:
-    target = resolve_path(args.get("path") or "", cfg)
-    content = args.get("content") or ""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, "utf-8")
-    return f"已写入 {target}（{len(content)} 字符）"
+    _deny_legacy_control("write_local_file")
 
 
 def tool_shell(args: dict, cfg: dict) -> str:
-    if not cfg.get("allow_shell"):
-        raise ToolExecutionError(
-            "shell 工具未启用(默认关闭)。\n"
-            "确实需要就改 config.json 的 allow_shell = true;"
-            "更推荐用 run_local_agent,让 dsh 在沙箱里执行,安全和可追溯性都更好。"
-        )
-    command = (args.get("command") or "").strip()
-    if not command:
-        raise ValueError("command 不能为空")
-    timeout = max(5, min(int(args.get("timeout_seconds") or 120), 900))
-    result = run_capture(["cmd", "/c", command] if os.name == "nt" else ["sh", "-c", command],
-                         str(Path(cfg["workspace_root"])), timeout)
-    out = (result["stdout"] or "") + (("\n--- stderr ---\n" + result["stderr"]) if result["stderr"].strip() else "")
-    flag = "✅" if result["ok"] else f"❌ exit={result['code']}"
-    text = truncate(f"{flag} {result['elapsed']}s\n\n{out.strip() or '(无输出)'}", cfg["max_output_chars"])
-    if not result["ok"]:
-        raise ToolExecutionError(text)
-    return text
+    _deny_legacy_control("run_local_shell")
 
 
 def _reader_recent(talker: str, cfg: dict, limit: int = 6):
@@ -1043,15 +984,7 @@ def _send_file_verified(src: Path, cfg: dict, target_title: str = "", talker: st
 
 
 def tool_export_file(args: dict, cfg: dict) -> str:
-    src = resolve_path(args.get("path") or "", cfg)
-    if not src.is_file():
-        raise ToolExecutionError("文件不存在: %s" % src)
-    if src.stat().st_size > int(cfg.get("max_export_mb") or 50) * 1024 * 1024:
-        raise ToolExecutionError("文件超过发送上限。")
-    _pick_target(args, cfg, required=True)
-    # The product attachment sender owns stable identity/authorization checks.
-    # Do not call the old title-only UI script, retry it, or convert to images.
-    raise ToolExecutionError("LEGACY_UI_IDENTITY_UNVERIFIED：未提交文件。请使用小助手产品中的受控附件发送入口。")
+    _deny_legacy_control("export_file")
 
 
 WECHAT_PROJECT = Path(r"G:\wechat-deepseek\data\workspace")
@@ -1313,25 +1246,7 @@ def wechat_send_native(src: Path, cfg: dict, mode: str, **kwargs):
 
 
 def tool_send_image(args: dict, cfg: dict) -> list:
-    src = resolve_path(args.get("path") or "", cfg)
-    if not src.is_file():
-        raise ToolExecutionError(f"图片不存在: {src}")
-    mime = MIME_BY_SUFFIX.get(src.suffix.lower())
-    if mime is None:
-        raise ToolExecutionError("不支持的图片格式。")
-    target = _pick_target(args, cfg)
-    if target:
-        result = wechat_hook_send_image(src, cfg, target)
-        if result.get("state") == "delivered":
-            return [{"type": "text", "text": "已取得目标账号与聊天的图片送达回执。"}]
-        raise ToolExecutionError("图片外发状态：" + result["state"] + " / " + result["code"] + "；未确认送达，勿自动重发或换通道。")
-    # Tool content belongs to the requesting MCP call, with no independent
-    # WeChat send or guessed recipient. Do not claim external delivery.
-    raw = src.read_bytes()
-    if len(raw) > 3 * 1024 * 1024:
-        return [{"type": "text", "text": "未独立发送微信消息；图片下载链接：" + share_file(src, cfg)}]
-    return [{"type": "image", "data": base64.b64encode(raw).decode("ascii"), "mimeType": mime},
-            {"type": "text", "text": "图片作为本次工具结果返回；没有独立发送微信消息。"}]
+    _deny_legacy_control("send_image")
 
 
 ESPN_PATHS = {
@@ -1433,15 +1348,8 @@ def _codex_env(cfg: dict) -> dict:
 
 
 def _codex_run(prompt: str, cfg: dict, timeout: int) -> dict:
-    base = _codex_cmd(cfg)
-    if base is None:
-        return {"ok": False, "stdout": "", "stderr": "codex CLI 不存在"}
-    scratch = Path(cfg.get("gpt_scratch_dir") or r"F:\deepseek工作区\_gpt_scratch")
-    scratch.mkdir(parents=True, exist_ok=True)
-    try:
-        return run_capture(base + [prompt], str(scratch), timeout, _codex_env(cfg))
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "stdout": "", "stderr": str(exc)}
+    # Never let a query alias invoke a general agent with ambient tools/config.
+    _deny_legacy_worker()
 
 
 def _codex_images(cfg: dict) -> set:
@@ -1455,59 +1363,53 @@ def _codex_images(cfg: dict) -> set:
 
 
 def _gpt_draw_worker(prompt: str, cfg: dict, job) -> dict:
-    before = _codex_images(cfg)
-    result = _codex_run("用图片生成工具画一张图，主题：" + prompt, cfg, int(cfg.get("gpt_draw_timeout_sec") or 360))
-    new = _codex_images(cfg) - before
-    if not new:
-        return {"ok": False, "code": result.get("code"), "stdout": "", "stderr": "IMAGE_GENERATION_FAILED：没有生成图片文件。", "elapsed": result.get("elapsed", 0)}
-    src = max(map(Path, new), key=lambda x: x.stat().st_mtime)
-    dst = _store_generated(src.read_bytes(), src.suffix, cfg, "gpt")
-    job.output_image = dst
-    return {"ok": True, "code": 0, "stdout": "图片已保存在本机：" + str(dst), "stderr": "", "elapsed": result.get("elapsed", 0)}
+    _deny_legacy_worker()
 
 
 def _store_generated(raw: bytes, suffix: str, cfg: dict, prefix: str) -> Path:
     if not raw or len(raw) > 8 * 1024 * 1024:
         raise ValueError("GENERATED_IMAGE_SIZE_INVALID")
-    out = Path(cfg.get("gpt_output_dir") or Path(cfg["workspace_root"]) / "generated")
+    out = resolve_path(str(cfg.get("gpt_output_dir") or Path(cfg["workspace_root"]) / "generated"), cfg)
     out.mkdir(parents=True, exist_ok=True)
     dst = out / (prefix + "_" + uuid.uuid4().hex[:12] + suffix)
     dst.write_bytes(raw)
     return dst
 
 
-def _free_draw_worker(prompt: str, cfg: dict, job) -> dict:
+def _free_draw_worker(prompt: str, cfg: dict) -> Path:
+    # Fixed image endpoint and bounded bytes; no local worker/model tools.
     width, height = int(cfg.get("free_image_width") or 1024), int(cfg.get("free_image_height") or 1024)
-    url = "https://image.pollinations.ai/prompt/" + quote(prompt) + "?width=%d&height=%d&nologo=true&seed=%d" % (width, height, int(time.time()) % 100000)
+    if not 64 <= width <= 2048 or not 64 <= height <= 2048:
+        raise ValueError("IMAGE_DIMENSIONS_INVALID")
+    url = "https://image.pollinations.ai/prompt/" + quote(prompt, safe="") + "?width=%d&height=%d&nologo=true&seed=%d" % (width, height, int(time.time()) % 100000)
     with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=120) as response:
         ctype = response.headers.get("Content-Type", "")
         if not ctype.startswith("image/"):
             raise ValueError("GENERATED_CONTENT_NOT_IMAGE")
         raw = response.read(8 * 1024 * 1024 + 1)
-    dst = _store_generated(raw, ".jpg" if "jpeg" in ctype else ".png", cfg, "free")
-    job.output_image = dst
-    return {"ok": True, "code": 0, "stdout": "图片已保存在本机：" + str(dst), "stderr": "", "elapsed": round(time.time() - job.started, 1)}
+    return _store_generated(raw, ".jpg" if "jpeg" in ctype else ".png", cfg, "free")
 
 
-def tool_gpt_draw(args: dict, cfg: dict) -> str:
+def tool_gpt_draw(args: dict, cfg: dict) -> list:
     prompt = (args.get("prompt") or "").strip()
-    if not prompt:
-        raise ValueError("prompt 不能为空")
-    engine = (args.get("engine") or cfg.get("gpt_draw_engine") or "free").strip().lower()
-    if engine not in ("gpt", "chatgpt", "codex", "free"):
-        raise ValueError("IMAGE_ENGINE_UNSUPPORTED")
-    target = _pick_target(args, cfg)
-    use_gpt = engine != "free"
-    if use_gpt and _codex_cmd(cfg) is None:
-        raise ToolExecutionError("CODEX_NOT_FOUND：GPT 画图通道不可用。")
-    runner = _gpt_draw_worker if use_gpt else _free_draw_worker
-    job = Job(prompt, 360, cfg, runner=lambda current: runner(prompt, cfg, current))
-    job.target, job.label = target, "图片生成"
-    with JOBS_LOCK:
-        JOBS[job.id] = job
-    job.start()
-    threading.Thread(target=_watch_job, args=(job, cfg), daemon=True).start()
-    return "已开始生成图片，job_id=" + job.id + "。用 local_agent_status 查询生成和交付状态；没有绑定收件身份时仅保存本机。"
+    if not prompt or len(prompt) > 4000:
+        raise ValueError("IMAGE_PROMPT_INVALID")
+    # Do not route this query into a generic Codex/DSH worker even if config
+    # previously selected it; do not create a detached job or send a notification.
+    engine = str(args.get("engine") or "free").lower()
+    if engine != "free":
+        _deny_legacy_worker()
+    if any(args.get(key) for key in ("target", "account", "target_kind", "request_id")):
+        _deny_legacy_control("gpt_draw.direct_delivery")
+    # Reject outside output configuration before any network request.
+    resolve_path(str(cfg.get("gpt_output_dir") or Path(cfg["workspace_root"]) / "generated"), cfg)
+    image = _free_draw_worker(prompt, cfg)
+    raw = image.read_bytes()
+    if len(raw) > 3 * 1024 * 1024:
+        return [{"type": "text", "text": "已生成图片；仅本次工具结果的下载链接：" + share_file(image, cfg)}]
+    mime = MIME_BY_SUFFIX[image.suffix.lower()]
+    return [{"type": "image", "data": base64.b64encode(raw).decode("ascii"), "mimeType": mime},
+            {"type": "text", "text": "图片已生成并作为本次工具结果返回；未独立发送微信。"}]
 
 
 def tool_fetch_paper(args: dict, cfg: dict) -> str:
@@ -1518,7 +1420,7 @@ def tool_fetch_paper(args: dict, cfg: dict) -> str:
     query = (args.get("query") or args.get("doi") or args.get("title") or "").strip()
     if not query:
         raise ValueError("请给出 DOI、标题或 arXiv 编号")
-    out_dir = Path(cfg.get("papers_dir") or r"F:\\deepseek工作区\\papers")
+    out_dir = resolve_path(str(cfg.get("papers_dir") or Path(cfg["workspace_root"]) / "papers"), cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     proxy = cfg.get("gpt_proxy") or "http://127.0.0.1:7890"
@@ -1528,6 +1430,9 @@ def tool_fetch_paper(args: dict, cfg: dict) -> str:
           "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
     def get(url, timeout=45, raw=False, use_proxy=False, referer=None):
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError("PAPER_URL_SCHEME_DENIED")
         headers = {"User-Agent": UA, "Accept": "application/pdf,text/html;q=0.9,*/*;q=0.8"}
         if referer:
             headers["Referer"] = referer
@@ -1640,7 +1545,7 @@ def tool_fetch_paper(args: dict, cfg: dict) -> str:
             notes.append("%s 返回的不是 PDF(%s)" % (label, ctype[:40]))
             continue
         safe = _re.sub(r"[^0-9A-Za-z._-]+", "_", (meta["title"] or doi or "paper"))[:60].strip("_") or "paper"
-        dst = out_dir / (safe + ".pdf")
+        dst = resolve_path(str(out_dir / (safe + "_" + uuid.uuid4().hex[:12] + ".pdf")), cfg)
         dst.write_bytes(data)
         lines = ["已下载 PDF:%s(%.2f MB,来源 %s)" % (dst.name, len(data) / 1024 / 1024, label)]
         if meta["title"]:
@@ -1648,7 +1553,7 @@ def tool_fetch_paper(args: dict, cfg: dict) -> str:
         if meta["doi"]:
             lines.append("DOI:" + meta["doi"])
         lines.append("文件路径:%s" % dst)
-        lines.append("下一步:用 export_file 把这个文件发到微信。")
+        lines.append("仅本次工具结果的下载链接:" + share_file(dst, cfg))
         return "\n".join(lines)
 
     msg = ["没拿到 PDF。"]
@@ -1666,49 +1571,7 @@ def tool_fetch_paper(args: dict, cfg: dict) -> str:
 
 
 def tool_ask_gpt(args: dict, cfg: dict) -> str:
-    """通过用户电脑上的 ChatGPT(Codex CLI) 提问,返回它的回答。"""
-    prompt = (args.get("prompt") or args.get("question") or "").strip()
-    if not prompt:
-        raise ValueError("prompt 不能为空")
-    timeout = int(args.get("timeout_seconds") or cfg.get("gpt_timeout_sec") or 240)
-    timeout = max(30, min(timeout, 600))
-    if _codex_cmd(cfg) is None:
-        raise ToolExecutionError("这台电脑上没找到 codex CLI,GPT 通道不可用。")
-    result = _codex_run(prompt, cfg, timeout)
-
-    raw = (result.get("stdout") or "") + "\n" + (result.get("stderr") or "")
-    if not result.get("ok") and not raw.strip():
-        raise ToolExecutionError("GPT 没有返回内容(CLI 退出异常)。")
-    if not result.get("ok"):
-        raise ToolExecutionError("GPT 执行失败: " + truncate(raw.strip(), cfg["max_output_chars"]))
-
-    lines = raw.splitlines()
-    answer = ""
-    start = None
-    for i, line in enumerate(lines):
-        if line.strip() == "--------":
-            start = i + 1
-    if start is not None:
-        # 格式: user / 提问原文 / codex / 回答... / tokens used
-        body = lines[start:]
-        codex_at = None
-        for i, line in enumerate(body):
-            if line.strip() == "codex":
-                codex_at = i
-        if codex_at is not None:
-            collected = []
-            for line in body[codex_at + 1:]:
-                if line.strip().lower().startswith("tokens used"):
-                    break
-                collected.append(line)
-            answer = "\n".join(collected).strip()
-        else:
-            answer = "\n".join(body).strip()
-    if not answer:
-        answer = raw.strip()
-    if not answer:
-        raise ToolExecutionError("GPT 返回了空内容。")
-    return answer
+    _deny_legacy_worker()
 
 
 def tool_fetch_player_stats(args: dict, cfg: dict) -> str:
@@ -1939,8 +1802,13 @@ def _screenshot_once(browser: str, url: str, out: Path, width: int, height: int,
 def screenshot_url(url: str, out, cfg: dict, width=None, height=None) -> dict:
     """网页截图:先直连(绕过系统代理/反爬挑战),空白或失败再换策略;返回前用像素比例校验空白。"""
     raw = str(url or "").strip()
-    if not raw.lower().startswith(("http://", "https://", "file://")):
-        return {"ok": False, "error": "网址必须以 http:// https:// 或 file:// 开头"}
+    parsed = urlparse(raw)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return {"ok": False, "error": "SCREENSHOT_URL_DENIED：只允许 http/https 网页，不能读取本地文件。"}
+    out = resolve_path(str(out), cfg)
+    artifact_root = resolve_path("screenshots", cfg)
+    if artifact_root not in out.parents or out.suffix.lower() != ".png" or out.exists():
+        return {"ok": False, "error": "SCREENSHOT_OUTPUT_DENIED：只允许 screenshots 目录中的新 PNG 文件。"}
     browser = _find_browser()
     if not browser:
         return {"ok": False, "error": "找不到 Edge/Chrome,没法截图"}
@@ -1973,7 +1841,7 @@ def screenshot_url(url: str, out, cfg: dict, width=None, height=None) -> dict:
     return last
 
 
-def tool_screenshot_url(args: dict, cfg: dict) -> str:
+def tool_screenshot_url(args: dict, cfg: dict) -> list:
     url = (args.get("url") or "").strip()
     if not url:
         raise ValueError("url 不能为空")
@@ -1981,18 +1849,20 @@ def tool_screenshot_url(args: dict, cfg: dict) -> str:
     if raw_out:
         out = resolve_path(raw_out, cfg)
     else:
-        out = Path(cfg["workspace_root"]) / "screenshots" / (
-            "shot_%s_%s.png" % (time.strftime("%Y%m%d_%H%M%S"), uuid.uuid4().hex[:4]))
+        out = resolve_path(str(Path(cfg["workspace_root"]) / "screenshots" / (
+            "shot_%s_%s.png" % (time.strftime("%Y%m%d_%H%M%S"), uuid.uuid4().hex[:4]))), cfg)
     res = screenshot_url(url, out, cfg, args.get("width"), args.get("height"))
     if not res.get("ok"):
         raise ToolExecutionError("【截图失败】%s\n所有尝试都没拿到非空白截图(常见原因:网站要登录/要过人机验证/"
                 "强依赖交互,或被本机代理拦成反爬挑战页)。建议改用公开数据接口(如 fetch_scores)"
                 "或换数据源,不要交空白图。" % res.get("error", ""))
-    return ("【截图成功·已校验非空白】%s\n尺寸 %d x %d,大小 %s B,近白像素占比 %.4f,"
-            "策略:%s(第 %d 次尝试)。\n下一步:用 send_image 把这个路径发出去"
-            "(不传 target 仅返回本次工具结果，不独立外发)。" % (
-                res["path"], res["width"], res["height"], f"{res['bytes']:,}",
-                res["ratio"], res["strategy"], res["tries"]))
+    raw = out.read_bytes()
+    content = [{"type": "text", "text": "截图已生成并返回本次工具请求；未独立发送微信。"}]
+    if len(raw) <= 3 * 1024 * 1024:
+        content.append({"type": "image", "data": base64.b64encode(raw).decode("ascii"), "mimeType": "image/png"})
+    else:
+        content[0]["text"] += "下载链接：" + share_file(out, cfg)
+    return content
 
 
 # ----------------------------------------------------------------------------- 网页正文
@@ -2101,7 +1971,7 @@ def _browser_dom(url: str, cfg: dict, timeout: int = 80) -> tuple[str, str]:
     browser = _find_browser()
     if not browser:
         raise RuntimeError("找不到 Edge/Chrome")
-    profile = Path(cfg["workspace_root"]) / ".browser_tmp" / ("dom_" + uuid.uuid4().hex[:8])
+    profile = resolve_path(str(Path(cfg["workspace_root"]) / ".browser_tmp" / ("dom_" + uuid.uuid4().hex[:8])), cfg)
     profile.mkdir(parents=True, exist_ok=True)
     direct_env = {"HTTP_PROXY": "", "HTTPS_PROXY": "", "ALL_PROXY": "",
                   "http_proxy": "", "https_proxy": "", "all_proxy": ""}
@@ -2165,7 +2035,7 @@ TOOLS = [
         "description": (
             "下载学术论文 PDF 到电脑(优先开放获取:Unpaywall / Semantic Scholar / arXiv)。"
             "传 DOI(如 10.1038/xxx)或论文标题或 arXiv 编号。"
-            "下载成功返回文件路径,再用 export_file 把文件发到微信。"
+            "下载成功返回工作区内文件路径与单文件限时下载链接；不独立发送微信。"
             "如果是订阅刊且没有开放版本,会明确说明需要机构权限。"
         ),
         "inputSchema": {
@@ -2180,8 +2050,7 @@ TOOLS = [
     {
         "name": "gpt_draw",
         "description": (
-            "生成图片(异步)。调用立刻返回「在画了」,画好后图片由电脑直接发到微信,不用轮询。"
-            "默认走 free 免费通道(几秒、不吃额度);用户明确要求高质量或用 GPT 画时传 engine=gpt。"
+            "通过固定免费图片接口同步生成，作为本次工具结果返回，不独立发送微信。"
         ),
         "inputSchema": {
             "type": "object",
@@ -2358,14 +2227,14 @@ TOOLS = [
         "name": "screenshot_url",
         "description": (
             "网页截图(可靠版):自动先直连后走系统代理,截图后用像素检测空白,空白自动换策略重试;"
-            "成功返回 PNG 路径和校验结果,再把这个路径交给 send_image 发送。"
+            "成功向本次工具请求返回图片或单文件下载链接，不独立发送微信。"
             "网页截图一律用它,不要自己用 headless 浏览器命令截(本机代理会让 ESPN 等站点返回反爬挑战页、截出纯白图)。"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "要截图的网址(http/https/file)。"},
-                "path": {"type": "string", "description": "可选:输出 png 路径,默认存到工作区 screenshots/ 下。"},
+                "url": {"type": "string", "description": "要截图的 http/https 网页，不接受本地文件。"},
+                "path": {"type": "string", "description": "可选:工作区 screenshots/ 内尚不存在的 PNG 路径。"},
                 "width": {"type": "integer", "description": "可选:视口宽度,默认 1440。"},
                 "height": {"type": "integer", "description": "可选:视口高度,默认 1600(长页面可调大)。"},
             },
@@ -2392,24 +2261,16 @@ TOOLS = [
     },
 ]
 
-# The MCP descriptions and schemas describe actual capabilities, not an old UI promise.
+# Expose only this transport's verifiable business capabilities. Metadata for
+# withheld legacy names is reported by health, never as executable schemas.
+TOOLS = [tool for tool in TOOLS if tool["name"] in BUSINESS_QUERY_TOOLS]
 for _tool in TOOLS:
-    if _tool["name"] in {"run_local_agent", "gpt_draw", "send_image", "export_file"}:
-        _props = _tool["inputSchema"]["properties"]
-        _props.update({
-            "account": {"type": "string", "description": "明确的 reader accountDirectory；外发时必填。"},
-            "target_kind": {"type": "string", "enum": ["private", "group"]},
-            "request_id": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{8,120}$", "description": "本次交付唯一 ID，重试必须沿用。"},
-        })
-        _props["target"] = {"type": "string", "description": "稳定 wxid 或全局唯一的精确名称；不接受模糊匹配、主人别名及最近聊天。"}
-    if _tool["name"] == "run_local_agent":
-        _tool["description"] = "在本机通过 DSH 执行任务，返回结果或 job_id；未绑定收件身份则只保存本机，用 local_agent_status 查询。启动不代表完成或送达。"
-    elif _tool["name"] == "gpt_draw":
-        _tool["description"] = "异步生成图片并保存本机，返回 job_id；用 local_agent_status 查路径与交付状态。外发需完整身份绑定及可用的受控通道。"
-    elif _tool["name"] == "send_image":
-        _tool["description"] = "不传目标时向本次 MCP 请求返回图片内容；不会猜测微信收件人。指定外发需完整身份绑定；原生图片 ABI 未验证时拒绝外发。"
-    elif _tool["name"] == "export_file":
-        _tool["description"] = "检查待发文件及身份参数。旧 UI 仅标题校验，当前拒绝外部提交；发送文件请使用产品中的受控附件入口。"
+    if _tool["name"] == "gpt_draw":
+        _tool["description"] = "通过固定免费图片接口生成并返回本次请求的图片结果；不运行通用 CLI、不启动后台任务、不独立发微信。"
+        _tool["inputSchema"]["properties"] = {
+            "prompt": {"type": "string", "maxLength": 4000},
+            "engine": {"type": "string", "enum": ["free"], "default": "free"},
+        }
 
 
 TOOL_HANDLERS = {
@@ -2433,10 +2294,18 @@ TOOL_HANDLERS = {
 
 
 def call_tool(params: dict, cfg: dict) -> dict:
-    name = params.get("name") or ""
-    arguments = params.get("arguments") or {}
+    if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+        return {"content": [{"type": "text", "text": "工具请求须包含字符串名称"}], "isError": True}
+    name = params["name"]
+    arguments = params.get("arguments", {})
     if not isinstance(arguments, dict):
         return {"content": [{"type": "text", "text": "工具参数须为对象"}], "isError": True}
+    if name in DISABLED_CONTROL_TOOLS:
+        return {"content": [{"type": "text", "text": "LEGACY_CONTROL_CONTEXT_UNAVAILABLE：控制关闭，不能用配置、请求字段或服务令牌扩大权限。"}], "isError": True}
+    if name in DISABLED_AUXILIARY_TOOLS:
+        return {"content": [{"type": "text", "text": "LEGACY_TEXT_WORKER_POLICY_UNAVAILABLE：查询别名不能启动未隔离的通用 worker。"}], "isError": True}
+    if name not in BUSINESS_QUERY_TOOLS:
+        return {"content": [{"type": "text", "text": f"没有这个工具: {name}"}], "isError": True}
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
         return {"content": [{"type": "text", "text": f"没有这个工具: {name}"}], "isError": True}
@@ -2466,6 +2335,8 @@ def handle_rpc(message: dict, cfg: dict) -> dict | None:
 
     if method is None:
         return None  # 客户端发来的 response,忽略
+    if not isinstance(method, str) or not isinstance(params, dict):
+        return rpc_error(msg_id, -32600, "方法须为字符串，参数须为对象")
     if method.startswith("notifications/"):
         return None
 
@@ -2474,7 +2345,8 @@ def handle_rpc(message: dict, cfg: dict) -> dict | None:
     if method == "tools/call":
         detail = " " + str(params.get("name"))
     elif method == "initialize":
-        detail = " from " + str((params.get("clientInfo") or {}).get("name"))
+        client_info = params.get("clientInfo")
+        detail = " from " + str(client_info.get("name") if isinstance(client_info, dict) else "unknown")
     print(f"[{time.strftime('%H:%M:%S')}] {method}{detail}")
 
     try:
@@ -2486,14 +2358,11 @@ def handle_rpc(message: dict, cfg: dict) -> dict | None:
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                 "instructions": (
-                    "本机 pcbridge 提供本地任务、文件、网页和比分工具。run_local_agent 和 gpt_draw 返回 job_id，"
-                    "请用 local_agent_status 查询结果，不要仅凭任务启动就宣称完成或已发微信。"
-                    "未指定收件目标时只保留本地结果，send_image 仅向本次 MCP 请求返回图片内容。"
-                    "如需独立微信通知，必须显式指定 account、target_kind、唯一精确 target 和 request_id。"
-                    "不按最近聊天猜测，不使用主人别名，不自动改收件人或换发送通道。"
-                    "送达以绑定目标的真实回执为准，unconfirmed 禁止自动重发。"
-                    "旧标题校验 UI 不能证明身份，export_file 会拒绝并要求使用产品受控附件入口。"
-                    "比分/赛程用 fetch_scores，截图用 screenshot_url，正文用 read_web_page。"
+                    "这是受限的本机业务查询服务。电脑控制关闭，服务令牌不是当前会话的控制授权。"
+                    "仅公开 tools/list 内的查询能力：比分、球员、论文、网页、截图、状态和免费图片生成。"
+                    "不公开任意文件读取/写入、命令、agent、旧消息发送或通用 Codex worker。"
+                    "旧名称调用会明确拒绝；配置布尔值、account、scope、executionPolicy 等请求字段不能解锁。"
+                    "工具结果不代表已独立发送微信；失败时如实说明，不要猜测收件人或重复外发。"
                 ),
             }
         elif method == "ping":
@@ -2603,7 +2472,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "pid": os.getpid(),
                 "sourceSha256": SOURCE_SHA256,
                 "protocolVersions": list(SUPPORTED_PROTOCOL_VERSIONS),
-                "deliveryPolicy": "explicit-identity-single-attempt-v1",
+                "deliveryPolicy": "legacy-control-disabled-v1",
+                "controlPolicy": "no-trusted-session-control-transport-v1",
+                "disabledTools": sorted(DISABLED_CONTROL_TOOLS | DISABLED_AUXILIARY_TOOLS),
                 "toolCount": len(TOOLS),
                 "dsh": " ".join(DSH_CMD) if DSH_CMD else None,
                 "dsh_hint": DSH_HINT,
@@ -2728,33 +2599,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
 # ----------------------------------------------------------------------------- 入口
 
 def selftest(cfg: dict) -> int:
-    print("=" * 66)
-    print("自检开始(不会联网,也不会开端口)")
-    print("=" * 66)
-    print(tool_pc_status(cfg))
-    print("-" * 66)
-
-    if DSH_CMD is None:
-        print("[FAIL] 没找到 dsh 命令,run_local_agent 无法工作。")
-        return 2
-
-    print("[1/3] 跑一个最小任务(可能要十几秒)…")
-    probe = run_capture(dsh_args("只回复两个字:能行"), str(Path(cfg["workspace_root"])), 180, DSH_EXTRA_ENV)
-    out = (probe["stdout"] + probe["stderr"]).strip()
-    print(f"      exit={probe['code']} 用时={probe['elapsed']}s")
-    print("      " + ("\n      ".join(out.splitlines()[:12]) if out else "(无输出)"))
-    if not probe["ok"]:
-        print("[WARN] 任务没成功 —— 大概率是 headless 没有模型凭据,见 README「凭据」一节。")
-
-    print("[2/3] 目录列表 …")
-    print("      " + tool_list_dir({"path": "."}, cfg).splitlines()[0])
-
-    print("[3/3] 读文件 …")
-    readme = SCRIPT_DIR / "README.md"
-    print("      " + (f"OK {readme}" if readme.exists() else "(README.md 还没生成)"))
-    print("=" * 66)
-    print("自检结束。若 [1/3] 正常,启动服务后手机就能用了。")
-    return 0 if probe["ok"] else 1
+    # Static contract only: never run a real agent as a diagnostic side effect.
+    names = {tool["name"] for tool in TOOLS}
+    denied = all(call_tool({"name": name, "arguments": {}}, cfg)["isError"]
+                 for name in DISABLED_CONTROL_TOOLS | DISABLED_AUXILIARY_TOOLS)
+    passed = names == BUSINESS_QUERY_TOOLS and denied
+    print(json.dumps({"ok": passed, "version": SERVER_VERSION, "toolCount": len(names),
+                      "controlDisabled": denied, "scope": "static-contract-only"}, ensure_ascii=False))
+    return 0 if passed else 1
 
 
 def main() -> int:
