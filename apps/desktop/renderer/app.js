@@ -42,6 +42,8 @@ let toastTimer;
 let refreshTimer;
 let refreshPromise;
 let detailGeneration = 0;
+let mailDraftReadGeneration = 0;
+let wechatDraftReadGeneration = 0;
 let lastFocus;
 const app = document.querySelector('#app');
 
@@ -341,6 +343,7 @@ function selectedWechatConversation() {
   const conversations = wechatConversations();
   const selected = conversations.find(conversation => conversation.key === state.selectedConversationKey) || conversations[0];
   if (selected && selected.key !== state.selectedConversationKey) {
+    wechatDraftReadGeneration++;
     if (state.selectedConversationKey) state.wechatReplyByConversation[state.selectedConversationKey] = state.wechatReply;
     state.wechatReply = state.wechatReplyByConversation[selected.key] || '';
     state.selectedConversationKey = selected.key;
@@ -527,7 +530,7 @@ function renderWechatInbox() {
   const connection = wechatConnectionInfo();
   const disabled = Boolean(state.wechatBusy) || connection.state !== 'ready' || !conversation.allowed;
   const loaded = state.wechatHistoryLoaded[conversation.key];
-  return `<div class="wechat-access-toolbar"><span>${escape(conversation.name)}</span><button type="button" class="secondary-button compact" data-action="wechat-access" ${!conversation.allowed || typeof api?.getWechatDshAccess!=='function' || state.wechatDshBusy ? 'disabled' : ''}>${icon('shield')}会话能力授权</button></div>${renderWechatDshAccess(conversation)}<div class="wechat-inbox"><aside class="conversation-pane" aria-label="微信会话"><div class="pane-caption">${icon('chat')}会话列表<span>${conversations.length}</span><button class="text-button" data-action="wechat-sessions" aria-label="同步会话列表" title="同步会话列表" ${state.wechatBusy ? 'disabled' : ''}>${icon('refresh')}</button></div><div class="conversation-list">${conversations.map(item => `<button class="conversation-row ${item.key === conversation.key ? 'active' : ''}" data-action="wechat-conversation" data-key="${escape(item.key)}"><span class="contact-avatar ${item.kind === 'group' ? 'group' : ''}">${icon(item.kind === 'group' ? 'grid' : 'chat')}</span><span class="conversation-copy"><strong>${escape(item.name)}</strong><small>${item.kind === 'group' ? '微信群聊' : '微信好友'}${item.allowed ? '' : ' · 未授权'}</small><span class="conversation-preview">${escape(item.messages[0]?.text || '点击查看历史或开始写信')}</span></span><span class="conversation-meta">${item.messages[0] ? `<time>${formatTime(item.messages[0].receivedAt)}</time>` : ''}${item.messages.length ? `<span class="message-count">${item.messages.length}</span>` : ''}</span></button>`).join('')}</div></aside><div class="message-pane"><header class="conversation-header"><div><h2>${escape(conversation.name)}</h2><p>${conversation.kind === 'group' ? '微信群聊' : '微信好友'} · ${conversation.allowed ? '已选择的聊天' : '不在当前接收范围，暂不能发送'}</p><details class="conversation-identity"><summary>会话标识（高级）</summary><code>${escape(conversation.id)}</code></details></div><button class="secondary-button compact" data-action="wechat-history" ${disabled ? 'disabled' : ''}>${icon('refresh')}${state.wechatBusy === 'history' ? '正在读取…' : loaded ? '刷新历史' : '查看历史'}</button></header><div class="message-thread" aria-label="会话消息">${loaded ? '<div class="history-range-note">显示最近最多 100 条消息；当前未提供更早消息翻页。</div>' : ''}${thread.length ? thread.map(entry => entry.type !== 'outgoing' ? `<article class="wechat-message ${entry.type === 'history-outgoing' ? 'outgoing' : 'incoming'} ${entry.message.id === selected?.id ? 'selected' : ''}"><div class="message-heading"><strong>${entry.type === 'history-outgoing' ? '我' : escape(wechatSenderName(entry.message))}</strong><time>${formatTime(entry.time, true)}</time>${entry.type === 'incoming' ? `<button class="text-button reply-target" data-action="wechat-target" data-id="${escape(entry.message.id)}">${entry.message.id === selected?.id ? '当前起草参考' : '作为起草参考'}</button>` : ''}</div>${entry.message.text ? `<div class="message-text">${escape(entry.message.text)}</div>` : ''}${renderWechatImages(entry.message, conversation)}</article>` : `<article class="wechat-message outgoing"><div class="message-heading"><strong>我</strong><time>${formatTime(entry.time, true)}</time><span class="outbox-status ${entry.outgoing.status === 'failed' ? 'failed' : ''}">${escape(outboxLabels[entry.outgoing.status] || '结果待核对')}</span></div>${renderWechatOutgoing(entry.outgoing)}${entry.outgoing.error ? `<p class="send-error">${escape(entry.outgoing.error)}</p>` : ''}</article>`).join('') : `<div class="wechat-thread-empty">${icon('chat')}<strong>与 ${escape(conversation.name)} 的会话</strong><p>点击“查看历史”读取已有消息，或在下方直接写信。</p></div>`}</div><div class="reply-composer"><form id="wechat-reply-form"><div class="reply-caption"><label for="wechat-reply">手动写给 ${escape(conversation.name)}</label><div>${selected?.taskId ? `<button class="text-button" type="button" data-action="open-task" data-id="${escape(selected.taskId)}">查看起草任务</button>` : ''}${selected?.taskId && (selected.replyDraft || state.tasks.some(task=>task.id===selected.taskId&&task.status==='succeeded')) ? '<button class="secondary-button compact" type="button" data-action="wechat-use-draft">填入 AI 草稿</button>' : ''}<button class="secondary-button compact" type="button" data-action="wechat-draft" ${state.wechatBusy || !selected || selected.outgoing === true || selected.direction === 'outgoing' || selected.isSelf ? 'disabled' : ''}>${icon('spark')}${state.wechatBusy === 'draft' ? '正在创建…' : '请 AI 起草'}</button><button class="secondary-button compact" type="button" data-action="wechat-stickers" ${disabled ? 'disabled' : ''}>${state.wechatStickerPanel ? '收起表情' : '表情'}</button></div></div><textarea id="wechat-reply" name="reply" maxlength="1048576" placeholder="需要自己回复时，在这里写信并点击发送。">${escape(state.wechatReply)}</textarea><div class="reply-footer"><small>${connection.state === 'ready' ? `手动发送给：${escape(conversation.name)} · ${state.wechat?.settings?.autoReply ? "DSH 已开启自动回复" : "自动回复未开启"}` : '当前未连接，编辑的文字会保留在此页面。'}</small><button class="primary-button" type="submit" ${disabled || !state.wechatReply.trim() ? 'disabled' : ''}>${icon('arrow')}${state.wechatBusy === 'send' ? '正在发送…' : '发送文字'}</button></div></form>${renderWechatAttachments(conversation)}${renderWechatStickerPicker(conversation)}</div></div></div>`;
+  return `<div class="wechat-access-toolbar"><span>${escape(conversation.name)}</span><button type="button" class="secondary-button compact" data-action="wechat-access" ${!conversation.allowed || typeof api?.getWechatDshAccess!=='function' || state.wechatDshBusy ? 'disabled' : ''}>${icon('shield')}会话能力授权</button></div>${renderWechatDshAccess(conversation)}<div class="wechat-inbox"><aside class="conversation-pane" aria-label="微信会话"><div class="pane-caption">${icon('chat')}会话列表<span>${conversations.length}</span><button class="text-button" data-action="wechat-sessions" aria-label="同步会话列表" title="同步会话列表" ${state.wechatBusy ? 'disabled' : ''}>${icon('refresh')}</button></div><div class="conversation-list">${conversations.map(item => `<button class="conversation-row ${item.key === conversation.key ? 'active' : ''}" data-action="wechat-conversation" data-key="${escape(item.key)}"><span class="contact-avatar ${item.kind === 'group' ? 'group' : ''}">${icon(item.kind === 'group' ? 'grid' : 'chat')}</span><span class="conversation-copy"><strong>${escape(item.name)}</strong><small>${item.kind === 'group' ? '微信群聊' : '微信好友'}${item.allowed ? '' : ' · 未授权'}</small><span class="conversation-preview">${escape(item.messages[0]?.text || '点击查看历史或开始写信')}</span></span><span class="conversation-meta">${item.messages[0] ? `<time>${formatTime(item.messages[0].receivedAt)}</time>` : ''}${item.messages.length ? `<span class="message-count">${item.messages.length}</span>` : ''}</span></button>`).join('')}</div></aside><div class="message-pane"><header class="conversation-header"><div><h2>${escape(conversation.name)}</h2><p>${conversation.kind === 'group' ? '微信群聊' : '微信好友'} · ${conversation.allowed ? '已选择的聊天' : '不在当前接收范围，暂不能发送'}</p><details class="conversation-identity"><summary>会话标识（高级）</summary><code>${escape(conversation.id)}</code></details></div><button class="secondary-button compact" data-action="wechat-history" ${disabled ? 'disabled' : ''}>${icon('refresh')}${state.wechatBusy === 'history' ? '正在读取…' : loaded ? '刷新历史' : '查看历史'}</button></header><div class="message-thread" aria-label="会话消息">${loaded ? '<div class="history-range-note">显示最近最多 100 条消息；当前未提供更早消息翻页。</div>' : ''}${thread.length ? thread.map(entry => entry.type !== 'outgoing' ? `<article class="wechat-message ${entry.type === 'history-outgoing' ? 'outgoing' : 'incoming'} ${entry.message.id === selected?.id ? 'selected' : ''}"><div class="message-heading"><strong>${entry.type === 'history-outgoing' ? '我' : escape(wechatSenderName(entry.message))}</strong><time>${formatTime(entry.time, true)}</time>${entry.type === 'incoming' ? `<button class="text-button reply-target" data-action="wechat-target" data-id="${escape(entry.message.id)}">${entry.message.id === selected?.id ? '当前起草参考' : '作为起草参考'}</button>` : ''}</div>${entry.message.text ? `<div class="message-text">${escape(entry.message.text)}</div>` : ''}${renderWechatImages(entry.message, conversation)}</article>` : `<article class="wechat-message outgoing"><div class="message-heading"><strong>我</strong><time>${formatTime(entry.time, true)}</time><span class="outbox-status ${entry.outgoing.status === 'failed' ? 'failed' : ''}">${escape(outboxLabels[entry.outgoing.status] || '结果待核对')}</span></div>${renderWechatOutgoing(entry.outgoing)}${entry.outgoing.error ? `<p class="send-error">${escape(entry.outgoing.error)}</p>` : ''}</article>`).join('') : `<div class="wechat-thread-empty">${icon('chat')}<strong>与 ${escape(conversation.name)} 的会话</strong><p>点击“查看历史”读取已有消息，或在下方直接写信。</p></div>`}</div><div class="reply-composer"><form id="wechat-reply-form"><div class="reply-caption"><label for="wechat-reply">手动写给 ${escape(conversation.name)}</label><div>${selected?.taskId ? `<button class="text-button" type="button" data-action="open-task" data-id="${escape(selected.taskId)}">查看起草任务</button>` : ''}${selected?.taskId && (selected.replyDraft || state.tasks.some(task=>task.id===selected.taskId&&task.status==='succeeded')) ? `<button class="secondary-button compact" type="button" data-action="wechat-use-draft" ${state.wechatBusy ? 'disabled' : ''}>${state.wechatBusy==='draft-read' ? '正在读取…' : '填入 AI 草稿'}</button>` : ''}<button class="secondary-button compact" type="button" data-action="wechat-draft" ${state.wechatBusy || !selected || selected.outgoing === true || selected.direction === 'outgoing' || selected.isSelf ? 'disabled' : ''}>${icon('spark')}${state.wechatBusy === 'draft' ? '正在创建…' : '请 AI 起草'}</button><button class="secondary-button compact" type="button" data-action="wechat-stickers" ${disabled ? 'disabled' : ''}>${state.wechatStickerPanel ? '收起表情' : '表情'}</button></div></div><textarea id="wechat-reply" name="reply" maxlength="1048576" placeholder="需要自己回复时，在这里写信并点击发送。">${escape(state.wechatReply)}</textarea><div class="reply-footer"><small>${connection.state === 'ready' ? `手动发送给：${escape(conversation.name)} · ${state.wechat?.settings?.autoReply ? "DSH 已开启自动回复" : "自动回复未开启"}` : '当前未连接，编辑的文字会保留在此页面。'}</small><button class="primary-button" type="submit" ${disabled || !state.wechatReply.trim() ? 'disabled' : ''}>${icon('arrow')}${state.wechatBusy === 'send' ? '正在发送…' : '发送文字'}</button></div></form>${renderWechatAttachments(conversation)}${renderWechatStickerPicker(conversation)}</div></div></div>`;
 }
 const mailProviders = { qq: { name: 'QQ 邮箱', imap: 'imap.qq.com', smtp: 'smtp.qq.com', smtpPort:465 }, '163': { name: '163 邮箱', imap: 'imap.163.com', smtp: 'smtp.163.com', smtpPort:465 }, gmail: { name: 'Gmail', imap: 'imap.gmail.com', smtp: 'smtp.gmail.com', smtpPort:465 }, outlook: { name: 'Outlook', imap: 'outlook.office365.com', smtp: 'smtp.office365.com', smtpPort:587 }, custom: { name: '其他邮箱 / 自定义', imap: '', smtp: '', smtpPort:465 } };
 function mailAddressText(addresses = []) { return addresses.map(item => typeof item === 'string' ? item : item.name ? `${item.name} <${item.address}>` : item.address || '').filter(Boolean).join('，'); }
@@ -547,7 +550,7 @@ function renderMailInbox() {
   const messages=mailMessages();
   const task=mailReplyTask(selected);
   const bodyLabels={truncated:'正文较长，当前显示已读取的部分。','omitted-size-limit':'邮件过大，暂未读取正文与附件。',unavailable:'正文未能读取，请检查邮箱后重新收取。'};
-  return `<div class="mail-inbox-toolbar"><label for="mail-account-filter">查看邮箱</label><select id="mail-account-filter"><option value="">全部账号</option>${accounts.map(account=>`<option value="${escape(account.id)}" ${state.mailAccountId===account.id?'selected':''}>${escape(account.name||account.address)}</option>`).join('')}</select><button class="secondary-button" data-action="mail-sync" ${state.mailBusy?'disabled':''}>${icon('refresh')}${state.mailBusy==='sync'?'正在收取…':'收取邮件'}</button><small>最近 50 封，不自动标记已读</small></div><div class="mail-inbox"><aside class="mail-message-list" aria-label="邮件列表">${messages.length?messages.map(message=>`<button class="mail-message-row ${message.id===selected?.id?'active':''}" data-action="mail-message" data-id="${escape(message.id)}"><strong>${message.unread?'<span class="mail-unread-dot" aria-label="未读"></span>':''}${escape(message.subject||'（无主题）')}</strong><span>${escape(mailAddressText(message.from))}</span><small>${escape(mailAccountName(message.accountId))} · ${formatTime(message.date)}</small></button>`).join(''):'<div class="mail-empty-list">暂无邮件。点击“收取邮件”从邮箱读取。</div>'}</aside><article class="mail-reading-pane">${selected?`<header><h2>${escape(selected.subject||'（无主题）')}</h2><dl><div><dt>发件人</dt><dd>${escape(mailAddressText(selected.from))}</dd></div>${selected.replyTo?.length?`<div><dt>回复至</dt><dd>${escape(mailAddressText(selected.replyTo))}</dd></div>`:''}<div><dt>收件人</dt><dd>${escape(mailAddressText(selected.to))}</dd></div><div><dt>时间</dt><dd>${formatTime(selected.date,true)} · ${escape(mailAccountName(selected.accountId))}</dd></div></dl><div class="mail-reading-actions"><button class="secondary-button compact" data-action="mail-reply">${icon('doc')}回复</button><button class="secondary-button compact" data-action="mail-ai-draft" ${state.mailBusy?'disabled':''}>${icon('spark')}请 AI 起草</button>${task?`<button class="text-button" data-action="open-task" data-id="${escape(task.id)}">查看起草任务</button>`:''}${task?.status==='succeeded'?`<button class="secondary-button compact" data-action="mail-use-draft" ${state.mailBusy?'disabled':''}>填入 AI 草稿</button>`:''}</div></header>${bodyLabels[selected.bodyStatus]?`<p class="mail-body-note">${escape(bodyLabels[selected.bodyStatus])}</p>`:''}<div class="mail-body">${escape(selected.text||'本封邮件暂无可显示的文字正文。')}</div>${selected.attachments?.length?`<div class="mail-attachments"><strong>附件 ${selected.attachments.length} 个</strong>${selected.attachments.map(attachment=>`<button class="secondary-button" data-action="mail-attachment" data-message-id="${escape(selected.id)}" data-id="${escape(attachment.id)}" ${state.mailBusy||attachment.unavailable?'disabled':''}>${icon('attach')}${escape(attachment.name||'附件')} · 另存为 <small>${fileSize(attachment.size)}${attachment.unavailable?' · 暂未读取':''}</small></button>`).join('')}<p>点击附件可另存到你选择的位置。</p></div>`:''}${state.mailAttachment?.messageId===selected.id?`<div class="mail-attachment-info"><strong>${escape(state.mailAttachment.name)}</strong><span>${fileSize(state.mailAttachment.size)}</span><label>本机保存位置<input type="text" readonly value="${escape(state.mailAttachment.path)}"/></label></div>`:''}`:'<div class="wechat-thread-empty">'+icon('mail')+'<strong>选择一封邮件阅读</strong><p>正文以纯文字显示。</p></div>'}</article></div>`;
+  return `<div class="mail-inbox-toolbar"><label for="mail-account-filter">查看邮箱</label><select id="mail-account-filter"><option value="">全部账号</option>${accounts.map(account=>`<option value="${escape(account.id)}" ${state.mailAccountId===account.id?'selected':''}>${escape(account.name||account.address)}</option>`).join('')}</select><button class="secondary-button" data-action="mail-sync" ${state.mailBusy?'disabled':''}>${icon('refresh')}${state.mailBusy==='sync'?'正在收取…':'收取邮件'}</button><small>最近 50 封，不自动标记已读</small></div><div class="mail-inbox"><aside class="mail-message-list" aria-label="邮件列表">${messages.length?messages.map(message=>`<button class="mail-message-row ${message.id===selected?.id?'active':''}" data-action="mail-message" data-id="${escape(message.id)}"><strong>${message.unread?'<span class="mail-unread-dot" aria-label="未读"></span>':''}${escape(message.subject||'（无主题）')}</strong><span>${escape(mailAddressText(message.from))}</span><small>${escape(mailAccountName(message.accountId))} · ${formatTime(message.date)}</small></button>`).join(''):'<div class="mail-empty-list">暂无邮件。点击“收取邮件”从邮箱读取。</div>'}</aside><article class="mail-reading-pane">${selected?`<header><h2>${escape(selected.subject||'（无主题）')}</h2><dl><div><dt>发件人</dt><dd>${escape(mailAddressText(selected.from))}</dd></div>${selected.replyTo?.length?`<div><dt>回复至</dt><dd>${escape(mailAddressText(selected.replyTo))}</dd></div>`:''}<div><dt>收件人</dt><dd>${escape(mailAddressText(selected.to))}</dd></div><div><dt>时间</dt><dd>${formatTime(selected.date,true)} · ${escape(mailAccountName(selected.accountId))}</dd></div></dl><div class="mail-reading-actions"><button class="secondary-button compact" data-action="mail-reply">${icon('doc')}回复</button><button class="secondary-button compact" data-action="mail-ai-draft" ${state.mailBusy?'disabled':''}>${icon('spark')}请 AI 起草</button>${task?`<button class="text-button" data-action="open-task" data-id="${escape(task.id)}">查看起草任务</button>`:''}${task?.status==='succeeded'?`<button class="secondary-button compact" data-action="mail-use-draft" ${state.mailBusy?'disabled':''}>${state.mailBusy==='draft-read'?'正在读取…':'填入 AI 草稿'}</button>`:''}</div></header>${bodyLabels[selected.bodyStatus]?`<p class="mail-body-note">${escape(bodyLabels[selected.bodyStatus])}</p>`:''}<div class="mail-body">${escape(selected.text||'本封邮件暂无可显示的文字正文。')}</div>${selected.attachments?.length?`<div class="mail-attachments"><strong>附件 ${selected.attachments.length} 个</strong>${selected.attachments.map(attachment=>`<button class="secondary-button" data-action="mail-attachment" data-message-id="${escape(selected.id)}" data-id="${escape(attachment.id)}" ${state.mailBusy||attachment.unavailable?'disabled':''}>${icon('attach')}${escape(attachment.name||'附件')} · 另存为 <small>${fileSize(attachment.size)}${attachment.unavailable?' · 暂未读取':''}</small></button>`).join('')}<p>点击附件可另存到你选择的位置。</p></div>`:''}${state.mailAttachment?.messageId===selected.id?`<div class="mail-attachment-info"><strong>${escape(state.mailAttachment.name)}</strong><span>${fileSize(state.mailAttachment.size)}</span><label>本机保存位置<input type="text" readonly value="${escape(state.mailAttachment.path)}"/></label></div>`:''}`:'<div class="wechat-thread-empty">'+icon('mail')+'<strong>选择一封邮件阅读</strong><p>正文以纯文字显示。</p></div>'}</article></div>`;
 }
 function renderMailCompose() {
   const draft=state.mailCompose,saved=state.mailSavedDraft;
@@ -627,7 +630,7 @@ async function refresh({ initial = false, preserveForm = true } = {}) {
 }
 function applyWechatState(value) {
   const account = String(value?.settings?.boundAccountId || value?.profile?.wxid || '');
-  if(account!==state.wechatAccountKey||value?.settings?.connectionId!==state.wechat?.settings?.connectionId)resetWechatDshAccess();
+  if(account!==state.wechatAccountKey||value?.settings?.connectionId!==state.wechat?.settings?.connectionId){wechatDraftReadGeneration++;resetWechatDshAccess();}
   if (account && state.wechatAccountKey && account !== state.wechatAccountKey) {
     state.selectedMessageId = null; state.selectedConversationKey = ''; state.wechatReply = ''; state.wechatReplyByConversation = {};
     state.wechatContactResults = { private: [], groups: [] }; state.wechatContactNames = {}; state.wechatAllowedDraft = null; state.wechatContactsSearched = false;
@@ -671,6 +674,7 @@ function updateVisibleData() {
 }
 function navigate(page) {
   if (!Object.hasOwn(pageTitles, page)) return;
+  if(page!==state.page){mailDraftReadGeneration++;wechatDraftReadGeneration++;}
   state.page = page;
   state.settingsDirty = false;
   renderShell();
@@ -738,12 +742,14 @@ async function replyMail(useAI=false) {
   if(useAI) {
     if(state.mailBusy)return;
     if(task?.status!=='succeeded')throw Error('请等待起草任务成功完成后再填入完整草稿。');
+    const generation=++mailDraftReadGeneration,page=state.page,tab=state.mailTab,compose=state.mailCompose;
     state.mailBusy='draft-read';renderPage();
     try {
       text=await readFullReply(task.id);
       if(text.length>64000)throw Error('完整 AI 草稿超过 64000 字符，未截断或填入。请在起草任务中查看完整成果，再精简邮件。');
       if(selectedMailMessage()?.id!==message.id)throw Error('当前邮件已改变，请在原邮件中重新填入草稿。');
-    } finally {state.mailBusy='';renderPage();}
+      if(generation!==mailDraftReadGeneration||state.page!==page||state.mailTab!==tab||state.mailCompose!==compose)throw Error('当前页面或邮件草稿已改变，未填入迟到的 AI 草稿。');
+    } finally {state.mailBusy='';if(state.page==='mail')renderMailPreservingFocus();}
   }
   const recipients=message.replyTo?.length?message.replyTo:message.from||[];
   state.mailCompose={accountId:message.accountId,to:recipients.map(item=>item.address).filter(Boolean).join(', '),cc:'',bcc:'',subject:/^re\s*:/i.test(message.subject)?message.subject:`Re: ${message.subject||''}`,text,inReplyTo:message.id};
@@ -751,14 +757,18 @@ async function replyMail(useAI=false) {
 }
 async function useWechatDraft() {
   const message=selectedWechatMessage(),conversation=selectedWechatConversation(),account=state.wechatAccountKey;
-  if(!message?.taskId||!conversation)return;
+  if(!message?.taskId||!conversation||state.wechatBusy)return;
+  const generation=++wechatDraftReadGeneration,page=state.page,tab=state.wechatTab,connection=state.wechat?.settings?.connectionId,draft=state.wechatReply;
+  let inserted=false;
   await wechatOperation('draft-read',async()=>{
     const text=await readFullReply(message.taskId);
     if(account!==state.wechatAccountKey||selectedWechatConversation()?.key!==conversation.key||selectedWechatMessage()?.id!==message.id)throw Error('当前微信账号或会话已改变，请重新选择起草消息。');
+    if(generation!==wechatDraftReadGeneration||state.page!==page||state.wechatTab!==tab||connection!==state.wechat?.settings?.connectionId||state.wechatReply!==draft)throw Error('当前会话页面或草稿已改变，未填入迟到的 AI 草稿。');
     state.wechatReply=text;state.wechatReplyByConversation[conversation.key]=text;
+    inserted=true;
     notify(new TextEncoder().encode(text).length>16000?'完整 AI 草稿已填入；超过微信单次 16000 字节限制，请精简后再发送。':'完整 AI 草稿已填入，请核对后再发送。');
   });
-  document.querySelector('#wechat-reply')?.focus();
+  if(inserted)document.querySelector('#wechat-reply')?.focus();
 }
 async function saveMailDraft(event) {
   event.preventDefault();if(state.mailBusy)return;
@@ -811,6 +821,7 @@ function selectWechatMessage(id) {
   const previous = selectedWechatMessage();
   const selected = messages.find(message => message.id === id);
   if (!selected) return;
+  if(selected.id!==state.selectedMessageId)wechatDraftReadGeneration++;
   const key = message => `${message.kind}:${message.conversationId}`;
   if (previous) state.wechatReplyByConversation[key(previous)] = state.wechatReply;
   state.selectedMessageId = selected.id;
@@ -823,6 +834,7 @@ function selectWechatMessage(id) {
 function selectWechatConversation(key) {
   const conversation = wechatConversations().find(item => item.key === key);
   if (!conversation) return;
+  if(key!==state.selectedConversationKey)wechatDraftReadGeneration++;
   if(key!==state.selectedConversationKey)resetWechatDshAccess();
   if (state.selectedConversationKey) state.wechatReplyByConversation[state.selectedConversationKey] = state.wechatReply;
   state.selectedConversationKey = key;
@@ -1124,6 +1136,7 @@ document.addEventListener('input', (event) => {
   if (event.target.closest('#settings-form')) state.settingsDirty = true;
   if (event.target.closest('#wechat-settings-form')) state.wechatSettingsDraft = readWechatSettings(event.target.closest('form'));
   if (event.target.id === 'wechat-reply') {
+    wechatDraftReadGeneration++;
     state.wechatReply = event.target.value;
     const conversation = selectedWechatConversation();
     if (conversation) {
@@ -1218,14 +1231,14 @@ document.addEventListener('click', async (event) => {
     else if (action === 'skill-import-bundled') await extensionOperation(`skill-import:${button.dataset.id}`, async () => { await invoke('importBundledSkill', button.dataset.id); notify('内置技能已导入，当前保持停用。'); });
     else if (action === 'skill-enable') await extensionOperation(`skill-enable:${button.dataset.id}`, async () => { await invoke('enableSkill', button.dataset.id); notify('技能已启用。文字任务技能可在工作台选择。'); });
     else if (action === 'skill-disable') await extensionOperation(`skill-disable:${button.dataset.id}`, async () => { await invoke('disableSkill', button.dataset.id); notify('技能已停用。'); });
-    else if (action === 'mail-tab') {state.mailTab=['accounts','compose'].includes(button.dataset.tab)?button.dataset.tab:'inbox';renderPage();}
+    else if (action === 'mail-tab') {mailDraftReadGeneration++;state.mailTab=['accounts','compose'].includes(button.dataset.tab)?button.dataset.tab:'inbox';renderPage();}
     else if (action === 'mail-refresh') await refresh();
     else if (action === 'mail-new') newMail();
     else if (action === 'mail-account-new') {state.mailAccountDraft=null;renderPage();}
     else if (action === 'mail-import') await mailOperation('import',async()=>{const result=await invoke('importMailAccountsFile');if(result){state.mailAccountDraft=null;notify(`已导入 ${result.imported||0} 个邮箱账号。`);}});
     else if (action === 'mail-account-edit') editMailAccount(button.dataset.id);
     else if (action === 'mail-sync' || action === 'mail-account-sync') await syncMailAccounts(action==='mail-account-sync'?button.dataset.id:state.mailAccountId);
-    else if (action === 'mail-message') {state.mailMessageId=button.dataset.id;renderPage();}
+    else if (action === 'mail-message') {mailDraftReadGeneration++;state.mailMessageId=button.dataset.id;renderPage();}
     else if (action === 'mail-reply') await replyMail();
     else if (action === 'mail-use-draft') await replyMail(true);
     else if (action === 'mail-ai-draft') {const message=selectedMailMessage();if(message)await mailOperation('ai-draft',async()=>{const task=await invoke('draftMailReply',{messageId:message.id});state.mailDraftTasks[message.id]=task.id;await refresh();await openTask(task.id);notify('已创建邮件起草任务；完成后可填入草稿并编辑。');});}
@@ -1233,6 +1246,7 @@ document.addEventListener('click', async (event) => {
     else if (action === 'mail-open-draft') openMailDraft(button.dataset.id);
     else if (action === 'mail-attachment') await mailOperation('attachment',async()=>{const result=await invoke('saveMailAttachment',{messageId:button.dataset.messageId,attachmentId:button.dataset.id});if(result?.saved){state.mailAttachment={...result,messageId:button.dataset.messageId};notify('附件已另存到你选择的位置。');}});
     else if (action === 'wechat-tab') {
+      wechatDraftReadGeneration++;
       state.wechatTab = ['settings', 'contacts'].includes(button.dataset.tab) ? button.dataset.tab : 'inbox';
       renderPage();
       if (state.wechatTab === 'contacts' && !state.wechatContactsSearched && wechatConnectionInfo().state === 'ready') await searchWechatContacts();
