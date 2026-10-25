@@ -32,7 +32,7 @@ function Owned-Process($Item,[switch]$AllowStale) {
     }
     return $process
 }
-function Stop-Services {
+function Stop-Services([string[]]$Names = @('adapter','bridge','reader','weflow')) {
     $stopErrors = [System.Collections.Generic.List[string]]::new()
     $externalWeFlow = $false
     $settingsFile = Join-Path $root 'config\wechatagent.json'
@@ -40,7 +40,7 @@ function Stop-Services {
         $settings = Get-Content $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $externalWeFlow = $settings.runtime.weflowMode -eq 'existing'
     }
-    foreach ($name in @('adapter','bridge','reader','weflow')) {
+    foreach ($name in $Names) {
         if ($name -eq 'weflow' -and $externalWeFlow) { continue }
         if ($script:record.ContainsKey($name)) {
           try {
@@ -184,6 +184,7 @@ $hookSender = $config.runtime.sender -eq 'wechat-hook'
 if ($Action -eq 'prepare') { exit 0 }
 if ($Action -eq 'status') { Show-Status $config; exit 0 }
 if ($Action -eq 'restart') { Stop-Services }
+if ($config.runtime.replyOwner -eq 'desktop') { Stop-Services -Names @('adapter','bridge') }
 $python = (Get-Command $config.runtime.python -ErrorAction Stop).Source
 $weflowRoot = Join-Path $root 'components\WeFlowComplete'
 $electron = Join-Path $weflowRoot 'node_modules\electron\dist\electron.exe'
@@ -214,6 +215,11 @@ try {
     if ($hookSender) {
         & $node (Join-Path $PSScriptRoot 'hook-onebot.mjs') --check
         if ($LASTEXITCODE -ne 0) { throw 'WeChat-Hook is not ready. Use Open WeChat in WeChatAgent, finish login, then start again. Check the error above and state/logs/hook-init.log for native initialization details.' }
+    }
+    if ($config.runtime.replyOwner -eq 'desktop') {
+        Write-Output 'Desktop assistant owns WeChat replies. Reader is available; legacy responder and adapter remain stopped.'
+        Show-Status $config
+        return
     }
     $env:SOCIAL_DSH_TOKEN = (Get-Content (Join-Path $stateDir 'social-dsh-token.txt') -Raw).Trim()
     $dshUrl = 'http://127.0.0.1:'+$config.ports.dshPlugin+'/health'

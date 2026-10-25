@@ -32,6 +32,7 @@ export function validateConfig(config) {
   validateWebReaderSettings(config.wechat?.webReader);
   if (config.version !== 1) throw new Error('Unsupported WeChatAgent config version');
   if (!['nt', 'bundled', 'existing'].includes(config.runtime?.weflowMode ?? 'nt')) throw new Error('weflowMode must be nt, bundled or existing');
+  if (!['legacy', 'desktop'].includes(config.runtime?.replyOwner ?? 'legacy')) throw new Error('replyOwner must be legacy or desktop');
   if (config.runtime?.sender !== 'wechat-hook') throw new Error('sender must be wechat-hook; the UIA sender has been removed');
   if (config.runtime.sender === 'wechat-hook') {
     if ((config.runtime.weflowMode ?? 'nt') !== 'nt') throw new Error('WeChat-Hook requires the NT reader for account and receipt checks');
@@ -85,6 +86,7 @@ export function prepare(root = projectRoot) {
     self_wxid: previousIo.self_wxid || '', onebot_ws_url: `ws://127.0.0.1:${config.ports.onebot}/ws` });
   const roleText = name => selectRoleText(fs.readFileSync(path.join(root, 'roles', `${name}.md`), 'utf8'), 'v2');
   write(path.join(state, 'bridge-config.json'), {
+    reply_owner: config.runtime.replyOwner ?? 'legacy',
     platforms: { wechat: { enabled: true, adapter: 'wechat-onebot', onebot: { server: { host: '127.0.0.1', port: config.ports.onebot, path: '/ws', timeoutMs: 45000 } }, ...config.wechat } },
     dsh_plugin: { url: `http://127.0.0.1:${config.ports.dshPlugin}`, timeoutMs: 125000 },
     sticker_policy_file: configFile,

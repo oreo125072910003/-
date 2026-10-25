@@ -4,7 +4,8 @@
     "python": "python",
     "dshDesktop": "",
     "weflowMode": "nt",
-    "sender": "wechat-hook"
+    "sender": "wechat-hook",
+    "replyOwner": "legacy"
   },
   "hook": {
     "baseUrl": "http://127.0.0.1:30001",

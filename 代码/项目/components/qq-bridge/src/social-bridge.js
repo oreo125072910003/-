@@ -15,6 +15,11 @@ import { ContextMaintenance } from './core/context-maintenance.js';
 const root = path.resolve(import.meta.dirname, '..');
 const configPath = path.resolve(process.argv[2] ?? path.join(root, 'config.social.json'));
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+if (!['legacy', 'desktop'].includes(config.reply_owner ?? 'legacy')) throw new Error('Invalid reply_owner');
+if (config.reply_owner === 'desktop') {
+  console.log('[Social] Desktop assistant owns WeChat replies; legacy responder was not started.');
+  process.exit(0);
+}
 const wechat = config.platforms?.wechat ?? config.wechat ?? {};
 if (wechat.enabled !== true) throw new Error('wechat.enabled must be true in config.social.json');
 const allowedGroups = new Set((wechat.whitelist?.groups ?? []).map(String));
