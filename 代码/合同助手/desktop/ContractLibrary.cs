@@ -89,23 +89,44 @@ namespace ContractHelper
                 if (notes != null) entry.notes = notes;
                 if (templateId != null) { if (templateId != "" && Get(templateId).category != "template") throw new Exception("参考项必须在模板库中。"); entry.template_id = templateId; }
                 if (referenceId != null) { if (referenceId != "" && Get(referenceId).category != "template") throw new Exception("参考项必须在模板库中。"); entry.reference_id = referenceId; }
+                string metadata = Path.Combine(folder, "entry.json"), oldPath = entry.path, destination = oldPath;
+                byte[] oldMetadata = File.ReadAllBytes(metadata), oldContent = null;
+                if (!string.IsNullOrWhiteSpace(name) && name != entry.name) {
+                    if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.Length > 150 || name.Contains("..")) throw new Exception("文件名称无效。");
+                    if (!name.EndsWith(Path.GetExtension(oldPath), StringComparison.OrdinalIgnoreCase)) name += Path.GetExtension(oldPath);
+                    destination = Path.Combine(folder, name);
+                }
+                bool moved = false, replaced = false;
+                try {
                 if (!string.IsNullOrWhiteSpace(replacement)) {
                     var info = new FileInfo(replacement); if (!info.Exists || info.Length > 50L * 1024 * 1024 || info.Extension.ToUpperInvariant().TrimStart('.') != entry.kind) throw new Exception("替换文件须为同类型且不超过50MB。");
                     byte[] bytes = File.ReadAllBytes(replacement);
                     if (entry.role == "fillable") ContractEngine.ValidateTemplate(ContractEngine.AdaptTemplate(bytes));
-                    Store.Write(Path.Combine(AppStorage.Root, "History", "Library", entry.id, DateTime.UtcNow.ToString("yyyyMMddHHmmssfff") + Path.GetExtension(entry.path)), File.ReadAllBytes(entry.path));
+                    oldContent = File.ReadAllBytes(entry.path);
+                    Store.Write(Path.Combine(AppStorage.Root, "History", "Library", entry.id, DateTime.UtcNow.ToString("yyyyMMddHHmmssfff") + Path.GetExtension(entry.path)), oldContent);
                     Store.Write(entry.path, bytes);
+                    replaced = true;
                 }
                 if (!string.IsNullOrWhiteSpace(name) && name != entry.name) {
-                    if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.Length > 150 || name.Contains("..")) throw new Exception("文件名称无效。");
-                    if (!name.EndsWith(Path.GetExtension(entry.path), StringComparison.OrdinalIgnoreCase)) name += Path.GetExtension(entry.path);
-                    string dest = Path.Combine(folder, name); if (!string.Equals(dest, entry.path, StringComparison.OrdinalIgnoreCase)) File.Move(entry.path, dest); entry.name = name; entry.path = dest;
+                    if (!string.Equals(destination, oldPath, StringComparison.OrdinalIgnoreCase)) { File.Move(oldPath, destination); moved = true; }
+                    // Only a standalone progress JSON points to the renamed file itself.
+                    if (string.Equals(entry.progress, oldPath, StringComparison.OrdinalIgnoreCase)) entry.progress = destination;
+                    entry.name = name; entry.path = destination;
                 }
                 string currentHash = AppStorage.Hash(File.ReadAllBytes(entry.path));
                 if (currentHash != (string.IsNullOrWhiteSpace(entry.hash) ? entry.id : entry.hash) && entry.kind == "DOCX") { entry.progress = ""; entry.notes = (entry.notes ?? "") + " 文档已编辑，旧填写进度未同步；请按Word核对。"; }
                 entry.hash = currentHash;
                 if (entry.kind == "DOCX") using (var zip = ZipFile.OpenRead(entry.path)) { var part = zip.GetEntry("word/document.xml"); using (var input = part.Open()) { XNamespace w = ContractEngine.W; var xml = XDocument.Load(input); entry.text = string.Join("\r\n", xml.Descendants(w + "p").Select(p => ContractEngine.Text(p))); } }
-                Store.Write(Path.Combine(folder, "entry.json"), ContractEngine.Json().Serialize(entry)); return entry;
+                Store.Write(metadata, ContractEngine.Json().Serialize(entry)); return entry;
+                } catch (Exception updateError) {
+                    try {
+                        if (moved) File.Move(destination, oldPath);
+                        if (replaced) Store.Write(oldPath, oldContent);
+                        // Preserve the exact prior record, including any already stale progress pointer.
+                        if (!File.ReadAllBytes(metadata).SequenceEqual(oldMetadata)) Store.Write(metadata, oldMetadata);
+                    } catch (Exception rollbackError) { throw new AggregateException("文件库更新失败，恢复原记录时也遇到问题，请核对原文件。", updateError, rollbackError); }
+                    throw;
+                }
             });
         }
         public static void Delete(string id)

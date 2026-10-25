@@ -1,11 +1,12 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-const methods = ['getBootstrap','listTasks','getTask','createTask','cancelTask','getSettings','saveSettings','getWorkflowsState','exportTaskDocument',
+const methods = ['getBootstrap','listTasks','getTask','getTaskReplyText','createTask','cancelTask','getSettings','saveSettings','getWorkflowsState','exportTaskDocument',
   'pickAttachments','openArtifact','openWorkspace','openContract',
   'getWechatState','importWechatConnection','saveWechatSettings','connectWechat','disconnectWechat','draftWechatReply','sendWechatReply','searchWechatContacts','refreshWechatProfile',
   'getWechatSessions','getWechatHistory','resolveWechatImage','getWechatStickers','sendWechatMessage','sendWechatSticker','pickWechatAttachments','sendWechatAttachment','importLegacyExtensions','refreshDshCatalog',
   'getMailState','importMailAccounts','importMailAccountsFile','syncMail','getMailMessage','createMailDraft','sendMailDraft','resolveMailAttachment','saveMailAttachment','draftMailReply',
   'getDshAccessState','refreshDshAccessCatalog','saveDshOwnerGrants',
+  'getWechatDshAccess','saveWechatDshGrants','importWechatDshGrants','saveWechatComputerAccess',
   'getExtensionsState','importMcpManifest','installBuiltinMcp','enableMcp','disableMcp','testMcp','setMcpTools',
   'importSkill','importBundledSkill','enableSkill','disableSkill'];
 const api = Object.fromEntries(methods.map(name => [name,(...args) => ipcRenderer.invoke(`assistant:${name}`,...args)]));

@@ -101,6 +101,27 @@ test('large messages keep metadata without downloading bodies or attachments', a
   assert.equal(result.messages[0].bodyStatus, 'omitted-size-limit'); assert.equal(audit.some(item => item.type === 'source'), false);
 });
 
+test('Reply-To is normalized, bounded and retained across storage restart without sending', async t => {
+  const source=mime().toString().replace('To: owner@example.test', 'Reply-To: Reply Desk <reply@EXAMPLE.TEST>, reply@EXAMPLE.TEST, broken-address\r\nTo: owner@example.test');
+  const context=await setup(t,{imapFactory:fakeImap([Buffer.from(source)])});
+  const {accounts}=await context.controller.importAccounts({accounts:[config()]});
+  const result=await context.controller.sync({accountId:accounts[0].id});
+  assert.deepEqual(result.messages[0].replyTo,[{name:'Reply Desk',address:'reply@example.test'}]);
+  await context.restart();
+  assert.deepEqual(context.controller.getMessage({messageId:result.messages[0].id}).replyTo,result.messages[0].replyTo);
+  assert.equal(context.controller.getState().drafts.length,0);
+});
+
+test('Reply-To keeps at most 50 valid recipients and falls back cleanly for absent or invalid headers', async t => {
+  const base=mime().toString(),header=Array.from({length:65},(_,i)=>`reply${i}@example.test`).join(', ');
+  const sources=[base.replace('To: owner@example.test',`Reply-To: ${header}\r\nTo: owner@example.test`),base,base.replace('To: owner@example.test','Reply-To: invalid-address\r\nTo: owner@example.test')].map(text=>Buffer.from(text));
+  const context=await setup(t,{imapFactory:fakeImap(sources)});
+  const {accounts}=await context.controller.importAccounts({accounts:[config()]});
+  const {messages}=await context.controller.sync({accountId:accounts[0].id});
+  assert.equal(messages[0].replyTo.length,50);assert.equal(messages[0].replyTo.at(-1).address,'reply49@example.test');
+  assert.deepEqual(messages[1].replyTo,[]);assert.deepEqual(messages[2].replyTo,[]);
+});
+
 test('mailbox UIDVALIDITY changes create distinct identities instead of overwriting an old email', async t => {
   let validity = '11'; const context = await setup(t, { imapFactory: options => fakeImap([mime()], [], { uidValidity: validity })(options) });
   const { accounts } = await context.controller.importAccounts({ accounts: [config()] });

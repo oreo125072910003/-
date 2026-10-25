@@ -3726,6 +3726,9 @@ legend {
 .dsh-grant-row.unavailable {opacity:.8}
 .dsh-access-section .settings-footer {margin-bottom:0}
 .dsh-access-section .settings-footer>div {display:flex;gap:8px;flex-wrap:wrap}
+.wechat-access-toolbar {display:flex;justify-content:space-between;align-items:center;gap:12px;margin:8px 0;color:#425a7a}
+.wechat-dsh-access {max-height:65vh;overflow:auto;margin:12px 0}
+.wechat-dsh-access .wechat-reading-actions {display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
 .dsh-unavailable-grants {margin-top:14px;padding:12px;background:#fffbec;border:1px solid #d9cfa6}
 .dsh-unavailable-grants>strong {font-size:11px;color:#9b8658}
 .dsh-unavailable-grants>p {font-size:10px;color:#a69776;line-height:1.8;margin:5px 0 9px}

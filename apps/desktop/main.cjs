@@ -55,11 +55,12 @@ async function quit(){
   catch(error){closing=false;dialog.showErrorBox('尚未退出',String(error.message));bringForward();}
 }
 async function registerIPC(){
-  for(const name of ['getBootstrap','listTasks','getTask','createTask','cancelTask','getSettings','saveSettings','getWorkflowsState','exportTaskDocument',
+  for(const name of ['getBootstrap','listTasks','getTask','getTaskReplyText','createTask','cancelTask','getSettings','saveSettings','getWorkflowsState','exportTaskDocument',
     'getWechatState','saveWechatSettings','connectWechat','disconnectWechat','draftWechatReply','sendWechatReply','searchWechatContacts','refreshWechatProfile','getWechatSessions','getWechatHistory','resolveWechatImage','getWechatStickers','sendWechatMessage','sendWechatSticker','sendWechatAttachment',
     'importLegacyExtensions','refreshDshCatalog',
     'getMailState','importMailAccounts','syncMail','getMailMessage','createMailDraft','sendMailDraft','resolveMailAttachment','draftMailReply',
     'getDshAccessState','refreshDshAccessCatalog','saveDshOwnerGrants',
+    'getWechatDshAccess','saveWechatDshGrants','importWechatDshGrants','saveWechatComputerAccess',
     'getExtensionsState','installBuiltinMcp','enableMcp','disableMcp','testMcp','setMcpTools','importBundledSkill','enableSkill','disableSkill']){
     ipcMain.handle('assistant:'+name,async(event,...args)=>{if(!trusted(event))throw Error('此窗口无权访问小助手。');return service[name](...args);});
   }

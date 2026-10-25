@@ -5,7 +5,7 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import nodemailer from 'nodemailer';
 import { boundedText, safeId } from '../contracts/index.mjs';
-import { addresses, importInput, object, plain, runtimeAuth } from './config.mjs';
+import { addresses, email, importInput, object, plain, runtimeAuth } from './config.mjs';
 
 const stamp = () => new Date().toISOString();
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -16,6 +16,18 @@ const MAX_ATTACHMENT = 5 * 1024 * 1024;
 const TIMEOUT = 60000;
 const clone = value => JSON.parse(JSON.stringify(value));
 const addressValues = parsed => (parsed?.value ?? []).flatMap(value => value.group ?? [value]).slice(0, 100).map(value => ({ name: String(value.name ?? '').slice(0, 200), address: String(value.address ?? '').slice(0, 320) }));
+const replyAddresses = parsed => {
+  const result = [], seen = new Set();
+  for (const value of (parsed?.value ?? []).flatMap(item => item.group ?? [item]).slice(0, 100)) {
+    try {
+      const address = email(value.address);
+      if (seen.has(address)) continue;
+      seen.add(address); result.push({ name: String(value.name ?? '').replace(/[\x00-\x1f\x7f]/g, '').slice(0, 200), address });
+      if (result.length === 50) break;
+    } catch { /* Invalid incoming reply addresses cannot become recipients. */ }
+  }
+  return result;
+};
 const cleanName = value => path.win32.basename(path.posix.basename(String(value ?? '附件'))).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 200) || '附件';
 
 function publicAccount(account, busy) {
@@ -149,7 +161,7 @@ export function createMailController({ store, dataDir, secretStore, onChange = (
               if (!Number.isSafeInteger(row.uid) || row.uid < 1 || !Number.isSafeInteger(row.size) || row.size < 0) throw Error('MAIL_INVALID_MESSAGE');
               const id = 'mail_' + identity([account.id, account.imap.host, account.imap.username, account.imap.mailbox, uidValidity, row.uid]);
               const envelope = row.envelope ?? {};
-              const message = { id, accountId: account.id, uid: row.uid, uidValidity, mailbox: account.imap.mailbox, subject: String(envelope.subject ?? '（无主题）').slice(0, 1000), from: addressValues({ value: envelope.from }), to: addressValues({ value: envelope.to }), cc: addressValues({ value: envelope.cc }), date: Number.isFinite(new Date(envelope.date ?? row.internalDate).getTime()) ? new Date(envelope.date ?? row.internalDate).toISOString() : null, messageId: String(envelope.messageId ?? '').slice(0, 998), unread: !row.flags?.has?.('\\Seen'), size: row.size, text: '', attachments: [], receivedAt: stamp(), bodyStatus: 'omitted-size-limit', remoteContentLoaded: false };
+              const message = { id, accountId: account.id, uid: row.uid, uidValidity, mailbox: account.imap.mailbox, subject: String(envelope.subject ?? '（无主题）').slice(0, 1000), from: addressValues({ value: envelope.from }), replyTo: replyAddresses({ value: envelope.replyTo }), to: addressValues({ value: envelope.to }), cc: addressValues({ value: envelope.cc }), date: Number.isFinite(new Date(envelope.date ?? row.internalDate).getTime()) ? new Date(envelope.date ?? row.internalDate).toISOString() : null, messageId: String(envelope.messageId ?? '').slice(0, 998), unread: !row.flags?.has?.('\\Seen'), size: row.size, text: '', attachments: [], receivedAt: stamp(), bodyStatus: 'omitted-size-limit', remoteContentLoaded: false };
               if (row.size <= MAX_SOURCE && sourceBytes + row.size <= MAX_SYNC_SOURCE) {
                 const fetched = await client.fetchOne(String(row.uid), { source: { start: 0, maxLength: MAX_SOURCE + 1 } }, { uid: true });
                 if (!fetched || !Buffer.isBuffer(fetched.source)) { message.bodyStatus = 'unavailable'; messages.push(message); continue; }
@@ -160,6 +172,7 @@ export function createMailController({ store, dataDir, secretStore, onChange = (
                   message.subject = String(parsed.subject ?? message.subject).slice(0, 1000);
                   message.from = addressValues(parsed.from); message.to = addressValues(Array.isArray(parsed.to) ? { value: parsed.to.flatMap(item => item.value) } : parsed.to);
                   message.cc = addressValues(Array.isArray(parsed.cc) ? { value: parsed.cc.flatMap(item => item.value) } : parsed.cc);
+                  message.replyTo = replyAddresses(parsed.replyTo);
                   message.text = String(parsed.text ?? '').replace(/\0/g, '').slice(0, 64000);
                   message.messageId = String(parsed.messageId ?? message.messageId).slice(0, 998);
                   message.bodyStatus = parsed.textConversionError ? 'unavailable' : message.text.length >= 64000 ? 'truncated' : 'available';

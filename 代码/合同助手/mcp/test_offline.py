@@ -17,11 +17,11 @@ from zipfile import ZipFile
 
 
 class Client:
-    def __init__(self, exe: Path, folder: Path):
+    def __init__(self, exe: Path, folder: Path, desktop_exe: Path | None = None, data_dir: str | None = None):
         self.responses = queue.Queue()
         self.counter = 0
         self.process = subprocess.Popen(
-            [str(exe), "--data-dir", str(folder / "data"), "--output-dir", str(folder / "generated")],
+            [str(exe), "--data-dir", data_dir or str(folder / "data"), "--output-dir", str(folder / "generated"), *(["--desktop-exe", str(desktop_exe)] if desktop_exe else [])],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             encoding="utf-8", creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
         )

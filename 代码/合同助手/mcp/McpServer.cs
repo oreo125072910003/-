@@ -58,6 +58,17 @@ namespace ContractHelper
         static string Text(Dictionary<string, object> item, string key, string fallback = "") { object value = Value(item, key); return value == null ? fallback : Convert.ToString(value); }
         static bool Flag(Dictionary<string, object> item, string key, bool fallback) { object value = Value(item, key); if (value == null) return fallback; if (!(value is bool)) throw new Exception(key + "须为true或false。"); return (bool)value; }
         static string Key(object id) { return ContractEngine.Json().Serialize(id); }
+        // CommandLineToArgvW / CRT quoting, including trailing directory separators.
+        internal static string QuoteArgument(string value)
+        {
+            var result = new StringBuilder("\""); int slashes = 0;
+            foreach (char character in value) {
+                if (character == '\\') { slashes++; continue; }
+                result.Append('\\', character == '"' ? slashes * 2 + 1 : slashes);
+                result.Append(character); slashes = 0;
+            }
+            return result.Append('\\', slashes * 2).Append('"').ToString();
+        }
         void Send(object message) { lock (outputLock) { Console.Out.WriteLine(ContractEngine.Json().Serialize(message)); Console.Out.Flush(); } }
         void Reply(object id, object result) { Send(Obj("jsonrpc", "2.0", "id", id, "result", result)); }
         void Error(object id, int code, string message) { Send(Obj("jsonrpc", "2.0", "id", id, "error", Obj("code", code, "message", message))); }
@@ -291,7 +302,7 @@ namespace ContractHelper
                 case "open_contract_desktop":
                 {
                     string path = ReadPath(args, "progress_path", new[] { ".json" }, 30); ReadProgress(path); if (!File.Exists(desktopExe)) throw new Exception("未找到桌面程序，请配置--desktop-exe。"); cancel.ThrowIfCancellationRequested();
-                    using (var process = Process.Start(new ProcessStartInfo { FileName = desktopExe, Arguments = "--open-progress \"" + path + "\"", UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(desktopExe) })) return Obj("opened", true, "progress_path", path, "process_id", process.Id);
+                    using (var process = Process.Start(new ProcessStartInfo { FileName = desktopExe, Arguments = "--data-dir " + QuoteArgument(AppStorage.Root) + " --open-progress " + QuoteArgument(path), UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(desktopExe) })) return Obj("opened", true, "progress_path", path, "process_id", process.Id);
                 }
                 default: throw new Exception("未知工具。");
             }
