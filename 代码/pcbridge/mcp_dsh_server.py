@@ -24,6 +24,7 @@ import base64
 import gzip
 import hashlib
 import html
+import hmac
 import json
 import os
 import queue
@@ -31,6 +32,7 @@ import re
 import secrets
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -38,12 +40,14 @@ import time
 import urllib.request
 import uuid
 import zlib
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 SERVER_NAME = "dsh-pc-bridge"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 # Only advertise the protocol revision implemented by this compatibility server.
 # Full connection lifecycle and SDK migration remain a separate task.
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-03-26",)
@@ -51,6 +55,7 @@ MAX_READ_FILE_BYTES = 1024 * 1024
 DEFAULT_PORT = 8765
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "config.json"
+SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 # 控制台是 CP936 时,中文输出在管道里会变乱码;统一按 UTF-8 写。
 # 用 pythonw(后台无窗口)启动时 sys.stdout 是 None,这里改写成日志文件,
@@ -156,7 +161,11 @@ MIME_BY_SUFFIX = {
 
 
 def share_file(src: Path, cfg: dict) -> str:
-    """把文件复制到 shared/,返回手机可下载的 URL(带 token)。"""
+    """Copy a file and issue a short-lived, single-file download capability.
+
+    The signing key is independent of the MCP control credential and is never
+    returned. Old links containing the control token are intentionally invalid.
+    """
     SHARED_DIR.mkdir(parents=True, exist_ok=True)
     # 顺手清理 24 小时前的旧文件
     cutoff = time.time() - 24 * 3600
@@ -169,7 +178,44 @@ def share_file(src: Path, cfg: dict) -> str:
     safe_name = re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", src.name)[:80] or "file"
     dest = SHARED_DIR / f"{uuid.uuid4().hex[:8]}_{safe_name}"
     shutil.copy2(src, dest)
-    return f"{public_base(cfg)}/files/{quote(dest.name)}?token={cfg.get('token', '')}"
+    expires = int(time.time()) + 3600
+    signature = hmac.new(_download_key(), f"{dest.name}\n{expires}".encode(), hashlib.sha256).hexdigest()
+    return f"{public_base(cfg)}/files/{quote(dest.name)}?expires={expires}&download={signature}"
+
+
+def _download_key() -> bytes:
+    file = SCRIPT_DIR / "state" / "download-signing.key"
+    file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with file.open("xb") as stream:
+            stream.write(secrets.token_bytes(32))
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            file.chmod(0o600)
+        except OSError:
+            pass
+    except FileExistsError:
+        pass
+    key = file.read_bytes()
+    if len(key) != 32:
+        raise ValueError("DOWNLOAD_KEY_INVALID")
+    return key
+
+
+def _download_allowed(raw_name: str, query: dict) -> bool:
+    name = unquote(raw_name)
+    if not name or name != Path(name).name or "/" in name or "\\" in name:
+        return False
+    try:
+        expires = int(query.get("expires", [""])[0])
+        signature = query.get("download", [""])[0]
+        if not 0 < expires - time.time() <= 3600:
+            return False
+        expected = hmac.new(_download_key(), f"{name}\n{expires}".encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(signature, expected)
+    except (ValueError, TypeError, OSError):
+        return False
 
 
 # ----------------------------------------------------------------------------- 文本工具
@@ -258,7 +304,7 @@ def run_capture(argv: list[str], cwd: str | None, timeout: int, env: dict | None
             "ok": False,
             "code": None,
             "stdout": decode_text(exc.stdout or b""),
-            "stderr": f"超过 {timeout} 秒仍未结束,已终止。",
+            "stderr": f"超过 {timeout} 秒仍未结束；任务未确认完成，请核对已生成文件和子进程状态。",
             "elapsed": round(time.time() - started, 1),
         }
     except FileNotFoundError:
@@ -323,16 +369,10 @@ def dsh_args(task: str, session_id: str | None = None) -> list[str]:
     if session_id:
         args += ["--session-id", session_id]
     guidance = (
-        "【执行提示(优先于任务里的做法)】\n"
-        "1. 一条命令能解决就别写脚本,不要装依赖、不要反复调试。\n"
-        "2. 给网页截图直接用这条(换 URL 和输出路径),不要用 CDP / Selenium / Playwright:\n"
-        "   & 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe' --headless=new --disable-gpu "
-        "--hide-scrollbars --no-sandbox --user-data-dir='F:\\deepseek工作区\\.edge_tmp' "
-        "--screenshot='F:\\deepseek工作区\\shot.png' --window-size=1440,900 'URL'\n"
-        "   命令返回后等 1~2 秒再检查文件是否存在,不要反复重试同一命令。\n"
-        "3. 整个任务控制在 6 步以内;同一条路试两次不成就换最简单的办法。\n"
-        "4. 最后只回复结果本身(文件路径 / 查到的数据),不要罗列过程。\n\n"
-        "【任务】\n"
+        "【执行提示】只执行用户本次授权的任务，遵守当前工作区和权限。"
+        "不发送微信消息、不改变收件目标，不安装依赖或修改运行配置，除非任务明确授权。"
+        "网页截图使用本机 pcbridge 的 screenshot_url 入口；结果只报告实际文件与校验状态。"
+        "最终给出真实结果，失败时明确说明，不能把空输出当完成。\n【任务】\n"
     )
     args.append(guidance + task)
     return args
@@ -358,28 +398,44 @@ def resolve_path(raw: str, cfg: dict) -> Path:
 # ----------------------------------------------------------------------------- 后台任务
 
 class Job:
-    def __init__(self, task: str, timeout: int, cfg: dict):
+    def __init__(self, task: str, timeout: int, cfg: dict, runner=None):
         self.id = "job_" + uuid.uuid4().hex[:10]
         self.task = task
         self.timeout = timeout
-        self.cfg = cfg
+        self.cfg = dict(cfg)
+        self.runner = runner
         self.started = time.time()
         self.done = threading.Event()
         self.result: dict | None = None
         self.answered_inline = False   # 结果已经通过工具返回值给了模型
         self.pushed = False            # 结果已经由服务端直接推进微信
-        self.target = ""               # 结果要推到哪个聊天
+        self.target = None             # immutable account/conversation binding
         self.target_key = ""           # 结果要推到的会话键(给插件汇报用)
         self.label = ""                # 任务简短描述(给状态查询用)
         self.finished = 0.0            # 结束时间
+        self.delivery = {"state": "not_requested", "attempted": False, "code": ""}
+        self.output_image = None
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> "Job":
+        self.persist()
         self.thread.start()
         return self
 
+    def persist(self):
+        with _outbox(self.cfg) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, snapshot TEXT NOT NULL)")
+            snapshot = {"task": self.task, "timeout": self.timeout, "started": self.started,
+                        "result": self.result, "finished": self.finished, "label": self.label,
+                        "target": self.target._asdict() if self.target else None,
+                        "delivery": self.delivery, "output_image": str(self.output_image) if self.output_image else None}
+            db.execute("INSERT OR REPLACE INTO jobs VALUES (?,?)", (self.id, json.dumps(snapshot, ensure_ascii=False)))
+
     def _run(self) -> None:
         try:
+            if self.runner:
+                self.result = self.runner(self)
+                return
             env = dict(os.environ)
             env.update(proxy_env(self.cfg))
             env.update(dict(DSH_EXTRA_ENV))
@@ -398,7 +454,10 @@ class Job:
             self.result = {"ok": False, "code": None, "stdout": "", "stderr": f"执行异常: {exc}", "elapsed": 0.0}
         finally:
             self.finished = time.time()
-            self.done.set()
+            try:
+                self.persist()
+            finally:
+                self.done.set()
 
     def render(self, cfg: dict) -> str:
         assert self.result is not None
@@ -445,30 +504,10 @@ def tool_pc_status(cfg: dict) -> str:
     return "\n".join(lines)
 
 
-def wechat_push_text(text: str, cfg: dict) -> bool:
-    """任务完成后由服务端直接把结果文本发进微信(不经过模型,所以够快)。"""
-    script = SCRIPT_DIR / "send_wechat_native.ps1"
-    if not script.exists():
-        print("[push] 缺少 send_wechat_native.ps1")
-        return False
-    try:
-        push_dir = SCRIPT_DIR / "shared"
-        push_dir.mkdir(parents=True, exist_ok=True)
-        payload = push_dir / f"push_{uuid.uuid4().hex[:8]}.txt"
-        payload.write_text(text, "utf-8")
-        argv = ["powershell.exe", "-STA", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-File", str(script), "-TextFile", str(payload), "-Mode", "text"]
-        argv += wechat_ui_target_args(cfg)
-        result = run_capture(argv, str(SCRIPT_DIR), 150)
-        out = ((result["stdout"] or "") + "\n" + (result["stderr"] or ""))
-        if "SENT" in out:
-            print("[push] 结果已推送到微信")
-            return True
-        print("[push] 推送失败: " + out.strip().replace("\n", " ")[:250])
-        return False
-    except Exception as exc:  # noqa: BLE001
-        print(f"[push] 推送异常: {exc}")
-        return False
+def wechat_push_text(text: str, cfg: dict, target=None):
+    # The legacy UI script can only compare title pixels, not account/wxid.
+    # Keep it available for diagnostics; never submit a message through it.
+    return {"state": "rejected", "attempted": False, "code": "LEGACY_UI_IDENTITY_UNVERIFIED"}
 
 
 def _notify_mode(cfg: dict) -> str:
@@ -496,66 +535,11 @@ def _notify_hint(cfg: dict) -> str:
         return "自动通知已关闭,做完不会主动发消息;要结果就用 local_agent_status 查"
     if mode == "fail":
         return "只有任务失败时才会自动发通知;要结果就用 local_agent_status 查"
-    if mode == "natural":
-        return "做完我会用一两句话把结果告诉你,不用再问"
-    return "做完之后结果会**自动直接发到微信**,你不用再问"
+    return "仅尝试向已绑定目标交付一次；状态以 local_agent_status 的回执为准，不明时不会自动重发"
 
 
-def _chat_key_map(cfg: dict) -> dict:
-    """聊天显示名 -> 会话键(如 wechat:private:1253808542)。"""
-    try:
-        path = Path(cfg.get("wechat_social_messages") or SOCIAL_MESSAGES)
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except Exception as exc:  # noqa: BLE001
-        print("[notify] 读不到社交消息缓存:", str(exc)[:120])
-        return {}
-    names = {}
-    for key, msgs in (data.get("chats") or {}).items():
-        if not isinstance(msgs, list):
-            continue
-        for msg in reversed(msgs[-20:]):
-            if isinstance(msg, dict) and str(msg.get("conversation_name") or "").strip():
-                names[str(msg["conversation_name"]).strip()] = str(key)
-                break
-    return names
-
-
-def _owner_chat_key(cfg: dict) -> str:
-    """主人私聊的会话键:优先用 reader 联系人里的 conversationId 反查。"""
-    names = _chat_key_map(cfg)
-    fallback = str(cfg.get("wechat_owner_chat_key") or "").strip()
-    try:
-        owner_wxid = str(cfg.get("wechat_target_wxid") or "wxid_h0t6y5w6yke022")
-        for item in _read_contacts(cfg):
-            if str(item.get("username") or "") != owner_wxid:
-                continue
-            conversation = str(item.get("conversationId") or "").strip()
-            if conversation:
-                return "wechat:private:" + conversation
-            display = str(item.get("displayName") or "")
-            if display and display in names:
-                return names[display]
-    except Exception as exc:  # noqa: BLE001
-        print("[notify] 查主人私聊会话键失败:", str(exc)[:120])
-    if fallback:
-        return fallback
-    return ""
-
-
-def _chat_key_for_target(cfg: dict, target: str) -> str:
-    """把任务结果目标(聊天显示名)换成插件用的会话键。"""
-    target = (target or "").strip()
-    if target in ("私聊", "主人"):
-        return _owner_chat_key(cfg)
-    names = _chat_key_map(cfg)
-    if target and target in names:
-        return names[target]
-    if not target:
-        recent = _recent_chat(cfg)
-        if recent and recent[0] and recent[0] in names:
-            return names[recent[0]]
-        return _owner_chat_key(cfg)
-    return ""
+def _chat_key_for_target(cfg: dict, target) -> str:
+    return target.conversation_key if isinstance(target, Recipient) else ""
 
 
 def _strip_reply_text(text: str) -> str:
@@ -635,6 +619,12 @@ def _natural_fallback_text(cfg: dict, job: "Job") -> str:
 
 def _describe_jobs(cfg: dict) -> str:
     now = time.time()
+    with _outbox(cfg) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, snapshot TEXT NOT NULL)")
+        saved = [row[0] for row in db.execute("SELECT id FROM jobs ORDER BY rowid DESC LIMIT 20")]
+    for job_id in saved:
+        if job_id not in JOBS:
+            _restore_job(job_id, cfg)
     with JOBS_LOCK:
         items = sorted(JOBS.items(), key=lambda item: -item[1].started)
     running = [item for item in items if not item[1].done.is_set()]
@@ -644,7 +634,7 @@ def _describe_jobs(cfg: dict) -> str:
         lines.append("后台正在跑的任务:")
         for job_id, job in running:
             lines.append("  - %s 已跑 %.0f 秒 · 目标:%s · %s" % (
-                job_id, now - job.started, getattr(job, "target", "") or "主人私聊",
+                job_id, now - job.started, job.target.title if job.target else "仅本地结果",
                 getattr(job, "label", "") or "(无描述)"))
     else:
         lines.append("后台现在没有在跑的任务。")
@@ -653,53 +643,30 @@ def _describe_jobs(cfg: dict) -> str:
         for job_id, job in finished[:5]:
             ok = bool(job.result and job.result.get("ok"))
             elapsed = (getattr(job, "finished", 0.0) or now) - job.started
-            lines.append("  - %s %s · 用时 %.0f 秒 · %s" % (
-                job_id, "成功" if ok else "失败", elapsed, getattr(job, "label", "") or "(无描述)"))
+            lines.append("  - %s %s · 用时 %.0f 秒 · 交付:%s · %s" % (
+                job_id, "成功" if ok else "失败", elapsed, job.delivery.get("state", "unknown"), getattr(job, "label", "") or "(无描述)"))
     return "\n".join(lines)
 
 
 def _watch_job(job: "Job", cfg: dict) -> None:
-    """等任务结束,把结果直接推进微信;中途给进度,免得对方以为任务停了。"""
-    mode = _notify_mode(cfg)
-    for mark, span in ((60, 60), (150, 90)):
-        if job.done.wait(span):
-            break
-        if job.pushed or job.answered_inline:
-            return
-        if mode not in ("all", "natural"):
-            continue
-        if mode == "natural":
-            note = f"主人，那件事还在电脑上跑着，已经 {mark} 秒了，跑完我第一时间说。"
-        else:
-            note = f"【电脑任务】还在跑,已经 {mark} 秒了,做完我直接把结果发过来。"
-        if not (cfg.get("wechat_hook_text", True) and wechat_hook_send_text(note, cfg, getattr(job, "target", None))):
-            wechat_push_text(note, cfg)
+    """One bound result delivery. Never change channel after a submission."""
     job.done.wait()
     time.sleep(1.5)
-    if job.answered_inline or job.pushed:
+    if job.answered_inline or not job.target:
         return
+    mode = _notify_mode(cfg)
     ok = bool(job.result and job.result.get("ok"))
-    if mode == "off":
+    if mode == "off" or (mode == "fail" and ok):
         return
-    if mode == "fail" and ok:
-        return
-    job.pushed = True
-    if mode == "natural":
-        text = _ask_assistant_report(cfg, job)
-        if not text:
-            text = _natural_fallback_text(cfg, job)
-        if cfg.get("wechat_hook_text", True) and wechat_hook_send_text(text, cfg, getattr(job, "target", None)):
-            return
-        wechat_push_text(text, cfg)
-        return
-    body = job.render(cfg)
-    head = "【电脑任务完成】" if ok else "【电脑任务失败】"
-    limit = int(cfg.get("push_max_chars") or 1500)
-    payload_text = head + "\n" + body[:limit]
-    if cfg.get("wechat_hook_text", True):
-        if wechat_hook_send_text(payload_text, cfg, getattr(job, "target", None)):
-            return
-    wechat_push_text(payload_text, cfg)
+    if getattr(job, "output_image", None):
+        delivery = wechat_hook_send_image(job.output_image, cfg, job.target, stage="result")
+    else:
+        text = (_ask_assistant_report(cfg, job) if mode == "natural" else "")
+        text = text or (job.render(cfg)[:int(cfg.get("push_max_chars") or 1500)])
+        delivery = wechat_hook_send_text(text, cfg, job.target, stage="result")
+    job.delivery = delivery
+    job.pushed = delivery.get("state") == "delivered"
+    job.persist()
 
 
 def tool_run_agent(args: dict, cfg: dict) -> str:
@@ -740,7 +707,7 @@ def tool_run_agent(args: dict, cfg: dict) -> str:
     return (
         f"⏳ 已经开始在电脑上跑了,大约需要几十秒到几分钟。\n"
         f"job_id = {job.id}\n"
-        f"{_notify_hint(cfg)};现在先简短回主人一句「在查了」就行。\n"
+        f"{_notify_hint(cfg) if job.target else '未指定收件身份；结果只保存在本机，用 local_agent_status 查询。'}\n"
         f"任务: {raw_task}"
     )
 
@@ -752,13 +719,15 @@ def tool_job_status(args: dict, cfg: dict) -> str:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
     if job is None:
+        job = _restore_job(job_id, cfg)
+    if job is None:
         raise ToolExecutionError(f"没有这个任务: {job_id}\n{_describe_jobs(cfg)}")
     if job.done.is_set():
         if not job.result or not job.result.get("ok"):
             return job_tool_result(job, cfg)
         if job.pushed:
-            return "这个任务已经完成,结果已由电脑直接发到微信了,不用再重复一遍。"
-        return job_tool_result(job, cfg)
+            return "任务完成，已取得绑定目标的送达回执。"
+        return _job_status_result(job, cfg)
     # 默认就在这一次调用里再等一会儿,避免模型用密集轮询把工具调用次数烧光
     wait = int(args.get("wait_seconds") or 75)
     wait = max(5, min(wait, 110))
@@ -766,13 +735,47 @@ def tool_job_status(args: dict, cfg: dict) -> str:
         if not job.result or not job.result.get("ok"):
             return job_tool_result(job, cfg)
         if job.pushed:
-            return "这个任务已经完成,结果已由电脑直接发到微信了,不用再重复一遍。"
-        return job_tool_result(job, cfg)
+            return "任务完成，已取得绑定目标的送达回执。"
+        return _job_status_result(job, cfg)
     return (
         f"⏳ 仍在运行,已 {round(time.time() - job.started)}s。\n"
         f"job_id={job_id}\n"
         f"可以再调一次 local_agent_status(job_id=\"{job_id}\") 继续等。"
     )
+
+
+def _restore_job(job_id: str, cfg: dict):
+    with _outbox(cfg) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, snapshot TEXT NOT NULL)")
+        row = db.execute("SELECT snapshot FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            return None
+        snap = json.loads(row[0])
+        job = Job(snap["task"], snap["timeout"], cfg)
+        job.id = job_id
+        for key in ("started", "result", "finished", "label", "delivery"):
+            setattr(job, key, snap[key])
+        job.target = Recipient(**snap["target"]) if snap.get("target") else None
+        job.output_image = Path(snap["output_image"]) if snap.get("output_image") else None
+        if not job.result:
+            job.result = {"ok": False, "code": None, "stdout": "", "stderr": "JOB_INTERRUPTED：服务曾重启，任务状态待核对；未自动重跑或改收件人。", "elapsed": 0}
+        if job.target:
+            delivery = db.execute("SELECT * FROM deliveries WHERE id=?", (job.target.request_id + ":result",)).fetchone()
+            if delivery:
+                job.delivery = _delivery_state(delivery)
+            elif job.delivery.get("state") == "not_requested":
+                job.delivery = {"state": "needs_review", "attempted": False, "code": "RESTART_REQUIRES_REVIEW"}
+        job.pushed = job.delivery.get("state") == "delivered"
+        job.done.set()
+    # No worker/watcher is started for restored jobs.
+    with JOBS_LOCK:
+        return JOBS.setdefault(job_id, job)
+
+
+def _job_status_result(job: Job, cfg: dict) -> str:
+    text = job_tool_result(job, cfg)
+    delivery = job.delivery
+    return text + "\n交付状态：" + delivery.get("state", "unknown") + " / " + delivery.get("code", "") + "；未确认送达时勿自动重发。"
 
 
 def tool_list_dir(args: dict, cfg: dict) -> str:
@@ -861,7 +864,7 @@ def _reader_recent(talker: str, cfg: dict, limit: int = 6):
 
 
 def _reader_message_text(msg: dict) -> str:
-    for key in ("content", "text", "message"):
+    for key in ("fullText", "content", "text", "message"):
         value = msg.get(key)
         if isinstance(value, str):
             return value
@@ -1025,18 +1028,6 @@ def _pdf_to_page_images(src: Path, cfg: dict, max_pages: int = 3) -> list:
     return sorted(out_dir.glob("page*.png"))
 
 
-def _send_pages_to_chat(src: Path, cfg: dict, target=None) -> tuple:
-    """把 PDF 页面当图片,用 hook 按 wxid 定向发到聊天(不依赖窗口)。"""
-    images = _pdf_to_page_images(src, cfg)
-    if not images:
-        return (0, "PDF 转图片失败")
-    ok = 0
-    for img in images:
-        if wechat_hook_send_image(img, cfg, target):
-            ok += 1
-    return (ok, "")
-
-
 _FILE_SEND_LOCK = threading.Lock()
 
 
@@ -1048,108 +1039,19 @@ def _title_ref_path(name: str) -> Path:
 
 
 def _send_file_verified(src: Path, cfg: dict, target_title: str = "", talker: str = "") -> tuple:
-    """扫描会话列表并用标题指纹校验命中目标聊天后发文件;失败重试,主人私聊失败时转图片兜底。"""
-    with _FILE_SEND_LOCK:
-        private = cfg.get("wechat_target_wxid") or "wxid_h0t6y5w6yke022"
-        verify_talker = talker or private
-        owner_title = (cfg.get("wechat_ui_chat_title") or "").strip()
-        last_err = ""
-        window_blank = False
-        for attempt in range(1, 4):
-            started = time.time() - 1
-            if target_title:
-                sent = wechat_send_native(src, cfg, "file", skip_title=True, scan_rows=True,
-                                          target_title=target_title, scan_other=owner_title)
-            else:
-                sent = wechat_send_native(src, cfg, "file", skip_title=True, scan_rows=True,
-                                          scan_other="群里只有一个好人")
-            if sent == "__WINDOW_BLANK__":
-                window_blank = True
-                last_err = "微信窗口白屏"
-                print("[file] %s 微信窗口白屏(第 %d 次),脚本已尝试无损恢复,稍后重试" % (src.name, attempt))
-                time.sleep(3.0)
-                continue
-            if sent and sent != "__TITLE_MISMATCH__":
-                deadline = time.time() + 20
-                while time.time() < deadline:
-                    for m in _reader_recent(verify_talker, cfg, 8):
-                        ct = int(m.get("createTime") or 0)
-                        if int(m.get("localType") or 0) == 25769803825 and ct >= started:
-                            where = ("「%s」" % target_title) if target_title else "主人私聊"
-                            return ("ok", "已确认发到%s,文件已经作为微信文件消息送达。" % where)
-                    time.sleep(2.0)
-                last_err = "发送后没查到新文件记录"
-            else:
-                last_err = "窗口校验未通过"
-            print("[file] %s 第 %d 次失败: %s" % (src.name, attempt, last_err))
-            time.sleep(1.5)
-
-        if target_title:
-            # 群/其他联系人失败时不要偷偷转图片发到私聊
-            if window_blank:
-                return ("failed", "微信窗口白屏(渲染卡死),文件没能发到「%s」;请重启微信客户端后重试。" % target_title)
-            return ("failed", "发到「%s」失败:%s(没有改发到别处)。" % (target_title, last_err))
-        pages, note = _send_pages_to_chat(src, cfg, private)
-        if pages:
-            if window_blank:
-                return ("pages_ok",
-                        "微信窗口处于白屏状态(渲染卡死),文件没能作为文件消息发出;"
-                        "已把 %s 的前 %d 页转成图片发到私聊。要恢复发文件,需要重启微信客户端"
-                        "(重启后可能需要在手机上确认一次登录)。" % (src.name, pages))
-            return ("pages_ok", "文件通道连续失败(%s),已把 %s 的前 %d 页转成图片发到私聊。" % (last_err, src.name, pages))
-        if window_blank:
-            return ("failed", "微信窗口白屏(渲染卡死),发不出文件;请重启微信客户端后重试。")
-        return ("failed", "文件发送失败:%s" % last_err)
+    return ("rejected", "LEGACY_UI_IDENTITY_UNVERIFIED：旧标题指纹不能证明账号与收件身份，请使用产品受控附件发送。未提交。")
 
 
 def tool_export_file(args: dict, cfg: dict) -> str:
     src = resolve_path(args.get("path") or "", cfg)
     if not src.is_file():
-        raise ToolExecutionError("【发送失败】文件不存在: %s" % src)
-    size = src.stat().st_size
-    limit_mb = int(cfg.get("max_export_mb") or 50)
-    if size > limit_mb * 1024 * 1024:
-        raise ToolExecutionError("【发送失败】文件太大(%s B),超过 %d MB 上限。" % (f"{size:,}", limit_mb))
-
-    private_wxid = cfg.get("wechat_target_wxid") or "wxid_h0t6y5w6yke022"
-    explicit = str(args.get("target") or "").strip()
-    target = _pick_target(args, cfg)
-    wxid, name = "", ""
-    if target:
-        wxid, name = resolve_target_chat(target, cfg)
-
-    if explicit and not wxid:
-        raise ToolExecutionError("【发送失败】找不到聊天: %s" % explicit)
-
-    if not cfg.get("wechat_native_file", True):
-        raise ToolExecutionError("【没有发送】文件发送通道被配置关闭(wechat_native_file=false)。")
-
-    # 群/其他联系人:用已校准(标题指纹存在)的会话发,没校准就拒发,绝不静默改发私聊
-    if wxid and wxid != private_wxid:
-        ref = _title_ref_path(name or "")
-        if not ref.is_file():
-            raise ToolExecutionError("【没有发送】「%s」还没校准会话标题指纹,为防发错聊天,文件没有发出去。"
-                    "先在电脑上把这个聊天打开一次,再用 export_file 重试(或先用 send_image/文字)。"
-                    % (name or target))
-        status, detail = _send_file_verified(src, cfg, target_title=name, talker=wxid)
-        if status == "ok":
-            return "【真实文件消息已送达】" + detail
-        if status == "unverified":
-            raise ToolExecutionError("【已尝试发送但未确认，请勿自动重发】" + detail)
-        raise ToolExecutionError("【发送失败,文件没有发出去】" + detail)
-
-    if not target and not explicit:
-        raise ToolExecutionError("【没有发送】当前聊天不明确(多个聊天同时活跃),文件很容易发错地方,所以没有发。"
-                "请显式传 target(群名或「私聊」)后再发一次。")
-
-    status, detail = _send_file_verified(src, cfg)
-    if status == "ok":
-        return "【真实文件消息已送达】" + detail
-    if status == "unverified":
-        raise ToolExecutionError("【已尝试发送但未确认，请勿自动重发】" + detail)
-    if status == "pages_ok":
-        raise ToolExecutionError("【文件发送失败,已改发图片，请勿自动重发】" + detail)
-    raise ToolExecutionError("【发送失败,文件没有发出去】" + detail)
+        raise ToolExecutionError("文件不存在: %s" % src)
+    if src.stat().st_size > int(cfg.get("max_export_mb") or 50) * 1024 * 1024:
+        raise ToolExecutionError("文件超过发送上限。")
+    _pick_target(args, cfg, required=True)
+    # The product attachment sender owns stable identity/authorization checks.
+    # Do not call the old title-only UI script, retry it, or convert to images.
+    raise ToolExecutionError("LEGACY_UI_IDENTITY_UNVERIFIED：未提交文件。请使用小助手产品中的受控附件发送入口。")
 
 
 WECHAT_PROJECT = Path(r"G:\wechat-deepseek\data\workspace")
@@ -1200,111 +1102,198 @@ def _hook_post(route: str, body: dict, cfg: dict) -> dict:
         return {"raw": raw}
 
 
-_CHAT_CACHE = {}
+class Recipient(NamedTuple):
+    account: str
+    kind: str
+    wxid: str
+    title: str
+    conversation_key: str
+    request_id: str
+
+
+def _reader_get(route: str, cfg: dict):
+    base = str(cfg.get("reader_base_url") or "http://127.0.0.1:5031").rstrip("/")
+    token = str(cfg.get("reader_token") or "")
+    return wx_http(base, route, token)
+
+
+def _active_account(cfg: dict) -> str:
+    reader = _reader_get("/api/v1/reader/status", cfg)
+    expected = str(reader.get("accountDirectory") or "").lower()
+    if reader.get("backend") != "weflow-cli-nt" or not reader.get("ownWxid") or not expected:
+        raise ToolExecutionError("READER_ACCOUNT_METADATA_REQUIRED")
+    token_file = Path(cfg.get("wechat_hook_token_file") or WECHAT_HOOK_TOKEN)
+    token = token_file.read_text(encoding="utf-8").strip()
+    health = wx_http(str(cfg.get("wechat_hook_base") or WECHAT_HOOK_BASE), "/WeChatAgent/health", token)
+    accounts = health.get("databaseAccounts")
+    if (health.get("integration") != "WeChatAgent-1" or health.get("backend") != "wechat-hook"
+            or health.get("version") != "4.1.10.27" or health.get("startupState", "ready") != "ready"
+            or not isinstance(accounts, list) or len(accounts) != 1
+            or str(accounts[0]).lower() != expected):
+        raise ToolExecutionError("DELIVERY_ACCOUNT_MISMATCH")
+    return expected
 
 
 def _read_contacts(cfg: dict) -> list:
-    """读 reader 联系人列表(带进程内缓存,失败返回空列表)。"""
-    cache = _CHAT_CACHE.get("contacts")
-    if cache is not None:
-        return cache
-    cache = []
-    try:
-        cfg_path = Path(r"G:\wechat-deepseek\data\workspace\state\wechat-io-config.json")
-        io_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        base = str(io_cfg.get("reader_base_url") or io_cfg.get("readerBaseUrl") or "http://127.0.0.1:5031").rstrip("/")
-        token = str(io_cfg.get("reader_token") or io_cfg.get("readerToken") or io_cfg.get("token") or "")
-        if not token:
-            token = str(cfg.get("reader_token") or "")
-        request = urllib.request.Request(base + "/api/v1/contacts",
-                                         headers={"Authorization": "Bearer " + token})
-        with urllib.request.urlopen(request, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
-        cache = data.get("contacts") or []
-        _CHAT_CACHE["contacts"] = cache
-    except Exception as exc:  # noqa: BLE001
-        print(f"[target] 拉联系人失败: {exc}")
-    return cache
+    # Do not retain contacts across accounts or even across calls. Incomplete
+    # catalogs cannot establish uniqueness and must fail closed.
+    data = _reader_get("/api/v1/contacts?limit=10000", cfg)
+    contacts = data.get("contacts")
+    # The current reader caps this endpoint at 500 even when asked for more.
+    if data.get("success") is not True or not isinstance(contacts, list) or len(contacts) >= 500:
+        raise ToolExecutionError("CONTACT_CATALOG_INCOMPLETE")
+    return contacts
 
 
 def resolve_target_chat(target, cfg: dict) -> tuple:
-    """把「群名 / 群号 / 私聊」解析成微信 wxid。返回 (wxid, 显示名)。"""
+    if isinstance(target, Recipient):
+        return target.wxid, target.title
     raw = str(target or "").strip()
-    default_wxid = cfg.get("wechat_target_wxid") or "wxid_h0t6y5w6yke022"
     if not raw or raw.lower() in ("private", "owner", "私聊", "主人", "主人私聊"):
-        return default_wxid, "主人私聊"
+        raise ToolExecutionError("EXPLICIT_RECIPIENT_REQUIRED：请提供稳定 wxid，不使用主人别名。")
+    matches = {}
+    for item in _read_contacts(cfg):
+        wxid = str(item.get("username") or "")
+        name = str(item.get("displayName") or "")
+        # Exact, case-sensitive identifiers; never substring/first match.
+        aliases = {wxid, str(item.get("conversationId") or ""), name,
+                   str(item.get("remark") or ""), str(item.get("nickname") or "")}
+        if wxid and raw in aliases:
+            matches[wxid] = name or wxid
+    if len(matches) != 1:
+        raise ToolExecutionError("RECIPIENT_AMBIGUOUS" if matches else "RECIPIENT_NOT_FOUND")
+    return next(iter(matches.items()))
 
-    cache = _read_contacts(cfg)
 
-    want = raw.lower().replace("@chatroom", "").replace("wechat:group:", "").replace("wechat:private:", "")
-    for item in cache:
-        username = str(item.get("username") or "")
-        conv = str(item.get("conversationId") or "")
-        name = str(item.get("displayName") or "")
-        if want and (want == conv.lower() or want == username.lower().replace("@chatroom", "")
-                     or want == name.lower()):
-            return username, name
-    for item in cache:
-        name = str(item.get("displayName") or "")
-        if want and want in name.lower():
-            return str(item.get("username") or ""), name
-    # 兜底:群里只有两个,按关键字猜
-    for item in cache:
-        name = str(item.get("displayName") or "")
-        if "命就是好" in raw and "命就是好" in name:
-            return str(item.get("username") or ""), name
-        if "好人" in raw and "好人" in name:
-            return str(item.get("username") or ""), name
-    return "", ""
+def _assert_recipient(target, cfg: dict) -> None:
+    if not isinstance(target, Recipient):
+        raise ToolExecutionError("BOUND_RECIPIENT_REQUIRED")
+    if _active_account(cfg) != target.account:
+        raise ToolExecutionError("DELIVERY_ACCOUNT_CHANGED")
+    if ("group" if target.wxid.endswith("@chatroom") else "private") != target.kind:
+        raise ToolExecutionError("RECIPIENT_KIND_MISMATCH")
 
 
 def _hook_target(cfg: dict, target=None) -> str:
-    if target:
-        wxid, name = resolve_target_chat(target, cfg)
-        if wxid:
-            print(f"[target] {target} -> {name}({wxid})")
-            return wxid
-        print(f"[target] 找不到聊天: {target},回退到主人私聊")
-    return cfg.get("wechat_target_wxid") or "wxid_h0t6y5w6yke022"
+    _assert_recipient(target, cfg)
+    return target.wxid
 
 
-def wechat_hook_send_text(text: str, cfg: dict, target=None) -> bool:
-    """走 hook 的 /SendTextMsg,按 wxid 定向发文本,不抢焦点。"""
+@contextmanager
+def _outbox(cfg: dict):
+    file = Path(cfg.get("delivery_outbox") or SCRIPT_DIR / "state" / "delivery-outbox.sqlite3")
+    file.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(file, timeout=10)
+    db.row_factory = sqlite3.Row
     try:
-        res = _hook_post("/SendTextMsg", {"wxidorgid": _hook_target(cfg, target), "msg": text}, cfg)
-        if res.get("ret") == 0:
-            print("[hook] 文本已发送")
-            return True
-        print("[hook] 文本发送失败: " + json.dumps(res, ensure_ascii=False)[:200])
-        return False
-    except Exception as exc:  # noqa: BLE001
-        print(f"[hook] 文本发送异常: {exc}")
-        return False
+        db.execute("CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, account TEXT NOT NULL, kind TEXT NOT NULL, wxid TEXT NOT NULL, digest TEXT NOT NULL, state TEXT NOT NULL, attempted INTEGER NOT NULL, code TEXT NOT NULL, receipt TEXT NOT NULL)")
+        with db:
+            yield db
+    finally:
+        db.close()
 
 
-def wechat_hook_send_image(src: Path, cfg: dict, target=None) -> bool:
-    """走 hook 的 /SendImgMsg 原生发图(标准图片消息,按 wxid 定向)。"""
+def _delivery_state(row):
+    # A persisted 'submitted' record can be from a lost response/crashed process.
+    return {"state": "unconfirmed" if row["state"] == "submitted" else row["state"],
+            "attempted": bool(row["attempted"]), "code": row["code"], "receipt": row["receipt"]}
+
+
+def _receipt_id(row: dict) -> str:
+    return str(row.get("serverId") or row.get("server_id") or "")
+
+
+def _deliver_once(cfg: dict, target, stage: str, kind: str, payload: str, submit, verify=None, prepare=None):
+    if not isinstance(target, Recipient):
+        return {"state": "rejected", "attempted": False, "code": "BOUND_RECIPIENT_REQUIRED"}
+    operation = target.request_id + ":" + stage
+    digest = hashlib.sha256((kind + "\n" + payload).encode()).hexdigest()
+    with _outbox(cfg) as db:
+        db.execute("BEGIN IMMEDIATE")
+        previous = db.execute("SELECT * FROM deliveries WHERE id=?", (operation,)).fetchone()
+        if previous:
+            if (previous["account"], previous["kind"], previous["wxid"], previous["digest"]) != (target.account, kind, target.wxid, digest):
+                return {"state": "rejected", "attempted": False, "code": "DELIVERY_ID_CONFLICT"}
+            return _delivery_state(previous)
+        try:
+            _assert_recipient(target, cfg)
+            if prepare:
+                prepare()
+        except Exception:
+            return {"state": "rejected", "attempted": False, "code": "DELIVERY_PRECHECK_FAILED"}
+        db.execute("INSERT INTO deliveries VALUES (?,?,?,?,?,?,?,?,?)",
+                   (operation, target.account, kind, target.wxid, digest, "submitted", 1, "AWAITING_RECEIPT", ""))
+    state = {"state": "unconfirmed", "attempted": True, "code": "DELIVERY_UNCONFIRMED", "receipt": ""}
     try:
-        import hashlib
-        import shutil
-        outgoing = Path(cfg.get("wechat_hook_outgoing")
-                        or r"G:\wechat-deepseek\data\workspace\state\stickers\outgoing")
-        outgoing.mkdir(parents=True, exist_ok=True)
+        # Account may have changed while waiting for the durable ledger lock.
+        _assert_recipient(target, cfg)
+    except Exception:
+        state = {"state": "rejected", "attempted": False, "code": "DELIVERY_ACCOUNT_CHANGED", "receipt": ""}
+    else:
+        try:
+            submit()  # ret=0 / SENT are submission hints, never delivery evidence.
+            receipt = verify() if verify else ""
+            _assert_recipient(target, cfg)
+            if receipt:
+                state.update(state="delivered", code="DELIVERY_CONFIRMED", receipt=receipt)
+        except Exception:
+            pass  # Submitted or unknown; no alternate channel and no automatic replay.
+    with _outbox(cfg) as db:
+        db.execute("UPDATE deliveries SET state=?,attempted=?,code=?,receipt=? WHERE id=?",
+                   (state["state"], int(state["attempted"]), state["code"], state["receipt"], operation))
+    return state
+
+
+def wechat_hook_send_text(text: str, cfg: dict, target=None, stage="result"):
+    if not cfg.get("wechat_hook_text", True):
+        return {"state": "rejected", "attempted": False, "code": "TEXT_CHANNEL_DISABLED"}
+    baseline = set()
+    started = int(time.time())
+    def history():
+        data = _reader_get("/api/v1/messages?talker=" + quote(target.wxid) + "&limit=100", cfg)
+        if data.get("success") is not True or not isinstance(data.get("messages"), list):
+            raise ToolExecutionError("DELIVERY_HISTORY_INCOMPLETE")
+        return data["messages"]
+    def prepare():
+        baseline.update(_receipt_id(row) for row in history())
+    def verify():
+        for _ in range(3):
+            _assert_recipient(target, cfg)
+            rows = history()
+            _assert_recipient(target, cfg)
+            matches = [_receipt_id(row) for row in rows
+                       if _receipt_id(row).isdigit() and int(_receipt_id(row)) > 0
+                       and _receipt_id(row) not in baseline and row.get("isSend") in (True, 1)
+                       and int(row.get("createTime") or 0) >= started
+                       and _reader_message_text(row) == text]
+            if len(matches) == 1:
+                return matches[0]
+            time.sleep(0.4)
+        return ""
+    return _deliver_once(cfg, target, stage, "text", text,
+                         lambda: _hook_post("/SendTextMsg", {"wxidorgid": target.wxid, "msg": text}, {**cfg, "wechat_hook_account": target.account}), verify, prepare)
+
+
+def wechat_hook_send_image(src: Path, cfg: dict, target=None, stage="result"):
+    if not cfg.get("wechat_hook_image", True):
+        return {"state": "rejected", "attempted": False, "code": "IMAGE_CHANNEL_DISABLED"}
+    if not cfg.get("wechat_hook_image_abi_verified", False):
+        return {"state": "rejected", "attempted": False, "code": "NATIVE_IMAGE_ABI_NOT_VERIFIED"}
+    try:
+        _assert_recipient(target, cfg)
         raw = src.read_bytes()
         if not raw or len(raw) > 8 * 1024 * 1024:
-            return False
-        staged = outgoing / (hashlib.md5(raw).hexdigest() + src.suffix.lower())
-        if not staged.exists() or staged.stat().st_size != len(raw):
-            shutil.copyfile(src, staged)
-        res = _hook_post("/SendImgMsg", {"wxidorgid": _hook_target(cfg, target), "path": str(staged)}, cfg)
-        if res.get("ret") == 0:
-            print(f"[hook] 图片已原生发送: {src.name}")
-            return True
-        print("[hook] 发图失败: " + json.dumps(res, ensure_ascii=False)[:200])
-        return False
-    except Exception as exc:  # noqa: BLE001
-        print(f"[hook] 发图异常: {exc}")
-        return False
+            raise ValueError("IMAGE_SIZE_INVALID")
+        outgoing = Path(cfg.get("wechat_hook_outgoing") or WECHAT_PROJECT / "state/stickers/outgoing")
+        outgoing.mkdir(parents=True, exist_ok=True)
+        staged = outgoing / (hashlib.sha256(raw).hexdigest() + src.suffix.lower())
+        staged.write_bytes(raw)
+    except Exception:
+        return {"state": "rejected", "attempted": False, "code": "IMAGE_PRECHECK_FAILED"}
+    # The old native API has no trustworthy image receipt contract. A successful
+    # POST therefore remains unconfirmed, even when the native return is zero.
+    return _deliver_once(cfg, target, stage, "image", hashlib.sha256(raw).hexdigest(),
+                         lambda: _hook_post("/SendImgMsg", {"wxidorgid": target.wxid, "path": str(staged)}, {**cfg, "wechat_hook_account": target.account}))
 
 
 def wechat_ui_target_args(cfg: dict) -> list:
@@ -1318,103 +1307,31 @@ def wechat_ui_target_args(cfg: dict) -> list:
     return argv
 
 
-def wechat_send_native(src: Path, cfg: dict, mode: str, skip_title: bool = False, select_row: int = -1, scan_rows: bool = False, target_title: str = "", scan_other: str = "") -> str | None:
-    """把文件/图片作为**真正的微信消息**发出去(不是链接、不是需要下载的附件)。
-
-    mode=image → 标准图片消息(localType=3,能看到能点开能保存)
-    mode=file  → 文件消息(可打开/另存)
-    做法:剪贴板 + UI 自动化粘贴。脚本里带标题像素指纹校验,会话不对就拒发。
-    """
-    if not WECHAT_UI_SENDER.exists():
-        print("[wx] 缺少 send_wechat_native.ps1")
-        return None
-    try:
-        argv = ["powershell.exe", "-STA", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-File", str(WECHAT_UI_SENDER), "-Path", str(src), "-Mode", mode]
-        if mode == "text":
-            argv += ["-TextFile", str(src)]
-        if target_title:
-            argv += ["-TargetTitle", target_title, "-NormalizeWindow"]
-            if cfg.get("wechat_ui_switch_chat", True):
-                argv.append("-SwitchChat")
-        else:
-            argv += wechat_ui_target_args(cfg)
-        if skip_title:
-            argv.append("-SkipTitleCheck")
-        if select_row >= 0:
-            argv += ["-SelectRow", str(select_row)]
-        if scan_rows:
-            argv += ["-ScanRows"]
-            if scan_other:
-                argv += ["-ScanOtherTitle", scan_other]
-        result = run_capture(argv, str(SCRIPT_DIR), 180)
-        out = ((result["stdout"] or "") + "\n" + (result["stderr"] or "")).strip()
-        if "SENT" in out:
-            print(f"[wx] 已发送({mode}): {src.name}")
-            if mode == "image":
-                return f"已经把图直接发到微信了({src.name}),聊天里能看到,点开还能保存。"
-            return f"已经把文件直接发到微信了({src.name}),在聊天里点开就能保存。"
-        if "WINDOW_BLANK" in out:
-            print("[wx] 微信窗口白屏,无法校验标题")
-            return "__WINDOW_BLANK__"
-        if "TITLE_MISMATCH" in out:
-            print("[wx] 标题校验不通过,已取消发送")
-            return "__TITLE_MISMATCH__"
-        print("[wx] UI 发送失败: " + out.replace("\n", " ")[:300])
-        return None
-    except Exception as exc:  # noqa: BLE001
-        print(f"[wx] UI 发送异常: {exc}")
-        return None
+def wechat_send_native(src: Path, cfg: dict, mode: str, **kwargs):
+    # Title screenshots are diagnostic data, not a stable delivery identity.
+    raise ToolExecutionError("LEGACY_UI_IDENTITY_UNVERIFIED：旧 UI 通道未提交。")
 
 
 def tool_send_image(args: dict, cfg: dict) -> list:
     src = resolve_path(args.get("path") or "", cfg)
     if not src.is_file():
         raise ToolExecutionError(f"图片不存在: {src}")
-    suffix = src.suffix.lower()
-    mime = MIME_BY_SUFFIX.get(suffix)
+    mime = MIME_BY_SUFFIX.get(src.suffix.lower())
     if mime is None:
-        raise ToolExecutionError(f"不是图片文件: {src.name}(支持 png/jpg/jpeg/gif/webp/bmp)")
-    caption = (args.get("caption") or "").strip()
-    private_wxid = cfg.get("wechat_target_wxid") or "wxid_h0t6y5w6yke022"
-    explicit = str(args.get("target") or "").strip()
+        raise ToolExecutionError("不支持的图片格式。")
     target = _pick_target(args, cfg)
-    target_wxid, target_name = resolve_target_chat(target, cfg) if target else ("", "")
-    if explicit and not target_wxid:
-        raise ToolExecutionError(f"找不到聊天「{explicit}」,图片没有发出去。")
-
-    # 优先:hook 原生图片消息(按 wxid 定向,不抢焦点、不会发错会话)
-    if cfg.get("wechat_hook_image", True) and src.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
-        if wechat_hook_send_image(src, cfg, target):
-            where = (target_name + " ") if target_name else ""
-            text = f"已经把图发到{where}微信了({src.name}),那边能看到,点开还能保存。"
-            if caption:
-                text = caption + "\n" + text
-            return [{"type": "text", "text": text + "\n回复里不用再贴链接或路径。"}]
-
-    # 退一步:UI 自动化(需要窗口停在目标会话;只有目标是主人私聊时才用)
-    if cfg.get("wechat_native_image", True) and (not target or target_wxid == private_wxid):
-        sent = wechat_send_native(src, cfg, "image")
-        if sent and sent not in ("__TITLE_MISMATCH__", "__WINDOW_BLANK__"):
-            text = sent + ("\n" + caption if caption else "")
-            return [{"type": "text", "text": text + "\n图片已经在微信里了,回复里不用再贴链接。"}]
-        if sent == "__TITLE_MISMATCH__":
-            raise ToolExecutionError("微信当前不在主人私聊,为了不发错地方,图片没有发出去。让主人把微信切回私聊再试。")
-        if sent == "__WINDOW_BLANK__":
-            raise ToolExecutionError("微信窗口白屏，图片没有确认发送，请恢复客户端后检查聊天记录，勿自动重发。")
-
-    # 退路:图片内容 + 备用链接
-    size = src.stat().st_size
-    url = share_file(src, cfg)
-    if size > 3 * 1024 * 1024:
-        return [{"type": "text", "text": f"图片太大({size:,} B),用链接发:{url}" + (f"\n{caption}" if caption else "")}]
-    encoded = base64.b64encode(src.read_bytes()).decode("ascii")
-    contents = [{"type": "image", "data": encoded, "mimeType": mime}]
-    text = f"图已附上({src.name})。如果聊天里看不到图,可用备用链接:{url}"
-    if caption:
-        text = f"{caption}\n{text}"
-    contents.append({"type": "text", "text": text})
-    return contents
+    if target:
+        result = wechat_hook_send_image(src, cfg, target)
+        if result.get("state") == "delivered":
+            return [{"type": "text", "text": "已取得目标账号与聊天的图片送达回执。"}]
+        raise ToolExecutionError("图片外发状态：" + result["state"] + " / " + result["code"] + "；未确认送达，勿自动重发或换通道。")
+    # Tool content belongs to the requesting MCP call, with no independent
+    # WeChat send or guessed recipient. Do not claim external delivery.
+    raw = src.read_bytes()
+    if len(raw) > 3 * 1024 * 1024:
+        return [{"type": "text", "text": "未独立发送微信消息；图片下载链接：" + share_file(src, cfg)}]
+    return [{"type": "image", "data": base64.b64encode(raw).decode("ascii"), "mimeType": mime},
+            {"type": "text", "text": "图片作为本次工具结果返回；没有独立发送微信消息。"}]
 
 
 ESPN_PATHS = {
@@ -1537,89 +1454,60 @@ def _codex_images(cfg: dict) -> set:
         return set()
 
 
-def _gpt_draw_worker(prompt: str, cfg: dict, target=None) -> None:
-    """后台画图:生成 -> 找到新图 -> 通过 hook 直接发进微信。"""
+def _gpt_draw_worker(prompt: str, cfg: dict, job) -> dict:
     before = _codex_images(cfg)
-    ask = ("用你的图片生成工具画一张图,主题:%s。只生成图片,不要修改任何文件,不要解释过程。" % prompt)
-    result = _codex_run(ask, cfg, int(cfg.get("gpt_draw_timeout_sec") or 360))
-    after = _codex_images(cfg)
-    new = sorted(after - before)
+    result = _codex_run("用图片生成工具画一张图，主题：" + prompt, cfg, int(cfg.get("gpt_draw_timeout_sec") or 360))
+    new = _codex_images(cfg) - before
     if not new:
-        msg = "【画图失败】没能生成图片"
-        detail = ((result.get("stderr") or "") + (result.get("stdout") or "")).strip()
-        if detail:
-            msg += "\n" + detail[-300:]
-        if cfg.get("wechat_hook_text", True):
-            wechat_hook_send_text(msg, cfg)
-        return
-    src = Path(sorted(new, key=lambda x: Path(x).stat().st_mtime)[-1])
-    out_dir = Path(cfg.get("gpt_output_dir") or r"F:\deepseek工作区\generated")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    dst = out_dir / ("gpt_%s%s" % (stamp, src.suffix or ".png"))
-    try:
-        shutil.copyfile(src, dst)
-    except Exception:  # noqa: BLE001
-        dst = src
-    if cfg.get("wechat_hook_image", True):
-        if wechat_hook_send_image(dst, cfg, target):
-            print(f"[gpt] 画好的图已发送: {dst.name}")
-        else:
-            wechat_push_text("【画图完成】图在 %s" % dst, cfg)
-    else:
-        wechat_push_text("【画图完成】图在 %s" % dst, cfg)
+        return {"ok": False, "code": result.get("code"), "stdout": "", "stderr": "IMAGE_GENERATION_FAILED：没有生成图片文件。", "elapsed": result.get("elapsed", 0)}
+    src = max(map(Path, new), key=lambda x: x.stat().st_mtime)
+    dst = _store_generated(src.read_bytes(), src.suffix, cfg, "gpt")
+    job.output_image = dst
+    return {"ok": True, "code": 0, "stdout": "图片已保存在本机：" + str(dst), "stderr": "", "elapsed": result.get("elapsed", 0)}
 
 
-def _free_draw_worker(prompt: str, cfg: dict, target=None) -> None:
-    """免费生图(不需要账号、不吃额度):Pollinations 公共接口。"""
-    import urllib.parse
-    width = int(cfg.get("free_image_width") or 1024)
-    height = int(cfg.get("free_image_height") or 1024)
-    url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt)
-           + "?width=%d&height=%d&nologo=true&seed=%d" % (width, height, int(time.time()) % 100000))
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = resp.read()
-            ctype = resp.headers.get("Content-Type", "")
-    except Exception as exc:  # noqa: BLE001
-        body = "【画图失败】免费通道报错: %s" % str(exc)[:200]
-        if cfg.get("wechat_hook_text", True):
-            wechat_hook_send_text(body, cfg)
-        return
-    out_dir = Path(cfg.get("gpt_output_dir") or r"F:\deepseek工作区\generated")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    suffix = ".jpg" if "jpeg" in ctype else ".png"
-    dst = out_dir / ("free_%s%s" % (time.strftime("%Y%m%d_%H%M%S"), suffix))
-    dst.write_bytes(data)
-    if cfg.get("wechat_hook_image", True):
-        if wechat_hook_send_image(dst, cfg, target):
-            print(f"[free] 免费图已发送: {dst.name}")
-            return
-    if cfg.get("wechat_hook_text", True):
-        wechat_hook_send_text("【画图完成】图片在: %s" % dst, cfg)
+def _store_generated(raw: bytes, suffix: str, cfg: dict, prefix: str) -> Path:
+    if not raw or len(raw) > 8 * 1024 * 1024:
+        raise ValueError("GENERATED_IMAGE_SIZE_INVALID")
+    out = Path(cfg.get("gpt_output_dir") or Path(cfg["workspace_root"]) / "generated")
+    out.mkdir(parents=True, exist_ok=True)
+    dst = out / (prefix + "_" + uuid.uuid4().hex[:12] + suffix)
+    dst.write_bytes(raw)
+    return dst
+
+
+def _free_draw_worker(prompt: str, cfg: dict, job) -> dict:
+    width, height = int(cfg.get("free_image_width") or 1024), int(cfg.get("free_image_height") or 1024)
+    url = "https://image.pollinations.ai/prompt/" + quote(prompt) + "?width=%d&height=%d&nologo=true&seed=%d" % (width, height, int(time.time()) % 100000)
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=120) as response:
+        ctype = response.headers.get("Content-Type", "")
+        if not ctype.startswith("image/"):
+            raise ValueError("GENERATED_CONTENT_NOT_IMAGE")
+        raw = response.read(8 * 1024 * 1024 + 1)
+    dst = _store_generated(raw, ".jpg" if "jpeg" in ctype else ".png", cfg, "free")
+    job.output_image = dst
+    return {"ok": True, "code": 0, "stdout": "图片已保存在本机：" + str(dst), "stderr": "", "elapsed": round(time.time() - job.started, 1)}
 
 
 def tool_gpt_draw(args: dict, cfg: dict) -> str:
-    """用本机 ChatGPT 账号画图(异步):先返回,画好后自动把图片发进微信。"""
-    prompt = (args.get("prompt") or args.get("description") or "").strip()
+    prompt = (args.get("prompt") or "").strip()
     if not prompt:
         raise ValueError("prompt 不能为空")
     engine = (args.get("engine") or cfg.get("gpt_draw_engine") or "free").strip().lower()
+    if engine not in ("gpt", "chatgpt", "codex", "free"):
+        raise ValueError("IMAGE_ENGINE_UNSUPPORTED")
     target = _pick_target(args, cfg)
-    where = "微信"
-    if target:
-        wxid, name = resolve_target_chat(target, cfg)
-        if not wxid:
-            raise ToolExecutionError("找不到聊天: " + target)
-        where = name
-    if engine in ("gpt", "chatgpt", "codex"):
-        if _codex_cmd(cfg) is None:
-            raise ToolExecutionError("这台电脑上没找到 codex CLI,GPT 画图通道不可用。")
-        threading.Thread(target=_gpt_draw_worker, args=(prompt, cfg, target), daemon=True).start()
-        return ("🎨 用 GPT 画了(大约 1-2 分钟,会消耗你的 GPT 额度),画好直接发到%s。\n主题: " % where + prompt)
-    threading.Thread(target=_free_draw_worker, args=(prompt, cfg, target), daemon=True).start()
-    return ("🎨 已经开始画了(免费通道,几秒钟,不吃 GPT 额度),画好直接把图片发到%s。\n主题: " % where + prompt)
+    use_gpt = engine != "free"
+    if use_gpt and _codex_cmd(cfg) is None:
+        raise ToolExecutionError("CODEX_NOT_FOUND：GPT 画图通道不可用。")
+    runner = _gpt_draw_worker if use_gpt else _free_draw_worker
+    job = Job(prompt, 360, cfg, runner=lambda current: runner(prompt, cfg, current))
+    job.target, job.label = target, "图片生成"
+    with JOBS_LOCK:
+        JOBS[job.id] = job
+    job.start()
+    threading.Thread(target=_watch_job, args=(job, cfg), daemon=True).start()
+    return "已开始生成图片，job_id=" + job.id + "。用 local_agent_status 查询生成和交付状态；没有绑定收件身份时仅保存本机。"
 
 
 def tool_fetch_paper(args: dict, cfg: dict) -> str:
@@ -1927,77 +1815,40 @@ def tool_fetch_scores(args: dict, cfg: dict) -> str:
     return head + "\n" + "\n".join(lines) + "\n(数据源: ESPN 公开接口)"
 
 
-# ---------------------------------------------------------------- 当前聊天自动定位
-SOCIAL_MESSAGES = Path(r"G:\wechat-deepseek\data\workspace\state\social-messages.json")
-
-
-def _recent_chats(cfg: dict) -> list:
-    """近期有用户来信的聊天,按最后来信时间倒序:[(ts, 显示名, 聊天键)]。"""
-    try:
-        path = Path(cfg.get("wechat_social_messages") or SOCIAL_MESSAGES)
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except Exception as exc:  # noqa: BLE001
-        print("[target] 读不到社交消息文件:", str(exc)[:120])
-        return []
-    window = float(cfg.get("wechat_current_chat_sec") or 600)
-    now = time.time()
-    latest = {}
-    for key, msgs in (data.get("chats") or {}).items():
-        if not isinstance(msgs, list):
-            continue
-        for msg in msgs[-10:]:
-            if not isinstance(msg, dict) or msg.get("outgoing"):
-                continue
-            try:
-                ts = float(msg.get("timestamp") or 0)
-            except (TypeError, ValueError):
-                continue
-            if ts <= 0 or ts > now + 30 or now - ts > window:
-                continue
-            name = str(msg.get("conversation_name") or "").strip()
-            if not name:
-                continue
-            if (key not in latest) or ts > latest[key][0]:
-                latest[key] = (ts, name, str(key))
-    return sorted(latest.values(), key=lambda item: -item[0])
-
-
-def _recent_chat(cfg: dict) -> tuple:
-    """最近一条用户来信属于哪个聊天。返回 (显示名, 聊天键, 距今秒数);识别不到返回 ('', '', 0)。"""
-    chats = _recent_chats(cfg)
-    if not chats:
-        return "", "", 0.0
-    ts, name, key = chats[0]
-    return name, key, round(time.time() - ts, 1)
-
-
+# ---------------------------------------------------------------- Explicit delivery identity
+# Recent messages are deliberately not consulted by this server.
 def _auto_target(cfg: dict) -> str:
-    """判断"现在在哪个聊天里说话";识别不到返回空(调用方回退主人私聊)。
-
-    串台保护:群聊只有在最近 180 秒内没有其他聊天也来过消息时才自动定位,
-    多个聊天交叉时退回主人私聊,并要求模型显式传 target。
-    """
-    chats = _recent_chats(cfg)
-    if not chats:
-        return ""
-    ts, name, key = chats[0]
-    age = round(time.time() - ts, 1)
-    if ":group:" in key:
-        others = [item for item in chats[1:] if time.time() - item[0] < 180]
-        if others:
-            print("[target] 多聊天交叉,跳过群聊自动定位: %s(%s),最近来信 %ss 前;180s 内还有 %d 个聊天来过消息,"
-                  "改用主人私聊,请显式传 target" % (name, key, age, len(others)))
-            return ""
-    print("[target] 自动定位当前聊天: %s(%s),最近来信 %ss 前" % (name, key, age))
-    return name
+    raise ToolExecutionError("EXPLICIT_RECIPIENT_REQUIRED：禁止根据最近聊天推断收件人。")
 
 
-def _pick_target(args: dict, cfg: dict) -> str:
-    """显式 target 优先;没给就自动定位当前聊天,避免群里提问却把图发到主人私聊。"""
-    explicit = str(args.get("target") or "").strip()
-    if explicit:
-        return explicit
-    return _auto_target(cfg)
+def _pick_target(args: dict, cfg: dict, required=False):
+    explicit = args.get("target")
+    if not explicit:
+        if required:
+            raise ToolExecutionError("EXPLICIT_RECIPIENT_REQUIRED")
+        return None
+    request_id = args.get("request_id")
+    account = args.get("account")
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{8,120}", request_id):
+        raise ToolExecutionError("DELIVERY_REQUEST_ID_REQUIRED")
+    if not isinstance(account, str) or not account.strip() or account.lower() != _active_account(cfg):
+        raise ToolExecutionError("DELIVERY_ACCOUNT_MISMATCH")
+    wxid, name = resolve_target_chat(explicit, cfg)
+    kind = "group" if wxid.endswith("@chatroom") else "private"
+    requested_kind = args.get("target_kind")
+    if requested_kind != kind:
+        raise ToolExecutionError("RECIPIENT_KIND_REQUIRED_OR_MISMATCH")
+    contacts = [x for x in _read_contacts(cfg) if x.get("username") == wxid]
+    if any(x.get("ambiguous") for x in contacts):
+        raise ToolExecutionError("RECIPIENT_AMBIGUOUS")
+    keys = {str(x.get("conversationId") or "") for x in contacts}
+    if len(keys) != 1 or not next(iter(keys)):
+        raise ToolExecutionError("RECIPIENT_CONVERSATION_UNAVAILABLE")
+    if _active_account(cfg) != account.lower():
+        raise ToolExecutionError("DELIVERY_ACCOUNT_CHANGED")
+    return Recipient(account.lower(), kind, wxid, name, "wechat:" + kind + ":" + next(iter(keys)), request_id)
+
+
 
 
 # ---------------------------------------------------------------- 嵌套 agent 执行提示
@@ -2018,7 +1869,7 @@ def _agent_hint(cfg: dict) -> str:
         ("- 要截网页图:运行 `& \"%s\" \"%s\" --screenshot-url \"<网址>\" --out \"<输出png完整路径>\"`;"
          "输出 SHOT_OK 表示已生成且校验过非空白,SHOT_BLANK 表示所有尝试都是空白页(换数据源或改渲染方案),不要把空白图当结果。" % (py, script)),
         "- 不要自己用 msedge --headless --screenshot 硬截:本机系统代理会让 ESPN 等站点返回 AWS 反爬挑战页,截出来是纯白图。",
-        "- 比分/赛程优先查公开数据接口(如 site.api.espn.com);需要出图优先用 F:\\deepseek工作区\\sched 下已有的 PIL 渲染脚本(如 nba_schedule.py)。",
+        "- 比分/赛程优先查公开数据接口(如 site.api.espn.com)，生成文件限于当前授权工作区。",
         "- 生成图片/文件后,把完整路径写进最终答复,方便上层发送到微信。",
     ])
 
@@ -2139,7 +1990,7 @@ def tool_screenshot_url(args: dict, cfg: dict) -> str:
                 "或换数据源,不要交空白图。" % res.get("error", ""))
     return ("【截图成功·已校验非空白】%s\n尺寸 %d x %d,大小 %s B,近白像素占比 %.4f,"
             "策略:%s(第 %d 次尝试)。\n下一步:用 send_image 把这个路径发出去"
-            "(不传 target 会自动发到当前聊天)。" % (
+            "(不传 target 仅返回本次工具结果，不独立外发)。" % (
                 res["path"], res["width"], res["height"], f"{res['bytes']:,}",
                 res["ratio"], res["strategy"], res["tries"]))
 
@@ -2337,7 +2188,7 @@ TOOLS = [
             "properties": {
                 "prompt": {"type": "string", "description": "画什么,尽量具体(主体、风格、画面元素)。"},
                 "engine": {"type": "string", "description": "free=免费通道(默认,几秒,不吃额度);gpt=用用户 GPT 账号(1-2 分钟,消耗额度,质量更好)。"},
-                "target": {"type": "string", "description": "发到哪个聊天:群名(如「命就是好」「群里只有一个好人」)、群号或「私聊」。不传=自动发到刚刚跟你说话的那个聊天(服务端按最近来信判断;识别不到才发主人私聊)。"},
+                "target": {"type": "string", "description": "发到哪个聊天:群名(如「命就是好」「群里只有一个好人」)、群号或「私聊」。不传则不独立外发；禁止按最近聊天推断。外发还须提供 account、target_kind、request_id。"},
             },
             "required": ["prompt"],
             "additionalProperties": False,
@@ -2409,7 +2260,7 @@ TOOLS = [
                 "task": {"type": "string", "description": "要在这台电脑上完成的任务,用自然语言描述,可以带上具体路径。"},
                 "wait_seconds": {"type": "integer", "description": "最多同步等多久(默认 45)。"},
                 "timeout_seconds": {"type": "integer", "description": "任务总超时(默认 600)。"},
-                "target": {"type": "string", "description": "发到哪个聊天:群名(如「命就是好」「群里只有一个好人」)、群号或「私聊」。不传=自动发到刚刚跟你说话的那个聊天(服务端按最近来信判断;识别不到才发主人私聊)。"},
+                "target": {"type": "string", "description": "发到哪个聊天:群名(如「命就是好」「群里只有一个好人」)、群号或「私聊」。不传则不独立外发；禁止按最近聊天推断。外发还须提供 account、target_kind、request_id。"},
             },
             "required": ["task"],
             "additionalProperties": False,
@@ -2480,7 +2331,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "文件路径,相对工作区或绝对路径。"},
-                "target": {"type": "string", "description": "发到哪个聊天:群名(如「命就是好」「群里只有一个好人」)、群号或「私聊」。不传=自动发到刚刚跟你说话的那个聊天(服务端按最近来信判断;识别不到才发主人私聊)。"},
+                "target": {"type": "string", "description": "发到哪个聊天:群名(如「命就是好」「群里只有一个好人」)、群号或「私聊」。不传则不独立外发；禁止按最近聊天推断。外发还须提供 account、target_kind、request_id。"},
             },
             "required": ["path"],
             "additionalProperties": False,
@@ -2497,7 +2348,7 @@ TOOLS = [
             "properties": {
                 "path": {"type": "string", "description": "图片路径(png/jpg/gif/webp/bmp)。"},
                 "caption": {"type": "string", "description": "可选的一句话说明。"},
-                "target": {"type": "string", "description": "发到哪个聊天:群名(如「命就是好」「群里只有一个好人」)、群号或「私聊」。不传=自动发到刚刚跟你说话的那个聊天(服务端按最近来信判断;识别不到才发主人私聊)。"},
+                "target": {"type": "string", "description": "发到哪个聊天:群名(如「命就是好」「群里只有一个好人」)、群号或「私聊」。不传则不独立外发；禁止按最近聊天推断。外发还须提供 account、target_kind、request_id。"},
             },
             "required": ["path"],
             "additionalProperties": False,
@@ -2540,6 +2391,26 @@ TOOLS = [
         },
     },
 ]
+
+# The MCP descriptions and schemas describe actual capabilities, not an old UI promise.
+for _tool in TOOLS:
+    if _tool["name"] in {"run_local_agent", "gpt_draw", "send_image", "export_file"}:
+        _props = _tool["inputSchema"]["properties"]
+        _props.update({
+            "account": {"type": "string", "description": "明确的 reader accountDirectory；外发时必填。"},
+            "target_kind": {"type": "string", "enum": ["private", "group"]},
+            "request_id": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{8,120}$", "description": "本次交付唯一 ID，重试必须沿用。"},
+        })
+        _props["target"] = {"type": "string", "description": "稳定 wxid 或全局唯一的精确名称；不接受模糊匹配、主人别名及最近聊天。"}
+    if _tool["name"] == "run_local_agent":
+        _tool["description"] = "在本机通过 DSH 执行任务，返回结果或 job_id；未绑定收件身份则只保存本机，用 local_agent_status 查询。启动不代表完成或送达。"
+    elif _tool["name"] == "gpt_draw":
+        _tool["description"] = "异步生成图片并保存本机，返回 job_id；用 local_agent_status 查路径与交付状态。外发需完整身份绑定及可用的受控通道。"
+    elif _tool["name"] == "send_image":
+        _tool["description"] = "不传目标时向本次 MCP 请求返回图片内容；不会猜测微信收件人。指定外发需完整身份绑定；原生图片 ABI 未验证时拒绝外发。"
+    elif _tool["name"] == "export_file":
+        _tool["description"] = "检查待发文件及身份参数。旧 UI 仅标题校验，当前拒绝外部提交；发送文件请使用产品中的受控附件入口。"
+
 
 TOOL_HANDLERS = {
     "pc_status": tool_pc_status,
@@ -2615,18 +2486,14 @@ def handle_rpc(message: dict, cfg: dict) -> dict | None:
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                 "instructions": (
-                    "这是用户自己的 Windows 电脑,用户在微信里跟你说话。"
-                    "要操作电脑时用 run_local_agent:它在本机调起 DSH agent 完成任务(文件、命令行、Office、网页)。"
-                    "它是异步的:调用立刻返回「已开始」,结果做完会由电脑**直接发到微信**,不用轮询。"
-                    "比分/赛程优先用 fetch_scores 查接口(快、准、不怕反爬),不要截图;"
-                    "交付规则:图片用 send_image,文件(Word/PDF/Excel/压缩包等)用 export_file,"
-                    "这两个工具都会把东西**直接发进微信**(图片是图片消息、文件是文件消息,对方能直接看/直接保存),"
-                    "所以回复里不要再贴任何链接或路径,只写一句说明。"
-                    "只有工具明确返回失败时才提链接;工具没明确返回成功,就不要说已经发了、已经发到群里。"
-                    "发图/发文件不传 target 时,服务端会自动发到「刚刚跟你说话的那个聊天」,不用自己猜群名,也别乱传「私聊」。"
-                    "网页截图一律用 screenshot_url(自动处理代理/反爬白屏并校验非空白),不要自己用 headless 浏览器截图;"
-                    "读网页正文(比如微信里分享的链接、B站/公众号文章)用 read_web_page:它会自动直连/走代理/用浏览器渲染,读不到会明确报错,不要凭标题编;"
-                    "回复要像聊天,别把链接和路径堆成技术报告。"
+                    "本机 pcbridge 提供本地任务、文件、网页和比分工具。run_local_agent 和 gpt_draw 返回 job_id，"
+                    "请用 local_agent_status 查询结果，不要仅凭任务启动就宣称完成或已发微信。"
+                    "未指定收件目标时只保留本地结果，send_image 仅向本次 MCP 请求返回图片内容。"
+                    "如需独立微信通知，必须显式指定 account、target_kind、唯一精确 target 和 request_id。"
+                    "不按最近聊天猜测，不使用主人别名，不自动改收件人或换发送通道。"
+                    "送达以绑定目标的真实回执为准，unconfirmed 禁止自动重发。"
+                    "旧标题校验 UI 不能证明身份，export_file 会拒绝并要求使用产品受控附件入口。"
+                    "比分/赛程用 fetch_scores，截图用 screenshot_url，正文用 read_web_page。"
                 ),
             }
         elif method == "ping":
@@ -2718,7 +2585,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length > 0 else b""
 
     def _deny(self) -> None:
-        self._send_json({"error": "unauthorized", "hint": "在 URL 后面加 ?token=config.json 里的 token"}, 403)
+        # An unauthorized POST body has not been consumed. Never treat it as
+        # the start of the next request on a persistent connection.
+        self.close_connection = True
+        self._send_json({"error": "unauthorized"}, 403, {"Connection": "close"})
 
     # ----- GET -----
     def do_GET(self) -> None:  # noqa: N802
@@ -2730,6 +2600,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "ok": True,
                 "server": SERVER_NAME,
                 "version": SERVER_VERSION,
+                "pid": os.getpid(),
+                "sourceSha256": SOURCE_SHA256,
+                "protocolVersions": list(SUPPORTED_PROTOCOL_VERSIONS),
+                "deliveryPolicy": "explicit-identity-single-attempt-v1",
+                "toolCount": len(TOOLS),
                 "dsh": " ".join(DSH_CMD) if DSH_CMD else None,
                 "dsh_hint": DSH_HINT,
                 "workspace": self.cfg["workspace_root"],
@@ -2741,7 +2616,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if path == "/mcp":
             return self._send_json({"error": "use POST for MCP messages"}, 405)
         if path.startswith("/files/"):
-            if not self._token_ok():
+            if not _download_allowed(path[len("/files/" ):], self._query()):
                 return self._deny()
             return self._serve_file(path[len("/files/"):])
         if path == "/":
@@ -2806,6 +2681,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(name))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(data)
 
@@ -2957,13 +2834,13 @@ def main() -> int:
     print(f" 工作区    : {cfg['workspace_root']}")
     print(f" dsh 命令  : {' '.join(DSH_CMD) if DSH_CMD else '未找到 —— run_local_agent 会失败'}")
     print(f"             ({DSH_HINT})")
-    print(f" token     : {token}")
+    print(" token     : 已配置（不写入日志；由本机配置管理）")
     print("-" * 66)
     print(" 手机上(MCP 配置)填这两个之一:")
-    print(f"   SSE / HTTP+SSE : {base}/sse?token={token}")
-    print(f"   Streamable HTTP: {base}/mcp?token={token}")
+    print(f"   SSE / HTTP+SSE : {base}/sse （需控制凭据）")
+    print(f"   Streamable HTTP: {base}/mcp （需控制凭据）")
     print(f" 先在手机浏览器打开这个验证连通性:")
-    print(f"   {base}/health?token={token}")
+    print(f"   {base}/health （需控制凭据）")
     print("=" * 66)
     try:
         httpd.serve_forever()

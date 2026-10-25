@@ -11,6 +11,11 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
+import json
+import http.client
+from http.server import ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 import unittest
 from unittest.mock import patch
 
@@ -28,7 +33,8 @@ class BridgeRegression(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="assistant-pcbridge-test-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.cfg = {**bridge.DEFAULT_CONFIG, "workspace_root": str(self.root), "max_output_chars": 10000}
+        self.cfg = {**bridge.DEFAULT_CONFIG, "workspace_root": str(self.root), "max_output_chars": 10000,
+                    "delivery_outbox": str(self.root / "outbox.sqlite3")}
         # Fail closed if an unintended code path attempts a real action.
         for name in ("run_capture", "wechat_hook_send_text", "wechat_hook_send_image", "wechat_push_text"):
             blocker = patch.object(bridge, name, side_effect=AssertionError("unexpected external action"))
@@ -144,7 +150,7 @@ class BridgeRegression(unittest.TestCase):
         self.assertTrue(result["isError"])
         self.assertNotIn("图片已经在微信里了", result["content"][0]["text"])
 
-    def test_unverified_send_is_error_without_automatic_retry(self):
+    def test_legacy_title_only_ui_cannot_submit_or_fallback(self):
         (self.root / "fixture.txt").write_text("offline fixture", encoding="utf-8")
         with patch.object(bridge, "_pick_target", return_value="私聊"), \
              patch.object(bridge, "resolve_target_chat", return_value=("fixture-owner", "主人私聊")), \
@@ -152,8 +158,230 @@ class BridgeRegression(unittest.TestCase):
             self.cfg["wechat_target_wxid"] = "fixture-owner"
             result = self.call("export_file", path="fixture.txt")
         self.assertTrue(result["isError"])
-        self.assertEqual(sender.call_count, 1)
-        self.assertIn("请勿自动重发", result["content"][0]["text"])
+        self.assertEqual(sender.call_count, 0)
+        self.assertIn("LEGACY_UI_IDENTITY_UNVERIFIED", result["content"][0]["text"])
+
+
+class DeliverySafety(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="pcbridge-safety-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.cfg = {**bridge.DEFAULT_CONFIG, "workspace_root": str(self.root), "token": "synthetic-control-secret",
+                    "delivery_outbox": str(self.root / "outbox.sqlite3")}
+        self.recipient = bridge.Recipient("account-a", "group", "group-a@chatroom", "Lab", "wechat:group:11", "fixture-request-01")
+        self.contacts = [{"username": "group-a@chatroom", "conversationId": "11", "displayName": "Lab"}]
+        for target, value in [("SCRIPT_DIR", self.root), ("SHARED_DIR", self.root / "shared"), ("JOBS", {})]:
+            mock = patch.object(bridge, target, value); mock.start(); self.addCleanup(mock.stop)
+        for target in ("run_capture", "wechat_push_text", "wechat_send_native", "_hook_post"):
+            mock = patch.object(bridge, target, side_effect=AssertionError("unexpected external submit"))
+            mock.start(); self.addCleanup(mock.stop)
+
+    def arguments(self, **overrides):
+        return {"target": "group-a@chatroom", "target_kind": "group", "account": "account-a",
+                "request_id": "fixture-request-01", **overrides}
+
+    def bind(self, **overrides):
+        with patch.object(bridge, "_active_account", return_value="account-a"), \
+             patch.object(bridge, "_read_contacts", return_value=self.contacts):
+            return bridge._pick_target(self.arguments(**overrides), self.cfg)
+
+    def test_no_recent_inference_or_owner_alias(self):
+        self.assertIsNone(bridge._pick_target({}, self.cfg))
+        for alias in ("", "private", "owner", "主人", "私聊"):
+            with self.subTest(alias=alias), self.assertRaises(bridge.ToolExecutionError):
+                bridge.resolve_target_chat(alias, self.cfg)
+
+    def test_exact_identity_binding_survives_other_chat_activity(self):
+        bound = self.bind()
+        self.contacts = [{"username": "group-b@chatroom", "conversationId": "22", "displayName": "Other"}]
+        with patch.object(bridge, "_active_account", return_value="account-a"):
+            self.assertEqual(bridge._hook_target(self.cfg, bound), "group-a@chatroom")
+
+    def test_duplicate_names_across_kinds_and_fuzzy_targets_rejected(self):
+        self.contacts.append({"username": "private-b", "conversationId": "22", "displayName": "Lab"})
+        for target in ("Lab", "La", "主人"):
+            with self.subTest(target=target), self.assertRaises(bridge.ToolExecutionError):
+                self.bind(target=target)
+
+    def test_missing_account_kind_request_and_ambiguous_mapping_rejected(self):
+        for override in ({"account": "account-b"}, {"account": ""}, {"request_id": ""}, {"target_kind": "private"}):
+            with self.subTest(override=override), self.assertRaises(bridge.ToolExecutionError):
+                self.bind(**override)
+        self.contacts[0]["ambiguous"] = True
+        with self.assertRaises(bridge.ToolExecutionError):
+            self.bind()
+
+    def test_account_switch_during_resolution_rejected(self):
+        with patch.object(bridge, "_active_account", side_effect=["account-a", "account-b"]), \
+             patch.object(bridge, "_read_contacts", return_value=self.contacts), self.assertRaises(bridge.ToolExecutionError):
+            bridge._pick_target(self.arguments(), self.cfg)
+
+    def test_incomplete_catalog_does_not_establish_uniqueness(self):
+        for data in ({"contacts": []}, {"success": True, "contacts": [{}] * 500}):
+            with patch.object(bridge, "_reader_get", return_value=data), self.assertRaises(bridge.ToolExecutionError):
+                bridge._read_contacts(self.cfg)
+
+    def test_contacts_are_not_reused_after_account_switch(self):
+        with patch.object(bridge, "_reader_get", side_effect=[{"success": True, "contacts": self.contacts}, {"success": True, "contacts": []}]) as reader:
+            self.assertEqual(len(bridge._read_contacts(self.cfg)), 1)
+            self.assertEqual(bridge._read_contacts(self.cfg), [])
+        self.assertEqual(reader.call_count, 2)
+
+    def deliver(self, submit, verify=None, target=None, payload="fixture", prepare=None):
+        return bridge._deliver_once(self.cfg, target or self.recipient, "result", "text", payload, submit, verify, prepare)
+
+    def test_lost_response_is_durable_unconfirmed_and_never_replayed(self):
+        submissions = []
+        def lost():
+            submissions.append(self.recipient.wxid)
+            raise TimeoutError("response lost after native commit")
+        with patch.object(bridge, "_active_account", return_value="account-a"):
+            first = self.deliver(lost)
+        # Reopen the DB under changed live account (simulating a restart).
+        with patch.object(bridge, "_active_account", return_value="account-b"):
+            second = self.deliver(lost)
+        self.assertEqual(first["state"], "unconfirmed")
+        self.assertEqual(second["state"], "unconfirmed")
+        self.assertTrue(second["attempted"])
+        self.assertEqual(submissions, ["group-a@chatroom"])
+
+    def test_crash_after_ledger_commit_is_not_replayed(self):
+        def abrupt(): raise SystemExit("synthetic crash")
+        with patch.object(bridge, "_active_account", return_value="account-a"), self.assertRaises(SystemExit):
+            self.deliver(abrupt)
+        sender = lambda: self.fail("must not replay")
+        with patch.object(bridge, "_active_account", return_value="account-a"):
+            restored = self.deliver(sender)
+        self.assertEqual(restored["state"], "unconfirmed")
+
+    def test_ret_zero_alone_is_not_delivery(self):
+        with patch.object(bridge, "_active_account", return_value="account-a"):
+            result = self.deliver(lambda: {"ret": 0})
+        self.assertEqual(result["state"], "unconfirmed")
+
+    def test_confirmed_receipt_is_required_and_payload_target_conflicts_reject(self):
+        with patch.object(bridge, "_active_account", return_value="account-a"):
+            result = self.deliver(lambda: {"ret": 0}, lambda: "123456")
+            conflict = self.deliver(lambda: self.fail("duplicate submission"), payload="different")
+            other = self.recipient._replace(wxid="private-b", kind="private")
+            conflict2 = self.deliver(lambda: self.fail("target changed"), target=other)
+        self.assertEqual(result["state"], "delivered")
+        self.assertEqual(conflict["code"], "DELIVERY_ID_CONFLICT")
+        self.assertEqual(conflict2["code"], "DELIVERY_ID_CONFLICT")
+
+    def test_change_at_final_account_barrier_prevents_submit(self):
+        with patch.object(bridge, "_active_account", side_effect=["account-a", "account-b"]):
+            result = self.deliver(lambda: self.fail("account changed before submit"))
+        self.assertEqual(result["state"], "rejected")
+        self.assertFalse(result["attempted"])
+
+    def test_after_submit_account_change_cannot_confirm(self):
+        with patch.object(bridge, "_active_account", side_effect=["account-a", "account-a", "account-b"]):
+            result = self.deliver(lambda: {"ret": 0}, lambda: "123456")
+        self.assertEqual(result["state"], "unconfirmed")
+
+    def test_two_concurrent_attempts_only_submit_once(self):
+        called = []; barrier = threading.Event()
+        def submit(): called.append(1); barrier.wait(2)
+        results = []
+        with patch.object(bridge, "_active_account", return_value="account-a"):
+            first = threading.Thread(target=lambda: results.append(self.deliver(submit)))
+            first.start()
+            for _ in range(100):
+                if called: break
+                time.sleep(0.005)
+            results.append(self.deliver(submit))
+            barrier.set(); first.join(3)
+        self.assertEqual(called, [1])
+        self.assertEqual([x["state"] for x in results], ["unconfirmed", "unconfirmed"])
+
+    def test_matching_old_or_incoming_text_never_confirms(self):
+        row = {"serverId": "12345", "createTime": int(time.time()), "isSend": 0, "fullText": "fixture"}
+        for rows in ([row], [{**row, "isSend": 1, "createTime": 1}]):
+            self.cfg["delivery_outbox"] = str(self.root / (str(len(list(self.root.iterdir()))) + ".sqlite3"))
+            with patch.object(bridge, "_active_account", return_value="account-a"), \
+                 patch.object(bridge, "_reader_get", side_effect=[{"success": True, "messages": []}] + [{"success": True, "messages": rows}] * 3), \
+                 patch.object(bridge, "_hook_post", return_value={"ret": 0}), patch.object(bridge.time, "sleep"):
+                result = bridge.wechat_hook_send_text("fixture", self.cfg, self.recipient)
+            self.assertEqual(result["state"], "unconfirmed")
+
+    def test_failed_history_prevents_native_submission(self):
+        with patch.object(bridge, "_active_account", return_value="account-a"), \
+             patch.object(bridge, "_reader_get", return_value={"messages": []}):
+            result = bridge.wechat_hook_send_text("fixture", self.cfg, self.recipient)
+        self.assertEqual(result["state"], "rejected")
+        self.assertFalse(result["attempted"])
+
+    def test_watcher_does_not_switch_channel_or_claim_pushed(self):
+        job = bridge.Job("fixture", 10, self.cfg)
+        job.target = self.recipient
+        job.result = {"ok": True, "stdout": "fixture", "stderr": "", "elapsed": 0}
+        job.done.set()
+        with patch.object(bridge, "_notify_mode", return_value="all"), patch.object(bridge.time, "sleep"), \
+             patch.object(bridge, "wechat_hook_send_text", return_value={"state": "unconfirmed", "attempted": True, "code": "LOST"}) as send:
+            bridge._watch_job(job, self.cfg)
+        self.assertEqual(send.call_count, 1)
+        self.assertFalse(job.pushed)
+        with patch.dict(bridge.JOBS, {job.id: job}, clear=True):
+            text = bridge.tool_job_status({"job_id": job.id}, self.cfg)
+        self.assertIn("unconfirmed", text)
+        self.assertNotIn("结果已由电脑直接发到微信", text)
+
+    def test_job_restores_without_restarting_or_retargeting(self):
+        job = bridge.Job("fixture", 10, self.cfg)
+        job.target = self.recipient
+        job.persist()  # crash before a result was saved
+        restored = bridge._restore_job(job.id, self.cfg)
+        self.assertTrue(restored.done.is_set())
+        self.assertEqual(restored.target, self.recipient)
+        self.assertFalse(restored.pushed)
+        self.assertEqual(restored.delivery["state"], "needs_review")
+        self.assertIn("JOB_INTERRUPTED", restored.result["stderr"])
+        self.assertFalse(restored.thread.is_alive())
+
+    def test_image_hook_failure_never_falls_back_ui(self):
+        file = self.root / "fixture.png"; file.write_bytes(b"synthetic-image")
+        with patch.object(bridge, "_pick_target", return_value=self.recipient), \
+             patch.object(bridge, "wechat_hook_send_image", return_value={"state": "unconfirmed", "code": "LOST"}):
+            result = bridge.call_tool({"name": "send_image", "arguments": {"path": str(file)}}, self.cfg)
+        self.assertTrue(result["isError"])
+        self.assertIn("unconfirmed", result["content"][0]["text"])
+
+    def test_no_target_image_returns_only_to_request(self):
+        file = self.root / "fixture.png"; file.write_bytes(b"synthetic-image")
+        with patch.object(bridge, "wechat_hook_send_image", side_effect=AssertionError("not a direct send")):
+            result = bridge.call_tool({"name": "send_image", "arguments": {"path": str(file)}}, self.cfg)
+        self.assertFalse(result["isError"])
+        self.assertEqual(result["content"][0]["type"], "image")
+
+    def test_download_capability_is_file_scoped_expires_and_cannot_control(self):
+        file = self.root / "fixture.txt"; file.write_text("download fixture", encoding="utf-8")
+        link = urlparse(bridge.share_file(file, self.cfg)); query = parse_qs(link.query)
+        self.assertNotIn(self.cfg["token"], link.geturl())
+        name = link.path.removeprefix("/files/")
+        self.assertTrue(bridge._download_allowed(name, query))
+        self.assertFalse(bridge._download_allowed("other.txt", query))
+        self.assertFalse(bridge._download_allowed("../" + name, query))
+        self.assertFalse(bridge._download_allowed(name, {"token": [self.cfg["token"]]}))
+        with patch.object(bridge.time, "time", return_value=int(query["expires"][0]) + 1):
+            self.assertFalse(bridge._download_allowed(name, query))
+        server = ThreadingHTTPServer(("127.0.0.1", 0), type("FixtureHandler", (bridge.BridgeHandler,), {"cfg": self.cfg}))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        self.addCleanup(connection.close)
+        connection.request("GET", link.path + "?" + link.query)
+        response = connection.getresponse(); self.assertEqual(response.status, 200)
+        self.assertEqual(response.read(), b"download fixture")
+        for route in ("/health?token=" + query["download"][0], "/sse?token=" + query["download"][0]):
+            connection.request("GET", route)
+            response = connection.getresponse(); self.assertEqual(response.status, 403); response.read()
+        connection.request("POST", "/mcp", body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+                           headers={"Authorization": "Bearer " + query["download"][0], "Content-Type": "application/json"})
+        response = connection.getresponse(); self.assertEqual(response.status, 403); response.read()
+        connection.request("GET", link.path + "?token=" + self.cfg["token"])
+        response = connection.getresponse(); self.assertEqual(response.status, 403); response.read()
 
 
 if __name__ == "__main__":
