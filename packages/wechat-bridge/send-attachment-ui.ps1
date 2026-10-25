@@ -34,6 +34,7 @@ public class XzsWechatMediaWindow {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int command);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr handle, IntPtr after, int x, int y, int width, int height, uint flags);
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr handle, uint command);
   public struct RECT { public int Left, Top, Right, Bottom; }
 }
 '@
@@ -69,13 +70,24 @@ public class XzsWechatMediaWindow {
     if ($all.Count -gt 4000) { Fail 'WECHAT_ATTACHMENT_UI_TARGET_UNREADABLE' }
     return ,$all
   }
-  function Check-Target {
-    if ([XzsWechatMediaWindow]::GetForegroundWindow() -ne $script:mainHandle) { Fail 'WECHAT_ATTACHMENT_UI_WINDOW_CHANGED' }
+  function Check-Window {
+    $foreground=[XzsWechatMediaWindow]::GetForegroundWindow()
+    $previewOwner=$foreground
+    if ($script:visual -and $script:submitted) {
+      for($i=0;$i -lt 8 -and $previewOwner -ne [IntPtr]::Zero -and $previewOwner -ne $script:mainHandle;$i++){$previewOwner=[XzsWechatMediaWindow]::GetWindow($previewOwner,4)}
+    }
+    if ($foreground -ne $script:mainHandle -and $previewOwner -ne $script:mainHandle) { Fail 'WECHAT_ATTACHMENT_UI_WINDOW_CHANGED' }
     $currentOwner = Get-Process -Id $root.Current.ProcessId -ErrorAction Stop
     if ($currentOwner.ProcessName -ne 'Weixin' -or $currentOwner.StartTime.ToUniversalTime().Ticks -ne $ownerStart) { Fail 'WECHAT_ATTACHMENT_UI_WINDOW_CHANGED' }
     $rect = New-Object XzsWechatMediaWindow+RECT
     [void][XzsWechatMediaWindow]::GetWindowRect($script:mainHandle, [ref]$rect)
     if ($rect.Right - $rect.Left -lt 600 -or $rect.Bottom - $rect.Top -lt 400) { Fail 'WECHAT_ATTACHMENT_UI_TARGET_UNREADABLE' }
+  }
+  function Check-Target {
+    Check-Window
+    if ($script:visual) { Assert-VisualTarget; return }
+    $rect = New-Object XzsWechatMediaWindow+RECT
+    [void][XzsWechatMediaWindow]::GetWindowRect($script:mainHandle, [ref]$rect)
     $matches = 0
     foreach ($element in (Get-Elements)) {
       $properties = $element.Current
@@ -86,6 +98,7 @@ public class XzsWechatMediaWindow {
     if ($matches -ne 1) { Fail 'WECHAT_ATTACHMENT_UI_TARGET_UNREADABLE' }
   }
   function Find-Input {
+    if ($script:visual) { Find-VisualInput; return }
     $rect = $root.Current.BoundingRectangle
     $matches = New-Object System.Collections.ArrayList
     foreach ($element in (Get-Elements)) {
@@ -111,8 +124,25 @@ public class XzsWechatMediaWindow {
     if ($file.PSIsContainer -or ($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or $file.Length -ne [long]$request.size -or $file.Name -cne $request.name) { Fail 'WECHAT_ATTACHMENT_INTEGRITY_FAILED' }
     if ((Get-FileHash -LiteralPath $request.path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $request.sha256) { Fail 'WECHAT_ATTACHMENT_INTEGRITY_FAILED' }
   }
-  # Never search and assume the first result is the intended person. The owner
-  # opens the selected chat; an exact, readable header is required throughout.
+  # Qt 5 in WeChat 4.1.10.27 exposes only its root to UIA. Use the local Chinese
+  # OCR adapter for that verified client, keeping exact global target mapping.
+  $script:visual = (Get-Elements).Count -le 2
+  if ($script:visual) {
+    if ($owner.MainModule.FileVersionInfo.FileVersion -ne '4.1.10.27') { Fail 'WECHAT_ATTACHMENT_UI_TARGET_UNREADABLE' }
+    . (Join-Path $PSScriptRoot 'wechat-visual-ui.ps1')
+    Initialize-VisualWechat
+    $foreground=[XzsWechatMediaWindow]::GetForegroundWindow()
+    $foregroundOwner=[uint32]0
+    $foregroundThread=[XzsWechatVisual]::GetWindowThreadProcessId($foreground,[ref]$foregroundOwner)
+    $ourThread=[XzsWechatVisual]::GetCurrentThreadId()
+    $attached=$foregroundThread -ne 0 -and $foregroundThread -ne $ourThread
+    if($attached){[void][XzsWechatVisual]::AttachThreadInput($ourThread,$foregroundThread,$true)}
+    try {[void][XzsWechatVisual]::SetForegroundWindow($script:mainHandle)}
+    finally {if($attached){[void][XzsWechatVisual]::AttachThreadInput($ourThread,$foregroundThread,$false)}}
+    Start-Sleep -Milliseconds 250
+    Select-VisualChat
+  }
+  # Never assume the first search result is the intended person.
   Check-Target
   $inputElement = Find-Input
   Check-File
@@ -128,13 +158,20 @@ public class XzsWechatMediaWindow {
   [void]$files.Add($request.path)
   [System.Windows.Forms.Clipboard]::SetFileDropList($files)
   if (-not [System.Windows.Forms.Clipboard]::ContainsFileDropList()) { Fail 'WECHAT_ATTACHMENT_UI_CLIPBOARD_FAILED' }
-  $inputElement.SetFocus()
+  if (-not $script:visual) { $inputElement.SetFocus() }
   Check-Target
+  $clipboardFiles=[System.Windows.Forms.Clipboard]::GetFileDropList()
+  if ($clipboardFiles.Count -ne 1 -or $clipboardFiles[0] -cne $request.path) { Fail 'WECHAT_ATTACHMENT_UI_CLIPBOARD_FAILED' }
   # The first paste is the submission boundary; it is never repeated.
   $script:submitted = $true
   [System.Windows.Forms.SendKeys]::SendWait('^v')
   Start-Sleep -Milliseconds 1200
   Check-Target
+  if ($script:visual) {
+    Submit-VisualPreview
+    Emit @{type='result';submitted=$true}
+    exit 0
+  }
   $sendName = [string][char]0x53D1 + [string][char]0x9001
   $buttons = New-Object System.Collections.ArrayList
   $previewCount = 0

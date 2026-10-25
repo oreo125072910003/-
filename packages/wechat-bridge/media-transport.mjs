@@ -202,7 +202,7 @@ export function createWechatMediaTransport({ dataDir, signal, assertReady, verif
         try {
           native = await nativeRunner(Object.freeze({ path: attachment.path, name: attachment.name, sha256: attachment.sha256,
             size: attachment.size, mime: attachment.mime, mediaType: attachment.mediaType, deliveryId: attachment.deliveryId,
-            targetName: target.name, targetWxid: target.wxid, account: identity.account }), { signal:taskSignal, beforeSubmit });
+            targetName: target.name, targetWxid: target.wxid, kind: attachment.kind, account: identity.account }), { signal:taskSignal, beforeSubmit });
         } catch (error) {
           if (error?.attempted === false && INPUT_PREFLIGHT_CODES.has(error?.code)) attempt.attempted = false;
           throw error;

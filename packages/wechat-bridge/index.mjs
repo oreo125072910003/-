@@ -318,11 +318,14 @@ export function createWechatBridge({
     if (!name || name !== matches[0].displayName) throw fault('WECHAT_ATTACHMENT_UI_TARGET_UNREADABLE');
     // UI Automation exposes a title, not a stable chat ID. Every title/alias
     // must be globally unique across private chats and groups before granting UI.
-    const contacts = await ownAdapter.reader('/api/v1/contacts?keyword=' + encodeURIComponent(name) + '&limit=100&refresh=1');
-    if (!Array.isArray(contacts?.contacts) || contacts.contacts.length >= 100) throw fault('WECHAT_ATTACHMENT_TARGET_AMBIGUOUS');
-    const named = contacts.contacts.filter(item => [item?.remark, item?.displayName, item?.nickname,...(Array.isArray(item?.aliases)?item.aliases:[])].some(value => value === name));
+    const titleKey = value => typeof value === 'string' ? value.replace(/\s/gu, '') : '';
+    // The recognizer inserts spaces between Chinese words. Search by the first
+    // non-space character so a real alias containing spaces is also considered.
+    const contacts = await ownAdapter.reader('/api/v1/contacts?keyword=' + encodeURIComponent([...titleKey(name)][0]) + '&limit=500&refresh=1');
+    if (!Array.isArray(contacts?.contacts) || contacts.contacts.length >= 500) throw fault('WECHAT_ATTACHMENT_TARGET_AMBIGUOUS');
+    const named = contacts.contacts.filter(item => [item?.remark, item?.displayName, item?.nickname,...(Array.isArray(item?.aliases)?item.aliases:[])].some(value => titleKey(value) === titleKey(name)));
     if (named.length !== 1 || named[0].username !== wxid || named[0].ambiguous === true) throw fault('WECHAT_ATTACHMENT_TARGET_AMBIGUOUS');
-    const sessionAliases=(sessions?.sessions??[]).filter(item=>[item?.displayName,...(Array.isArray(item?.aliases)?item.aliases:[])].includes(name));
+    const sessionAliases=(sessions?.sessions??[]).filter(item=>[item?.displayName,...(Array.isArray(item?.aliases)?item.aliases:[])].some(value=>titleKey(value)===titleKey(name)));
     if(sessionAliases.length!==1||sessionAliases[0].username!==wxid)throw fault('WECHAT_ATTACHMENT_TARGET_AMBIGUOUS');
     if (!current(signal) || adapter !== ownAdapter) throw fault('WECHAT_NOT_CONNECTED');
     assertTarget(kind, target);

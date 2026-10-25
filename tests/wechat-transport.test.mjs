@@ -253,12 +253,13 @@ test('multiple matching text or sticker rows never confirm a single submission',
 });
 
 test('attachment UI refuses identical private/group titles and aliases before runner invocation',async t=>{
-  for(const alias of [false,true])await t.test(alias?'group alias':'group title',async child=>{
+  for(const mode of ['title','alias','spaced-title','spaced-alias'])await t.test(mode,async child=>{
+    const alias=mode.includes('alias'),otherName=mode.startsWith('spaced-')?'sa me':'same';
     let runnerCalls=0;
     const f=await fixture(child,{healthIntervalMs:60000,mediaNativeRunner:async()=>{runnerCalls++;throw Error('must not run');}});
     f.backend.contacts=[{username:'wxid_test_friend',displayName:'same',conversationId:101},
-      {username:'test@chatroom',displayName:alias?'different':'same',aliases:alias?['same']:[],conversationId:202}];
-    f.backend.sessions=[{username:'wxid_test_friend',displayName:'same',conversationId:101},{username:'test@chatroom',displayName:alias?'different':'same',conversationId:202}];
+      {username:'test@chatroom',displayName:alias?'different':otherName,aliases:alias?[otherName]:[],conversationId:202}];
+    f.backend.sessions=[{username:'wxid_test_friend',displayName:'same',conversationId:101},{username:'test@chatroom',displayName:alias?'different':otherName,conversationId:202}];
     const filename=path.join(f.directory,'synthetic.txt'),bytes=Buffer.from('attachment');fsSync.writeFileSync(filename,bytes);
     await f.bridge.start(f.config);await until(()=>f.bridge.getStatus().state==='ready');
     await assert.rejects(f.bridge.sendAttachment({kind:'private',target:'101',path:filename,name:'synthetic.txt',size:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),mime:'text/plain',mediaType:'file',deliveryId:'b'.repeat(64)}),{code:'WECHAT_ATTACHMENT_TARGET_AMBIGUOUS',attempted:false});

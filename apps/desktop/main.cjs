@@ -145,6 +145,7 @@ async function smokeTest(){
   const artifactsDir=process.env.XIAOZHUSHOU_SMOKE_OUTPUT||(app.isPackaged?path.join(smokeRoot,'验收结果'):path.join(projectRoot,'dist','smoke'));
   const mediaNativeScript=app.isPackaged?path.join(process.resourcesPath,'app.asar.unpacked','packages','wechat-bridge','send-attachment-ui.ps1'):path.join(projectRoot,'packages','wechat-bridge','send-attachment-ui.ps1');
   if(!fs.existsSync(mediaNativeScript)||!fs.statSync(mediaNativeScript).isFile())throw Error('微信附件发送脚本未在本机文件系统中展开。');
+  if(!fs.existsSync(path.join(path.dirname(mediaNativeScript),'wechat-visual-ui.ps1')))throw Error('微信界面兼容组件未在本机文件系统中展开。');
   fs.mkdirSync(artifactsDir,{recursive:true});
   const failures=[];window.webContents.on('console-message',details=>{if(details.level==='error')failures.push(details.message);});
   const source=path.join(smokeRoot,'示例资料.txt');fs.writeFileSync(source,'这是用于桌面验收的合成资料。\n数量：3\n状态：待核对\n');
