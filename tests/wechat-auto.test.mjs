@@ -19,7 +19,7 @@ async function fixture(t, { enabled = true, status = 'succeeded', reply = '这�
   fs.writeFileSync(path.join(source, 'state', 'hook', 'native-token.txt'), 'a'.repeat(64));
   const store = await createStore(path.join(data, 'db')), secrets = new Map();
   const state = { clock, callbacks: null, creates: [], cancels: [], sends: [], replies: new Map(), status, reply, stopped: 0,
-    receipt: { receipt: 'wechat-server-id', delivered: 'database-confirmed', message_id: 'synthetic-server-id' } };
+    receipt: { receipt: 'wechat-server-id', delivered: 'database-confirmed', message_id: '9001' } };
   const controller = createWechatController({ store, dataDir: data, secretStore: { get: key => secrets.get(key), set: (key, value) => secrets.set(key, value), delete: key => secrets.delete(key) },
     autoOptions: { now: () => state.clock, pollMs: 5, ...autoOptions },
     bridgeFactory: callbacks => { state.callbacks = callbacks; return {
@@ -159,9 +159,9 @@ test('an echoed automatic text reply does not cancel the next new message in the
   assert.equal((await f.controller.getState()).autoReply.queued, 1);
   f.complete(f.state.creates[0].id);
   await until(() => f.state.sends.length === 1 && f.state.creates.length === 2);
-  // The transport preserves bounded real type-1 text on trusted self events,
-  // allowing the durable auto outbox record to distinguish its own echo.
-  f.emit({ sender_id: '777', outgoing: true, text: f.state.reply });
+  // A confirmed native local ID distinguishes the echo. The same text alone
+  // cannot prove that a later own-send event was automatic.
+  f.emit({ sender_id: '777', outgoing: true, text: f.state.reply,sourceLocalId:'9001' });
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.deepEqual(f.state.cancels, []);
   f.complete(f.state.creates[1].id, '第二条自动回复的完整合成正文。');

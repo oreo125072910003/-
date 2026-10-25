@@ -79,7 +79,7 @@ export function createWechatAutoResponder({
       // Revalidate only when this reply reaches that slot, never retry a submit.
       assertCurrent(job);
       notify({ state: 'sending', detail: '正在向原会话发送 DSH 已完成的完整回复。' });
-      return send(job.message, text);
+      return send(job.message, text, { signal: job.controller.signal, beforeSubmit: () => assertCurrent(job) });
     });
     sendTail = operation.catch(() => {});
     return operation;

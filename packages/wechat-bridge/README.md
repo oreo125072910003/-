@@ -20,7 +20,13 @@ await bridge.stop();
 
 `start` 先完成原生健康和账号检查，返回 connecting；SSE 建立并再次检查账号后，`onState` 发出 ready。读信源和原生发送器必须已经在本机运行，本模块不会下载、注入或自动启动它们。仅接受字面地址 `http://127.0.0.1:端口`。当前发送器支持的匹配微信版本仍是 `4.1.10.27`，不绕过兼容性校验。
 
-消息回调得到 `{self_id, kind, conversation_id, conversation_name, sender_id, text, message_id, sender_name, time}`。ID 均为数字字符串，time 为 Unix 秒数；消息和错误不输出原始账号 wxid。收信仅转交白名单中的新消息，过滤本人发送，并在重连期间保持有界的会话级去重。只有回调持久化成功才进入去重表；回调失败会明显报错并停收，手动重连后同一消息仍有资格保存。应用重启后的去重由产品持久化层继续保证。
+消息回调得到 `{self_id, kind, conversation_id, conversation_name, sender_id, text, message_id, sender_name, time}`。ID 均为数字字符串，time 为 Unix 秒数；消息和错误不输出原始账号 wxid。收信仅转交白名单中的新消息，并在重连期间保持有界的会话级去重。本人外发另以 `outgoing:true` 事件转交，须由 reader 提供账号绑定并通过 bridge 的原会话映射核对，只用于人工接管、不作为来信或创建任务。自动回声只有已确认账本和精确原生 localId 对上才忽略；仅同文不算自动回声。只有回调持久化成功才进入去重表；回调失败会明显报错并停收，手动重连后同一消息仍有资格保存。应用重启后的去重由产品持久化层继续保证。
+
+自动文字发送把该任务的 `signal` 和进程内 `beforeSubmit` 回调一路传给 HookOneBot。账号、会话和基线查询后及 `/SendTextMsg` 调用的最后同步边界检查接管、撤权、断开、超时和关闭状态；这些检查不能由 OneBot JSON 参数替代。已经提交之后的接管仍保留实际待核对或已确认记录，不标作未发送，也不自动重发。文字/表情回执查询前后、命中后和复用确认结果前，重新核对同一账号与映射；多个匹配候选不得确认。
+
+新 reader 的 `/api/v1/product/subscription` 提供仅本机 bearer 认证、账号范围、版本 1 和 revision CAS 的产品名单订阅。产品先 GET 读取，再 POST 完整候选，验证实际返回的账号/名单/版本/期限后才标记 `connection.readerConfiguration.state:'applied'`。它不覆盖旧项目 JSON；reader 合并尚未到期的产品租约与旧名单，供实际轮询、历史、sessions 和图片读取使用。连接健康检查续租 90 秒，断开尽力提交本订阅的空名单；异常退出或网络失败后的旧租约最多保留至到期，产品端撤权立即阻止收发。其他产品订阅和旧项目名单不受撤权影响。
+
+旧 reader、未知 schema、提交失败或读回不符均报告 `pending` 和“名单待配置，新增会话尚未接收”。旧组件未声明 `selfEvents:'account-conversation-v1'` 时，产品自动回复暂停并说明原因；已支持的手动链路保留。只保存设置或复制源码不等于真实运行 reader 已更新。
 
 `getProfile()` 先读取原组件 native `POST /GetSelfProfile`；用户当前的 `scripts/native-hook` 自建运行实现没有该路由，收到 404 时会用 reader `/api/v1/contacts` 查询精确匹配 ownWxid 的本人记录。返回 `{id,name,wxid,alias,source:'native'|'reader-contact'}`，只保留本人的实际昵称与账号标识，不返回电话、邮箱或地区。其 wxid 必须与已核验 reader 的 ownWxid 一致，查询前后均核对账号。`onState` 和 `getStatus()` 的 `account` 使用同一对象，便于界面显示当前登录者；无法读取时返回 `account:null` 与 `profileError`，不会用“小助手”等配置昵称冒充微信昵称。当前源码没有可验证的头像字段，因此不伪造头像 URL。
 
@@ -32,7 +38,7 @@ SSE、JSON、单条消息和去重集合有大小上限，网络请求有超时�
 
 ## 离线验证
 
-`node --test tests/wechat-transport.test.mjs` 使用真实 localhost HTTP/SSE 替身，覆盖收信、去重、重连、白名单、发送回执、未确认发送防重、断开、换号、发送前账号核对、版本与 URL 限制和事件大小。未向真实微信发送消息，真实客户端联调尚待完成。
+`node --test tests/wechat-transport.test.mjs` 使用真实 localhost HTTP/SSE 替身，覆盖收信、去重、重连、白名单、发送回执、未确认发送防重、断开、换号、发送前账号核对、版本与 URL 限制和事件大小。新增 `tests/reader_regression.py` 执行源码真实 producer、poll、名单策略与 HTTP Handler，数据库/消息源为合成对象，既不启动真实 Reader，也不读取真实账号库。测试把该 producer 的输出送入 SSE、controller、auto 和 HookOneBot，逐个覆盖最后提交前的 9 个等待点；文字 busy 的显式重试同时由产品账本与实际 renderer 函数验证。测试需 Python，可通过 `XZS_TEST_PYTHON` 指定解释器。未向真实微信发送消息，真实客户端联调尚待完成。
 
 ## 打包依赖
 
@@ -49,4 +55,4 @@ SSE、JSON、单条消息和去重集合有大小上限，网络请求有超时�
 
 没有第三方 npm 依赖。旧 `HookOneBot` 的可选 `configuration` 只在产品构造时使用；未传入时保留原有配置文件读取路径和启动行为。
 
-产品控制器现已接入会话目录、实际历史入库、图片手动读取、表情候选/手动发送以及无来信时直接向选定授权会话发送。主动提交使用 `request_` 加 UUID 的稳定 requestId，保存 outbox 后才交给 transport，重复提交会复用记录；原生回执未确认时不自动重发。数据库版本 3 事务迁移保留版本 2 的旧消息与发送记录，并允许直接发送的 outbox 不关联入站消息。不会为直接发送伪造一条入站消息。
+产品控制器现已接入会话目录、实际历史入库、图片手动读取、表情候选/手动发送以及无来信时直接向选定授权会话发送。主动提交使用 `request_` 加 UUID 的稳定 requestId，保存 outbox 后才交给 transport，重复提交会复用记录；原生回执未确认时不自动重发。只有明确受信错误码并且 `attempted:false` 才记 `rejected`；用户下一次明确点击发送才产生新 requestId。旧请求仍返回原记录，不自动重试。数据库版本 3 事务迁移保留版本 2 的旧消息与发送记录，并允许直接发送的 outbox 不关联入站消息。不会为直接发送伪造一条入站消息。

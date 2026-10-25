@@ -863,7 +863,8 @@ async function searchWechatStickers() {
 }
 function wechatSendRequest(key, value) {
   const previous = state.wechatSendAttempts[key];
-  if (previous?.value === value) return previous.requestId;
+  const delivery = previous && state.wechat?.outbox?.find(item => item.requestId === previous.requestId);
+  if (previous?.value === value && previous.status !== 'rejected' && delivery?.status !== 'rejected') return previous.requestId;
   const requestId = `request_${crypto.randomUUID()}`;
   state.wechatSendAttempts[key] = { value, requestId };
   return requestId;
@@ -920,6 +921,7 @@ async function sendWechatSticker(stickerId) {
   const requestId = wechatSendRequest(key, stickerId);
   await wechatOperation('sticker-send', async () => {
     const outgoing = await invoke('sendWechatSticker', { kind: conversation.kind, target: conversation.id, stickerId, requestId });
+    if (state.wechatSendAttempts[key]?.requestId === requestId) state.wechatSendAttempts[key].status = outgoing?.status;
     if (['sent', 'succeeded', 'delivered'].includes(outgoing?.status)) { delete state.wechatSendAttempts[key]; notify('表情已提交微信接口，请核对微信中的发送结果。'); }
     else notify(outgoing?.error || '请查看表情发送状态，结果待核对时不会重复提交。', true);
   });
@@ -987,6 +989,8 @@ async function sendWechatReply(event) {
   await wechatOperation('send', async () => {
     const outgoing = typeof api?.sendWechatMessage === 'function' ? await invoke('sendWechatMessage', { kind: conversation.kind, target: conversation.id, text, requestId }) : message ? await invoke('sendWechatReply', { messageId: message.id, text }) : null;
     if (!outgoing) throw new Error('当前服务尚未提供主动写信接口。');
+    if (state.wechatSendAttempts[key]?.requestId === requestId) state.wechatSendAttempts[key].status = outgoing.status;
+    if (outgoing.status === 'rejected') { notify(outgoing.error || '确认未发送；处理后再次点击发送可重试。', true); return; }
     if (outgoing?.status === 'failed') { notify(outgoing.error || '发送失败，请查看发送记录。', true); return; }
     if (outgoing?.status === 'sent' || outgoing?.status === 'succeeded' || outgoing?.status === 'delivered') {
       if (state.selectedConversationKey === conversation.key && state.wechatReply.trim() === text) state.wechatReply = '';

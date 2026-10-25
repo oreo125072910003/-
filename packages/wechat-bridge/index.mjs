@@ -56,6 +56,7 @@ function validateConfig(value) {
     readerToken: value.readerToken, nativeToken: value.nativeToken,
     allowedPrivate: ids(value.allowedPrivate ?? []), allowedGroups: ids(value.allowedGroups ?? []),
     stickerSettings: value.stickerSettings === undefined ? undefined : structuredClone(value.stickerSettings),
+    subscriptionId: /^[a-f0-9-]{36}$/.test(value.connectionId??'') ? value.connectionId : crypto.randomUUID(),
   };
 }
 
@@ -75,6 +76,7 @@ export function createWechatBridge({
   let activeSend = null, startPending = null, stopPending = null, generation = 0, receiveFailed = false;
   let account = null;
   let mediaTransport = null;
+  let readerConfiguration = {state:'pending',version:1,detail:'名单待配置，新增会话尚未接收。'};
   const controllers = new Set(), seen = new Map();
 
   function publish(next) {
@@ -90,6 +92,7 @@ export function createWechatBridge({
     return code;
   }
   function markError(error, { disconnected = false } = {}) {
+    if(accountLocked&&codeOf(error)!=='WECHAT_PROFILE_ACCOUNT_MISMATCH')error=fault('WECHAT_ACCOUNT_CHANGED');
     const code = report(error);
     publish({ state: 'error', detail: code, accountVerified: false,
       ...(disconnected ? { readerConnected: false } : {}) });
@@ -122,15 +125,40 @@ export function createWechatBridge({
     const found = await ownAdapter.originalCheckNative();
     if (!current(signal) || adapter !== ownAdapter) throw fault('WECHAT_NOT_CONNECTED');
     if (accountLocked) throw fault('WECHAT_ACCOUNT_CHANGED');
-    if (identity && (found.account !== identity.account || found.selfId !== identity.selfId)) {
+    if (identity && (found.account !== identity.account || found.selfId !== identity.selfId || ownAdapter.ownWxid !== identity.selfWxid)) {
       accountLocked = true;
       ownAdapter.status.hook_account_verified = false;
       streamController?.abort();
+      markError(fault('WECHAT_ACCOUNT_CHANGED'),{disconnected:true});
       throw fault('WECHAT_ACCOUNT_CHANGED');
     }
-    identity ??= found;
+    identity ??= {...found,selfWxid:ownAdapter.ownWxid};
     if (!current()) throw fault('WECHAT_NOT_CONNECTED');
     return found;
+  }
+
+  async function syncReaderConfiguration() {
+    const ownAdapter=adapter, signal=lifecycle?.signal, ownedConfig=config;
+    try {
+      const identity=await verify();
+      if(ownAdapter.readerStatus?.productSubscriptionVersion!==1)throw fault('READER_SUBSCRIPTION_UNSUPPORTED');
+      const route='/api/v1/product/subscription', subscriptionId=ownedConfig.subscriptionId;
+      const prior=await ownAdapter.reader(route+'?subscriptionId='+encodeURIComponent(subscriptionId));
+      const valid=value=>value?.version===1&&value.subscriptionId===subscriptionId&&value.accountDirectory===identity.account&&value.ownWxid===ownAdapter.ownWxid&&Number.isSafeInteger(value.revision)&&value.revision>=0&&Array.isArray(value.private)&&Array.isArray(value.groups);
+      if(!valid(prior))throw fault('READER_SUBSCRIPTION_INVALID');
+      if(!current(signal)||adapter!==ownAdapter)throw fault('WECHAT_NOT_CONNECTED');
+      const body={version:1,subscriptionId,expectedRevision:prior.revision,accountDirectory:identity.account,ownWxid:ownAdapter.ownWxid,private:ownedConfig.allowedPrivate,groups:ownedConfig.allowedGroups};
+      const applied=await ownAdapter.json(ownedConfig.readerBaseUrl,route,{method:'POST',headers:{Authorization:'Bearer '+ownedConfig.readerToken,'Content-Type':'application/json'},body:JSON.stringify(body)});
+      if(!valid(applied)||applied.revision<=prior.revision||JSON.stringify(applied.private)!==JSON.stringify(body.private)||JSON.stringify(applied.groups)!==JSON.stringify(body.groups)||!Number.isFinite(applied.expiresAt)||applied.expiresAt*1000<=Date.now())throw fault('READER_SUBSCRIPTION_INVALID');
+      await verify();
+      if(!current(signal)||adapter!==ownAdapter)throw fault('WECHAT_NOT_CONNECTED');
+      readerConfiguration={state:'applied',version:1,revision:applied.revision,expiresAt:new Date(applied.expiresAt*1000).toISOString(),
+        digest:crypto.createHash('sha256').update(JSON.stringify([identity.account,body.private,body.groups])).digest('hex'),detail:'授权名单已同步到当前账号的消息读取服务。'};
+    } catch(error) {
+      if(!current(signal)||adapter!==ownAdapter)return;
+      readerConfiguration={state:'pending',version:1,code:codeOf(error),detail:'名单待配置，新增会话尚未接收；请更新或核对消息读取组件后重新连接。'};
+    }
+    if(current(signal)&&adapter===ownAdapter)publish({readerConfiguration:{...readerConfiguration},selfEventsVerified:ownAdapter.readerStatus?.selfEvents==='account-conversation-v1'});
   }
 
   async function getProfile() {
@@ -288,11 +316,14 @@ export function createWechatBridge({
     if (matches.length !== 1 || matches[0].ambiguous === true) throw fault('WECHAT_ATTACHMENT_TARGET_AMBIGUOUS');
     const name = displayText(matches[0].displayName, 200);
     if (!name || name !== matches[0].displayName) throw fault('WECHAT_ATTACHMENT_UI_TARGET_UNREADABLE');
-    const contacts = await ownAdapter.reader('/api/v1/contacts?kind=' + (kind === 'group' ? 'groups' : 'private') +
-      '&keyword=' + encodeURIComponent(name) + '&limit=100&refresh=1');
+    // UI Automation exposes a title, not a stable chat ID. Every title/alias
+    // must be globally unique across private chats and groups before granting UI.
+    const contacts = await ownAdapter.reader('/api/v1/contacts?keyword=' + encodeURIComponent(name) + '&limit=100&refresh=1');
     if (!Array.isArray(contacts?.contacts) || contacts.contacts.length >= 100) throw fault('WECHAT_ATTACHMENT_TARGET_AMBIGUOUS');
-    const named = contacts.contacts.filter(item => [item?.remark, item?.displayName, item?.nickname].some(value => value === name));
+    const named = contacts.contacts.filter(item => [item?.remark, item?.displayName, item?.nickname,...(Array.isArray(item?.aliases)?item.aliases:[])].some(value => value === name));
     if (named.length !== 1 || named[0].username !== wxid || named[0].ambiguous === true) throw fault('WECHAT_ATTACHMENT_TARGET_AMBIGUOUS');
+    const sessionAliases=(sessions?.sessions??[]).filter(item=>[item?.displayName,...(Array.isArray(item?.aliases)?item.aliases:[])].includes(name));
+    if(sessionAliases.length!==1||sessionAliases[0].username!==wxid)throw fault('WECHAT_ATTACHMENT_TARGET_AMBIGUOUS');
     if (!current(signal) || adapter !== ownAdapter) throw fault('WECHAT_NOT_CONNECTED');
     assertTarget(kind, target);
     return { wxid, name };
@@ -310,14 +341,15 @@ export function createWechatBridge({
         payload.groupName !== undefined && (typeof payload.groupName !== 'string' || payload.groupName.length > 200)) return null;
     // The original adapter filters our own outgoing events. Retain only a
     // verified self-send signal here so a human reply can stop a pending AI reply.
-    if(payload.event==='message.new'&&payload.isSend===true&&payload.talkerId===adapter.ownWxid){
+    if(payload.event==='message.new'&&payload.isSend===true&&payload.talkerId===adapter.ownWxid&&payload.accountWxid===adapter.ownWxid){
       try{
         const kind=payload.sessionId.includes('@chatroom')?'group':'private';
         const target=String(conversationId(payload.sessionId,payload.groupName,payload.conversationId));
         if(!adapter.allowed(kind,target))return null;
         const self=String(onebotId(adapter.ownWxid)),time=Number(payload.timestamp);
         if(!Number.isSafeInteger(time)||time<0)return null;
-        return{self_id:self,kind,conversation_id:target,sender_id:self,outgoing:true,text:payload.type===1?payload.content.slice(0,16000):'',message_id:String(payload.rawid),time};
+        return{self_id:self,kind,conversation_id:target,sender_id:self,outgoing:true,text:payload.type===1?payload.content.slice(0,16000):'',message_id:String(payload.rawid),time,
+          ...(/^[1-9]\d{0,31}$/.test(payload.sourceLocalId??'')?{sourceLocalId:payload.sourceLocalId}:{})};
       }catch{return null;}
     }
     const event = adapter.incoming(payload);
@@ -344,6 +376,16 @@ export function createWechatBridge({
 
   async function accept(payload, signal) {
     if (!current(signal) || accountLocked || receiveFailed || !state.accountVerified) return;
+    if(payload?.isSend===true){
+      const ownAdapter=adapter;
+      try {
+        await verify();
+        const kind=payload.sessionId?.includes('@chatroom')?'group':'private', target=String(payload.conversationId??'');
+        const wxid=await ownAdapter.resolveTarget(kind,target);
+        await verify();
+        if(!current(signal)||adapter!==ownAdapter||wxid!==payload.sessionId||payload.accountWxid!==ownAdapter.ownWxid)return;
+      } catch { return; }
+    }
     const message = normalized(payload);
     if (!message) return;
     const key = [message.self_id, message.kind, message.conversation_id, message.message_id].join(':');
@@ -448,7 +490,9 @@ export function createWechatBridge({
     loop = null; healthPending = null; activeSend = null; lifecycle = null;
     adapter = null; config = null; identity = null; accountLocked = false; receiveFailed = false; account = null;
     mediaTransport = null;
-    publish({ state: 'offline', detail: 'WECHAT_DISCONNECTED', accountVerified: false, readerConnected: false, selfId: undefined, account: null, profileError: undefined });
+    readerConfiguration={state:'pending',version:1,detail:'名单待配置，新增会话尚未接收；连接并同步当前账号后生效。'};
+    publish({ state: 'offline', detail: 'WECHAT_DISCONNECTED', accountVerified: false, readerConnected: false, selfId: undefined, account: null, profileError: undefined,
+      readerConfiguration:{...readerConfiguration},selfEventsVerified:false });
   }
 
   function start(value) {
@@ -490,6 +534,7 @@ export function createWechatBridge({
       const found = await verify();
       if (epoch !== generation) throw fault('WECHAT_START_CANCELLED');
       publish({ selfId: String(found.selfId), accountVerified: true });
+      await syncReaderConfiguration();
       try { await getProfile(); }
       catch (error) {
         if (epoch !== generation) throw fault('WECHAT_START_CANCELLED');
@@ -503,7 +548,7 @@ export function createWechatBridge({
       loop = reconnect(signal);
       healthTimer = setInterval(() => {
         if (healthPending || !current(signal) || accountLocked || receiveFailed) return;
-        healthPending = verify().then(() => {
+        healthPending = verify().then(syncReaderConfiguration).then(() => {
           if (current(signal) && !accountLocked && !receiveFailed && adapter.status.reader_connected) publish({ state: 'ready', detail: 'WECHAT_READY', accountVerified: true, readerConnected: true });
         }).catch(error => {
           if (current(signal)) { markError(error); streamController?.abort(); }
@@ -521,33 +566,44 @@ export function createWechatBridge({
 
   function stop() {
     if (stopPending) return stopPending;
+    const release=config&&identity&&readerConfiguration.state==='applied'?{
+      url:config.readerBaseUrl+'/api/v1/product/subscription',token:config.readerToken,
+      body:{version:1,subscriptionId:config.subscriptionId,expectedRevision:readerConfiguration.revision,
+        accountDirectory:identity.account,ownWxid:adapter?.ownWxid,private:[],groups:[]},
+    }:null;
     generation++;
     lifecycle?.abort(); streamController?.abort();
     for (const controller of controllers) controller.abort();
     const pending = startPending;
     const job = (async () => {
       if (pending) await pending.catch(() => {});
+      // Release only our separate lease. A failed/CAS-conflicting release is
+      // bounded by the reader's expiry and never rewrites legacy configuration.
+      if(release)try{
+        const response=await fetchImpl(release.url,{method:'POST',redirect:'error',signal:AbortSignal.timeout(1000),headers:{Authorization:'Bearer '+release.token,'Content-Type':'application/json'},body:JSON.stringify(release.body)});
+        await response.body?.cancel();
+      }catch{}
       await stopInternal(); return { ...state };
     })().finally(() => { if (stopPending === job) stopPending = null; });
     stopPending = job;
     return job;
   }
 
-  async function sendText({ kind, target, text, deliveryId } = {}) {
+  async function sendText({ kind, target, text, deliveryId, beforeSubmit, signal } = {}) {
     if (!['private', 'group'].includes(kind) || typeof target !== 'string' || !/^[1-9]\d{0,15}$/.test(target) ||
         typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > 16_000 ||
         !/^[a-f0-9]{64}$/.test(deliveryId ?? '')) throw fault('WECHAT_SEND_ARGUMENT_INVALID');
     return performSend({ action: kind === 'group' ? 'send_group_msg' : 'send_private_msg',
       params: { [kind === 'group' ? 'group_id' : 'user_id']: target,
-        message: [{ type: 'text', data: { text } }], wechatagent_delivery_id: deliveryId } }, deliveryId);
+        message: [{ type: 'text', data: { text } }], wechatagent_delivery_id: deliveryId } }, deliveryId, {beforeSubmit,signal});
   }
 
-  async function sendSticker({ kind, target, id, deliveryId } = {}) {
+  async function sendSticker({ kind, target, id, deliveryId, beforeSubmit, signal } = {}) {
     assertTarget(kind, target);
     if (!/^[a-f0-9]{64}$/.test(id ?? '') || !/^[a-f0-9]{64}$/.test(deliveryId ?? '')) throw fault('INVALID_STICKER_REFERENCE');
     return performSend({ action: kind === 'group' ? 'send_group_msg' : 'send_private_msg',
       params: { [kind === 'group' ? 'group_id' : 'user_id']: target,
-        message: [{ type: 'wechat_sticker', data: { id } }], wechatagent_delivery_id: deliveryId } }, deliveryId);
+        message: [{ type: 'wechat_sticker', data: { id } }], wechatagent_delivery_id: deliveryId } }, deliveryId, {beforeSubmit,signal});
   }
 
   async function sendAttachment(value = {}) {
@@ -559,21 +615,32 @@ export function createWechatBridge({
     finally { if (activeSend === job) activeSend = null; }
   }
 
-  async function performSend(request, deliveryId) {
+  async function performSend(request, deliveryId, context = {}) {
     if (!current() || !adapter || accountLocked || receiveFailed || state.state !== 'ready' || !state.accountVerified || !state.readerConnected) {
-      throw fault(accountLocked ? 'WECHAT_ACCOUNT_CHANGED' : 'WECHAT_NOT_READY');
+      throw Object.assign(fault(accountLocked ? 'WECHAT_ACCOUNT_CHANGED' : 'WECHAT_NOT_READY'),{attempted:false});
     }
-    if (activeSend) throw fault('SENDER_BUSY');
-    const ownAdapter = adapter;
-    const job = ownAdapter.action(request);
+    if (activeSend) throw Object.assign(fault('SENDER_BUSY'),{attempted:false});
+    const ownAdapter = adapter, ownSignal=lifecycle.signal, epoch=generation;
+    const beforeSubmit=()=>{
+      if(epoch!==generation||adapter!==ownAdapter||!current(ownSignal)||accountLocked||receiveFailed||state.state!=='ready'||!state.accountVerified||!state.readerConnected)throw fault('WECHAT_NOT_READY');
+      context.beforeSubmit?.();
+      if(context.signal?.aborted)throw fault('WECHAT_SEND_CANCELLED');
+    };
+    const job = ownAdapter.action(request,{beforeSubmit,signal:context.signal});
     activeSend = job;
     try {
       const response = await job;
       if (response.status !== 'ok' || response.retcode !== 0) {
         const error = fault(codeOf({ message: response.message }));
-        if (response.data?.attempted === true) error.attempted = true;
+        if (typeof response.data?.attempted === 'boolean') error.attempted = response.data.attempted;
         throw error;
       }
+      // A response cannot confirm a previous connection after stop/reconnect or
+      // an account change observed while the receipt was being returned.
+      try {
+        await verify();
+        if(epoch!==generation||adapter!==ownAdapter||!current(ownSignal)||accountLocked)throw fault('WECHAT_ACCOUNT_CHANGED');
+      } catch(error) { throw Object.assign(fault(codeOf(error)),{attempted:true}); }
       return { ...response.data, deliveryId };
     } finally { if (activeSend === job) activeSend = null; }
   }

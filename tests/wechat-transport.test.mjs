@@ -4,15 +4,21 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import http from 'node:http';
+import { Readable } from 'node:stream';
 import crypto from 'node:crypto';
+import fsSync from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createWechatBridge } from '../packages/wechat-bridge/index.mjs';
 import { readConversationSettings, updateConversationSettings } from '../packages/wechat-bridge/conversation-settings.mjs';
+import { createWechatController } from '../apps/service/wechat.mjs';
+import { createStore } from '../packages/storage/index.mjs';
 
 const readerToken = 'reader-test-token-never-real', nativeToken = 'a'.repeat(64);
 const until = async predicate => {
   const end = Date.now() + 3_000;
-  while (!predicate()) { if (Date.now() > end) throw Error('CONDITION_TIMEOUT'); await delay(10); }
+  while (!await predicate()) { if (Date.now() > end) throw Error('CONDITION_TIMEOUT'); await delay(10); }
 };
 
 async function fixture(t, options = {}) {
@@ -27,12 +33,24 @@ async function fixture(t, options = {}) {
     const url = new URL(request.url, 'http://127.0.0.1');
     const native = url.pathname === '/WeChatAgent/health' || url.pathname === '/SendTextMsg' || url.pathname === '/GetSelfProfile' || url.pathname === '/SendStickerMsg';
     if (request.headers.authorization !== 'Bearer ' + (native ? nativeToken : readerToken)) return json(response, {}, 401);
+    await backend.onRequest?.(url,request);
     if (url.pathname === '/api/v1/reader/status' && backend.holdStatus) {
       backend.statusPending = true; request.on('close', () => { backend.statusClosed = true; }); return;
     }
     if (url.pathname === '/api/v1/reader/status') return json(response, {
       backend: 'weflow-cli-nt', ownWxid: backend.own, accountDirectory: backend.account,
+      productSubscriptionVersion: backend.subscriptionSupported ? 1 : undefined, selfEvents:backend.legacySelfEvents?undefined:'account-conversation-v1',
     });
+    if(url.pathname==='/api/v1/product/subscription'&&backend.subscriptionSupported){
+      if(request.method==='POST'){
+        let body='';for await(const chunk of request)body+=chunk;
+        const candidate=JSON.parse(body);backend.subscriptionPosts=(backend.subscriptionPosts??0)+1;
+        if(backend.rejectSubscription)return json(response,{success:false},409);
+        backend.subscription={version:1,subscriptionId:candidate.subscriptionId,accountDirectory:backend.account.toLowerCase(),ownWxid:backend.own,
+          revision:(backend.subscription?.revision??0)+1,private:candidate.private,groups:candidate.groups,expiresAt:Date.now()/1000+90};
+      }
+      return json(response,backend.subscription??{version:1,subscriptionId:url.searchParams.get('subscriptionId'),accountDirectory:backend.account.toLowerCase(),ownWxid:backend.own,revision:0,private:[],groups:[],expiresAt:0});
+    }
     if (url.pathname === '/WeChatAgent/health') return json(response, {
       integration: 'WeChatAgent-1', backend: 'wechat-hook', version: backend.version, startupState: 'ready',
       databaseAccounts: [backend.hookAccount ?? backend.account],
@@ -49,7 +67,7 @@ async function fixture(t, options = {}) {
       { username: 'test@chatroom', displayName: '测试群', conversationId: 202 },
       { username: backend.own, displayName: '本人', conversationId: 303 },
     ] });
-    if (url.pathname === '/api/v1/sessions') return json(response, { sessions: [
+    if (url.pathname === '/api/v1/sessions') return json(response, { sessions: backend.sessions ?? [
       { username: 'wxid_test_friend', displayName: '测试朋友', conversationId: 101 },
       { username: 'test@chatroom', displayName: '测试群', conversationId: 202 },
     ] });
@@ -70,6 +88,7 @@ async function fixture(t, options = {}) {
       if (backend.reject) return json(response, { ret: -1 });
       backend.rows.push({ localId: backend.sends, serverId: backend.confirm ? '9001' : '0',
         localType: 1, isSend: true, createTime: Math.floor(Date.now() / 1000), fullText: sent.msg });
+      backend.afterSubmit?.();
       return json(response, { ret: 0 });
     }
     if (url.pathname === '/SendStickerMsg') {
@@ -78,6 +97,7 @@ async function fixture(t, options = {}) {
       const sent = JSON.parse(body); backend.sends++;
       backend.rows.push({ localId: backend.sends, serverId: backend.confirm ? '9001' : '0',
         localType: 47, isSend: true, createTime: Math.floor(Date.now() / 1000), stickerMd5: sent.sticker.md5 });
+      backend.afterSubmit?.();
       return json(response, { ret: 0 });
     }
     json(response, {}, 404);
@@ -86,8 +106,17 @@ async function fixture(t, options = {}) {
   const base = 'http://127.0.0.1:' + server.address().port;
   const messages = [], states = [], errors = [];
   const bridge = createWechatBridge({
-    onMessage: message => { if (backend.callbackFails) throw Error('SIMULATED_DATABASE_FAILURE'); messages.push(message); }, onState: state => states.push(state), onError: error => errors.push(error),
-    reconnectDelayMs: 20, healthIntervalMs: 25, requestTimeoutMs: 300, receiptTimeoutMs: 80, pollMs: 10,
+    // A fresh HTTP client per request prevents global fetch pooling from
+    // reusing a just-closed fixture when Windows recycles an ephemeral port.
+    fetchImpl:(url,options={})=>new Promise((resolve,reject)=>{
+      const request=http.request(url,{method:options.method??'GET',headers:options.headers,signal:options.signal,agent:false},response=>{
+        resolve(new Response(Readable.toWeb(response),{status:response.statusCode,headers:response.headers}));
+      });
+      request.on('error',reject);request.end(options.body);
+    }),
+    onMessage: message => { if (backend.callbackFails) throw Error('SIMULATED_DATABASE_FAILURE'); messages.push(message);return backend.eventHandler?.(message); }, onState: state => {states.push(state);backend.stateHandler?.(state);}, onError: error => errors.push(error),
+    reconnectDelayMs: 20, healthIntervalMs: options.healthIntervalMs??25, requestTimeoutMs: 300, receiptTimeoutMs: 80, pollMs: 10,
+    ...(options.mediaNativeRunner?{mediaNativeRunner:options.mediaNativeRunner}:{}),
   });
   const config = { dataDir: directory, readerBaseUrl: base, hookBaseUrl: base, readerToken, nativeToken,
     allowedPrivate: ['101'], allowedGroups: ['202'] };
@@ -95,12 +124,163 @@ async function fixture(t, options = {}) {
   const message = (extra = {}) => ({ event: 'message.new', type: 1, content: '你好，小助手', sessionId: 'wxid_test_friend',
     talkerId: 'wxid_test_friend', conversationId: 101, rawid: '7001', sourceName: '测试朋友', timestamp: 1_793_000_000, ...extra });
   t.after(async () => {
+    await backend.cleanup?.();
     await bridge.stop(); for (const client of clients) client.destroy();
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     await fs.rm(directory, { recursive: true, force: true });
   });
   return { bridge, config, backend, messages, states, errors, emit, message, clients, directory };
 }
+
+async function productFixture(t,options={}) {
+  const f=await fixture(t,{healthIntervalMs:60000,...options});
+  const source=path.join(f.directory,'legacy'),data=path.join(f.directory,'product');
+  fsSync.mkdirSync(path.join(source,'config'),{recursive:true});fsSync.mkdirSync(path.join(source,'state','hook'),{recursive:true});
+  fsSync.writeFileSync(path.join(source,'config','wechatagent.json'),JSON.stringify({runtime:{sender:'wechat-hook',weflowMode:'nt'},hook:{baseUrl:f.config.hookBaseUrl,expectedVersion:'4.1.10.27'},wechat:{whitelist:{private:['101'],groups:['202']}}}));
+  fsSync.writeFileSync(path.join(source,'state','wechat-io-config.json'),JSON.stringify({reader_base_url:f.config.readerBaseUrl,reader_token:readerToken}));
+  fsSync.writeFileSync(path.join(source,'state','hook','native-token.txt'),nativeToken);
+  const store=await createStore(path.join(data,'db')),secrets=new Map();
+  const controller=createWechatController({store,dataDir:data,secretStore:{get:key=>secrets.get(key),set:(key,value)=>secrets.set(key,value),delete:key=>secrets.delete(key)},
+    bridgeFactory:callbacks=>{f.backend.eventHandler=callbacks.onMessage;f.backend.stateHandler=callbacks.onState;return f.bridge;},
+    createTask:async()=>{const id='task_'+crypto.randomUUID();store.createTask({id,title:'synthetic',prompt:'synthetic',kind:'agent',status:'succeeded',createdAt:new Date().toISOString(),workspace:path.join(data,'tasks',id),attachments:[]});return store.getTask(id);},
+    getTask:id=>({task:store.getTask(id)}),readTaskReply:async()=> '完整的自动回复',cancelTask:async()=>{},autoOptions:{pollMs:5},
+  });
+  f.backend.cleanup=async()=>{await controller.close();store.close();};
+  await controller.importConnection(source);await controller.saveSettings({autoReply:true});await controller.connect();
+  await until(()=>f.bridge.getStatus().state==='ready');await delay(30);
+  return {...f,controller,store};
+}
+
+test('actual reader producer and poll policies retain self events and apply account scoped product grants', () => {
+  const script=fileURLToPath(new URL('./reader_regression.py',import.meta.url));
+  const result=execFileSync(process.env.XZS_TEST_PYTHON??'python',[script],{encoding:'utf8',windowsHide:true,env:{...process.env,PYTHONIOENCODING:'utf-8'},stdio:['ignore','pipe','pipe']});
+  assert.equal(result,'');
+});
+
+test('real producer self event traverses SSE and cancels automatic sending at every awaited pre-submit barrier', async t => {
+  const payload=JSON.parse(execFileSync(process.env.XZS_TEST_PYTHON??'python',[fileURLToPath(new URL('./reader_regression.py',import.meta.url)),'--payload'],{encoding:'utf8',windowsHide:true,env:{...process.env,PYTHONIOENCODING:'utf-8'}}));
+  const barriers=[['/api/v1/reader/status',1],['/WeChatAgent/health',1],['/api/v1/sessions',1],['/api/v1/messages',1],
+    ['/api/v1/reader/status',2],['/WeChatAgent/health',2],['/api/v1/sessions',2],['/api/v1/reader/status',3],['/WeChatAgent/health',3]];
+  for(const [route,nth] of barriers)await t.test(route+' #'+nth,async child=>{
+    const f=await productFixture(child);let release,count=0,held=false;
+    const gate=new Promise(resolve=>{release=resolve;});
+    f.backend.onRequest=async url=>{if(url.pathname===route&&++count===nth){held=true;await gate;}};
+    try{
+      f.emit(f.message({timestamp:Math.floor(Date.now()/1000)}));
+      await until(()=>held);
+      f.emit({...payload,timestamp:Math.floor(Date.now()/1000)});
+      await until(()=>f.messages.some(message=>message.outgoing));
+    }finally{release();}
+    await until(()=>f.controller.getState().then(state=>state.autoReply.active===0));
+    const result=await f.controller.getState();
+    assert.equal(f.backend.sends,0,'human takeover before native submission must submit zero times');
+    assert.equal(result.outbox.length,1);assert.equal(result.outbox[0].status,'rejected');
+  });
+});
+
+test('human takeover after submission retains the one attempted delivery without retrying', async t => {
+  const f=await productFixture(t);f.backend.confirm=false;
+  f.backend.afterSubmit=()=>f.emit(f.message({isSend:true,accountWxid:f.backend.own,talkerId:f.backend.own,rawid:'90029',timestamp:Math.floor(Date.now()/1000),content:'本人接管'}));
+  f.emit(f.message({timestamp:Math.floor(Date.now()/1000)}));
+  await until(()=>f.backend.sends===1);
+  await until(()=>f.controller.getState().then(state=>state.autoReply.active===0));
+  const outbox=(await f.controller.getState()).outbox;
+  assert.equal(outbox[0].status,'unconfirmed');assert.equal(f.backend.sends,1);
+});
+
+test('a reader without verified native takeover production pauses automatic replies visibly',async t=>{
+  const f=await productFixture(t,{legacySelfEvents:true});f.emit(f.message({timestamp:Math.floor(Date.now()/1000)}));await delay(40);
+  const result=await f.controller.getState();
+  assert.equal(result.connection.selfEventsVerified,false);assert.equal(result.autoReply.state,'paused');
+  assert.match(result.autoReply.detail,/人工接管事件，自动回复已暂停/);assert.equal(result.autoReply.active,0);assert.equal(f.backend.sends,0);
+});
+
+test('pre-submit text busy is rejected, only a new explicit request submits after the active operation',async t=>{
+  const f=await productFixture(t);let release,held=false;
+  const activeId='request_'+crypto.randomUUID(),busyId='request_'+crypto.randomUUID(),retryId='request_'+crypto.randomUUID();
+  const gate=new Promise(resolve=>{release=resolve;});
+  f.backend.onRequest=async url=>{if(url.pathname==='/api/v1/messages'&&!held){held=true;await gate;}};
+  const active=f.controller.sendMessage({kind:'private',target:'101',text:'合成在途文字',requestId:activeId});
+  let rejected;
+  try{
+    await until(()=>held);
+    rejected=await f.controller.sendMessage({kind:'private',target:'101',text:'主人明确重试文字',requestId:busyId});
+    assert.equal(rejected.status,'rejected');assert.match(rejected.error,/确认未发送/);assert.equal(f.backend.sends,0);
+  }finally{release();}
+  assert.equal((await active).status,'delivered');
+  assert.equal((await f.controller.sendMessage({kind:'private',target:'101',text:'主人明确重试文字',requestId:busyId})).id,rejected.id);
+  assert.equal(f.backend.sends,1);
+  const retry=await f.controller.sendMessage({kind:'private',target:'101',text:'主人明确重试文字',requestId:retryId});
+  assert.equal(retry.status,'delivered');assert.equal(f.backend.sends,2);
+  assert.notEqual(retry.id,rejected.id);
+});
+
+test('non-success native bodies remain uncertain and the same delivery never resubmits',async t=>{
+  const f=await fixture(t,{reject:true,healthIntervalMs:60000});await f.bridge.start(f.config);await until(()=>f.bridge.getStatus().state==='ready');
+  const send={kind:'private',target:'101',text:'合成正文',deliveryId:'c'.repeat(64)};
+  await assert.rejects(f.bridge.sendText(send),{code:'NATIVE_SEND_REJECTED',attempted:true});
+  await assert.rejects(f.bridge.sendText(send),{code:'TEXT_DELIVERY_UNCONFIRMED',attempted:true});
+  assert.equal(f.backend.sends,1);
+});
+
+test('text and sticker receipts reject account swaps before, during and after receipt matching', async t => {
+  for(const media of ['text','sticker'])for(const phase of ['accepted','query','match'])await t.test(media+':'+phase,async child=>{
+    const f=await fixture(child,{healthIntervalMs:60000});await f.bridge.start(f.config);await until(()=>f.bridge.getStatus().state==='ready');
+    let queries=0,statusReads=0;
+    const swap=()=>{f.backend.account='wxid_changed_0001';f.backend.own='wxid_changed_0001';};
+    if(phase==='accepted')f.backend.afterSubmit=swap;
+    f.backend.onRequest=url=>{
+      if(url.pathname==='/api/v1/messages'&&++queries===2&&phase==='query')swap();
+      if(f.backend.sends&&url.pathname==='/api/v1/reader/status'&&++statusReads===5&&phase==='match')swap();
+    };
+    const send={kind:'private',target:'101',deliveryId:'f'.repeat(64),text:'合成回执正文',id:'d'.repeat(64)};
+    await assert.rejects(media==='text'?f.bridge.sendText(send):f.bridge.sendSticker(send));
+    assert.equal(f.backend.sends,1);
+    const ledger=path.join(f.directory,'state','text-deliveries');
+    if(fsSync.existsSync(ledger))for(const file of fsSync.readdirSync(ledger))assert.notEqual(JSON.parse(fsSync.readFileSync(path.join(ledger,file))).state,'confirmed');
+    if(media==='sticker')assert.equal(JSON.parse(fsSync.readFileSync(path.join(f.directory,'state','sticker-delivery-pending.json'))).attempts.length,1);
+    await assert.rejects(media==='text'?f.bridge.sendText(send):f.bridge.sendSticker(send));assert.equal(f.backend.sends,1);
+  });
+});
+
+test('multiple matching text or sticker rows never confirm a single submission',async t=>{
+  for(const media of ['text','sticker'])await t.test(media,async child=>{
+    const f=await fixture(child,{healthIntervalMs:60000});await f.bridge.start(f.config);await until(()=>f.bridge.getStatus().state==='ready');
+    f.backend.afterSubmit=()=>f.backend.rows.push({...f.backend.rows[0],localId:2,serverId:'9002'});
+    const send={kind:'private',target:'101',deliveryId:'f'.repeat(64),text:'合成相同正文',id:'d'.repeat(64)};
+    await assert.rejects(media==='text'?f.bridge.sendText(send):f.bridge.sendSticker(send));assert.equal(f.backend.sends,1);
+  });
+});
+
+test('attachment UI refuses identical private/group titles and aliases before runner invocation',async t=>{
+  for(const alias of [false,true])await t.test(alias?'group alias':'group title',async child=>{
+    let runnerCalls=0;
+    const f=await fixture(child,{healthIntervalMs:60000,mediaNativeRunner:async()=>{runnerCalls++;throw Error('must not run');}});
+    f.backend.contacts=[{username:'wxid_test_friend',displayName:'same',conversationId:101},
+      {username:'test@chatroom',displayName:alias?'different':'same',aliases:alias?['same']:[],conversationId:202}];
+    f.backend.sessions=[{username:'wxid_test_friend',displayName:'same',conversationId:101},{username:'test@chatroom',displayName:alias?'different':'same',conversationId:202}];
+    const filename=path.join(f.directory,'synthetic.txt'),bytes=Buffer.from('attachment');fsSync.writeFileSync(filename,bytes);
+    await f.bridge.start(f.config);await until(()=>f.bridge.getStatus().state==='ready');
+    await assert.rejects(f.bridge.sendAttachment({kind:'private',target:'101',path:filename,name:'synthetic.txt',size:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),mime:'text/plain',mediaType:'file',deliveryId:'b'.repeat(64)}),{code:'WECHAT_ATTACHMENT_TARGET_AMBIGUOUS',attempted:false});
+    assert.equal(runnerCalls,0);
+  });
+});
+
+test('reader configuration reports applied version and exact lists or explicit pending on old/failed/unknown reader',async t=>{
+  for(const mode of ['applied','unsupported','rejected','unknown-version'])await t.test(mode,async child=>{
+    const f=await fixture(child,{healthIntervalMs:60000,subscriptionSupported:mode!=='unsupported',rejectSubscription:mode==='rejected'});
+    if(mode==='unknown-version')f.backend.subscription={version:2};
+    await f.bridge.start(f.config);await until(()=>f.bridge.getStatus().state==='ready');
+    const status=f.bridge.getStatus().readerConfiguration;
+    assert.equal(status.state,mode==='applied'?'applied':'pending');
+    if(mode==='applied'){
+      assert.equal(status.version,1);assert(status.revision>0);assert.match(status.digest,/^[a-f0-9]{64}$/);
+      assert.deepEqual(f.backend.subscription.private,f.config.allowedPrivate);assert.deepEqual(f.backend.subscription.groups,f.config.allowedGroups);
+      await f.bridge.stop();assert.deepEqual(f.backend.subscription.private,[]);assert.deepEqual(f.backend.subscription.groups,[]);
+    }else assert.match(status.detail,/名单待配置，新增会话尚未接收/);
+    if(mode==='unknown-version')assert.equal(f.backend.subscriptionPosts??0,0,'unknown schema must never be overwritten');
+  });
+});
 
 test('WeChat bridge normalizes allowlisted SSE messages and deduplicates reconnections', async t => {
   const f = await fixture(t);
@@ -132,7 +312,7 @@ test('WeChat retains trusted group wake metadata and distinguishes verified huma
   const group={sessionId:'test@chatroom',talkerId:'wxid_group_friend',conversationId:202,groupName:'测试群'};
   f.emit(f.message({...group,rawid:'7101',content:'@小助手\u2005请接着聊'}));
   f.emit(f.message({...group,rawid:'7102',type:49,content:'引用回复',quoteReply:{version:1,reply:'继续',reference:{senderId:'wxid_self_0001',senderName:'本人',conversationId:'test@chatroom',messageId:'9001',time:'',kind:'1',text:'之前的答复'}}}));
-  f.emit(f.message({rawid:'7103',talkerId:'wxid_self_0001',isSend:true}));
+  f.emit(f.message({rawid:'7103',talkerId:'wxid_self_0001',accountWxid:'wxid_self_0001',isSend:true}));
   f.emit(f.message({rawid:'7104',talkerId:'wxid_imposter',isSend:true}));
   f.emit(f.message({rawid:'7105',talkerId:'wxid_self_0001',isSend:true,conversationId:999}));
   await until(()=>f.messages.length===3);

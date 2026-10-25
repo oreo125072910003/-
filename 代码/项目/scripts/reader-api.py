@@ -189,8 +189,17 @@ def appmsg_card(local_type, raw):
 
 def push_payload(talker, message, names, own_wxid, identity=None, account_dir=None):
     sender = message.get('senderUsername', '')
-    if message.get('isSend'):
-        return None
+    # Emit a minimal, account-bound own-send event for human takeover. Do not
+    # resolve outgoing media or turn the event into an incoming assistant turn.
+    if message.get('isSend') in (True, 1) or sender and clean_account_wxid(sender) == clean_account_wxid(own_wxid):
+        if not own_wxid or not identity or sender and clean_account_wxid(sender) != clean_account_wxid(own_wxid):
+            return None
+        rawid = hashlib.sha256(json.dumps([talker, message.get('serverId'), message.get('localId'), message.get('createTime')], separators=(',', ':')).encode()).hexdigest()
+        return {'event': 'message.new', 'isSend': True, 'accountWxid': own_wxid,
+            'sessionId': talker, 'conversationId': identity, 'talkerId': own_wxid, 'rawid': rawid,
+            'sourceLocalId': str(message.get('localId') or ''), 'sourceServerId': str(message.get('serverId') or ''),
+            'type': 1, 'content': str(message.get('fullText') or message.get('content') or message.get('parsedContent') or '')[:16000],
+            'timestamp': message.get('createTime', 0)}
     local_type = int(message.get('localType') or 0)
     # appmsg 的高 32 位存子类型(链接=4/5),低 32 位才是 49;以前整体比较会漏掉所有 appmsg。
     kind = local_type & 0xFFFFFFFF
@@ -281,6 +290,8 @@ class Reader:
         self.refresh_names()
         self.clients = set()
         self.lock = threading.Lock()
+        self.product_subscriptions = {}
+        self.product_subscription_revision = 0
         self.seen = OrderedDict()
         self.started_at = int(time.time())
         self.last_poll = 0
@@ -426,6 +437,7 @@ class Reader:
             if keyword not in (talker + name + ''.join(aliases)).casefold():
                 continue
             contacts.append({'username': talker, 'displayName': name,
+                'aliases': list(aliases),
                 **({'conversationId': self.conversation_id(talker)} if hasattr(self, 'group_bindings') else {}),
                 'ambiguous': group and counts[self.conversation_id(talker)] > 1})
             if len(contacts) >= limit:
@@ -445,10 +457,53 @@ class Reader:
 
     def selected_talkers(self):
         settings = read_json(self.settings_file)
-        project = read_json(self.root / 'config' / 'wechatagent.json')
+        whitelist = self.effective_whitelist()
         bindings = getattr(self, 'group_bindings', None)
         candidates = dict.fromkeys([*settings.get('messagePushFilterList', []), *self.names, *(bindings.records if bindings else {})])
-        return [talker for talker in candidates if self.conversation_id(talker) in map(str, project['wechat']['whitelist']['groups' if group_username(talker) else 'private'])]
+        return [talker for talker in candidates if self.conversation_id(talker) in whitelist['groups' if group_username(talker) else 'private']]
+
+    def effective_whitelist(self):
+        # Legacy files remain authoritative for the legacy app. Product grants
+        # are separately leased to this verified account and never rewrite them.
+        old = read_json(self.root / 'config' / 'wechatagent.json')['wechat']['whitelist']
+        result = {kind: set(map(str, old[kind])) for kind in ('private', 'groups')}
+        with self.lock:
+            for key, entry in list(self.product_subscriptions.items()):
+                if entry['expiresAt'] <= time.time() or entry['accountDirectory'] != self.account.name.lower() or entry['ownWxid'] != self.own_wxid:
+                    del self.product_subscriptions[key]
+                    continue
+                for kind in result:
+                    result[kind].update(entry[kind])
+        return result
+
+    def product_subscription(self, subscription_id, candidate=None):
+        if not isinstance(subscription_id, str) or not re.fullmatch(r'[a-f0-9-]{36}', subscription_id):
+            raise ValueError('PRODUCT_SUBSCRIPTION_INVALID')
+        with self.lock:
+            entry = self.product_subscriptions.get(subscription_id)
+            if entry and (entry['expiresAt'] <= time.time() or entry['accountDirectory'] != self.account.name.lower() or entry['ownWxid'] != self.own_wxid):
+                del self.product_subscriptions[subscription_id]
+                entry = None
+            if candidate is not None:
+                if not isinstance(candidate, dict) or set(candidate) != {'version', 'subscriptionId', 'expectedRevision', 'accountDirectory', 'ownWxid', 'private', 'groups'} or candidate['version'] != 1 or candidate['subscriptionId'] != subscription_id:
+                    raise ValueError('PRODUCT_SUBSCRIPTION_INVALID')
+                if candidate['accountDirectory'] != self.account.name.lower() or candidate['ownWxid'] != self.own_wxid:
+                    raise PermissionError('PRODUCT_SUBSCRIPTION_ACCOUNT_MISMATCH')
+                if type(candidate['expectedRevision']) is not int or candidate['expectedRevision'] != (entry['revision'] if entry else 0):
+                    raise ValueError('PRODUCT_SUBSCRIPTION_REVISION_CONFLICT')
+                for kind in ('private', 'groups'):
+                    values = candidate[kind]
+                    if not isinstance(values, list) or len(values) > 200 or any(not isinstance(value, str) or not re.fullmatch(r'[1-9]\d{0,15}', value) or int(value)>9007199254740991 for value in values) or len(set(values)) != len(values):
+                        raise ValueError('PRODUCT_SUBSCRIPTION_INVALID')
+                self.product_subscription_revision += 1
+                entry = {key: candidate[key] for key in ('private', 'groups', 'accountDirectory', 'ownWxid')}
+                entry.update(revision=self.product_subscription_revision, expiresAt=time.time()+90)
+                self.product_subscriptions[subscription_id] = entry
+            return {'success': True, 'version': 1, 'subscriptionId': subscription_id,
+                'accountDirectory': self.account.name.lower(), 'ownWxid': self.own_wxid,
+                'revision': entry['revision'] if entry else 0,
+                'private': list(entry['private']) if entry else [], 'groups': list(entry['groups']) if entry else [],
+                'expiresAt': entry['expiresAt'] if entry else 0}
 
     def messages(self, talker, limit=100, from_time=None):
         if talker not in self.selected_talkers():
@@ -493,9 +548,8 @@ class Reader:
             'type': 1 if '@chatroom' in talker else 0} for talker in self.selected_talkers()][:limit]
 
     def image_talker_allowed(self, talker):
-        config = read_json(self.root / 'config' / 'wechatagent.json')
         kind = 'groups' if '@chatroom' in talker else 'private'
-        return self.conversation_id(talker) in map(str, config['wechat']['whitelist'][kind])
+        return self.conversation_id(talker) in self.effective_whitelist()[kind]
 
     def image_row(self, talker, descriptor):
         if not self.image_talker_allowed(talker):
@@ -856,7 +910,7 @@ class Reader:
                         payload = self.make_payload(talker, message)
                         if not payload or payload['rawid'] in self.seen:
                             continue
-                        if payload['type'] in (3, 47):
+                        if not payload.get('isSend') and payload['type'] in (3, 47):
                             image_id = self.register_image(talker, payload)
                             if not image_id:
                                 continue
@@ -1013,7 +1067,10 @@ def serve(reader, port, token):
                         'lastError': reader.last_error, 'subscribers': len(reader.clients), 'pushed': reader.pushed,
                         'ownWxid': reader.own_wxid, 'accountDirectory': reader.account.name,
                         'imagesRegistered': len(reader.image_index), 'lastImageError': reader.image_error,
+                        'productSubscriptionVersion': 1, 'selfEvents': 'account-conversation-v1',
                         'groupIdentity': 'account-chatroom-v1', 'lastGroupMetadataError': getattr(reader, 'group_metadata_error', '')})
+                elif url.path == '/api/v1/product/subscription':
+                    self.respond(reader.product_subscription(query.get('subscriptionId', [''])[0]))
                 elif re.fullmatch(r'/api/v1/images/[a-f0-9]{64}', url.path):
                     self.respond(reader.resolve_image(url.path.rsplit('/', 1)[1]))
                 elif re.fullmatch(r'/api/v1/stickers/pool-review/[a-f0-9]{64}',url.path):
@@ -1044,6 +1101,22 @@ def serve(reader, port, token):
             supplied = self.headers.get('Authorization', '').removeprefix('Bearer ')
             if not token or not hmac.compare_digest(supplied, token):
                 self.respond({'success': False, 'error': 'Unauthorized'}, 401)
+                return
+            if self.path == '/api/v1/product/subscription':
+                try:
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 16384:
+                        self.close_connection = True
+                        raise ValueError('PRODUCT_SUBSCRIPTION_INVALID')
+                    self.connection.settimeout(5)
+                    body = json.loads(self.rfile.read(size))
+                    self.respond(reader.product_subscription(body.get('subscriptionId'), body))
+                except PermissionError:
+                    self.respond({'success': False, 'error': 'PRODUCT_SUBSCRIPTION_ACCOUNT_MISMATCH'}, 409)
+                except (ValueError, TypeError, AttributeError):
+                    self.respond({'success': False, 'error': 'PRODUCT_SUBSCRIPTION_INVALID_OR_CONFLICT'}, 409)
+                except Exception:
+                    self.respond({'success': False, 'error': 'PRODUCT_SUBSCRIPTION_UNAVAILABLE'}, 503)
                 return
             if self.path.startswith('/api/v1/stickers/manage/'):
                 try:
