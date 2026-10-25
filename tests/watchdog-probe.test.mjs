@@ -11,8 +11,8 @@ test('watchdog read-only probe verifies runtime hash and tool count without star
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'xzs-watchdog-probe-'));
   const data='synthetic bridge source';fs.writeFileSync(path.join(dir,'mcp_dsh_server.py'),data);
   fs.writeFileSync(path.join(dir,'config.json'),JSON.stringify({token:'synthetic-watchdog-control-token'}));
-  const sha=createHash('sha256').update(data).digest('hex');let mismatch=false,requests=0;
-  const server=http.createServer((req,res)=>{requests++;assert.equal(req.url,'/health');assert.equal(req.headers.authorization,'Bearer synthetic-watchdog-control-token');res.setHeader('content-type','application/json');res.end(JSON.stringify({ok:true,sourceSha256:mismatch?'wrong':sha,toolCount:16}));});
+  const sha=createHash('sha256').update(data).digest('hex');let mismatch=false,requests=0,toolCount=7,computerControlEnabled=false;
+  const server=http.createServer((req,res)=>{requests++;assert.equal(req.url,'/health');assert.equal(req.headers.authorization,'Bearer synthetic-watchdog-control-token');res.setHeader('content-type','application/json');res.end(JSON.stringify({ok:true,sourceSha256:mismatch?'wrong':sha,toolCount,deliveryPolicy:'legacy-control-disabled-v1',controlPolicy:computerControlEnabled?'unsafe-global-control':'no-trusted-session-control-transport-v1'}));});
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
   t.after(async()=>{await new Promise(r=>server.close(r));fs.rmSync(dir,{recursive:true,force:true});});
   async function probe(){
@@ -21,6 +21,8 @@ test('watchdog read-only probe verifies runtime hash and tool count without star
     return await new Promise((resolve,reject)=>{const child=spawn(ps,args,{windowsHide:true});let out='',err='';child.stdout.on('data',b=>out+=b);child.stderr.on('data',b=>err+=b);child.on('error',reject);child.on('close',code=>{if(code!==0)reject(Error(err));else resolve(JSON.parse(out));});});
   }
   const good=await probe();assert.equal(good.healthy,true);assert.equal(good.sourceSha256,sha);assert.equal(good.processesStarted,0);assert.equal(good.processesStopped,0);
-  mismatch=true;assert.equal((await probe()).healthy,false);assert.equal(requests,2);
+  mismatch=true;assert.equal((await probe()).healthy,false);
+  mismatch=false;toolCount=16;assert.equal((await probe()).healthy,false);
+  toolCount=7;computerControlEnabled=true;assert.equal((await probe()).healthy,false);assert.equal(requests,4);
   assert.equal(fs.existsSync(path.join(dir,'watchdog_pcbridge.log')),false);
 });

@@ -19,7 +19,7 @@ function Write-BridgeLog([string]$message) {
 function Test-Bridge {
     try {
         $health = Invoke-RestMethod -Uri ('http://127.0.0.1:{0}/health' -f $Port) -Headers $headers -TimeoutSec 4
-        return ($health.ok -eq $true -and $health.sourceSha256 -eq $sourceHash -and $health.toolCount -eq 16)
+        return ($health.ok -eq $true -and $health.sourceSha256 -eq $sourceHash -and $health.toolCount -eq 7 -and $health.deliveryPolicy -eq 'legacy-control-disabled-v1' -and $health.controlPolicy -eq 'no-trusted-session-control-transport-v1')
     } catch { return $false }
 }
 $sourceStream = [IO.File]::OpenRead($serverFile)
