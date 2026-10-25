@@ -460,3 +460,19 @@ textarea::placeholder, input::placeholder { color: #71847d; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* Keep setup beside real readiness, with one clear action and readable blockers. */
+.capability-setup { border-left: 4px solid var(--green); padding: 18px 22px; margin-bottom: 18px; background: var(--white); }
+.capability-setup h2 { font-size: 19px; margin: 0 0 6px; }
+.capability-setup p { max-width: 72ch; color: var(--muted); }
+.selection-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 12px 0 16px; }
+.selection-toolbar > span { color: var(--muted); font-size: 12px; flex: 1 1 220px; }
+.capability-readiness { display: flex; flex-wrap: wrap; gap: 6px 22px; color: var(--muted); padding: 10px 0; }
+.capability-blockers { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.capability-blockers p { overflow-wrap: anywhere; font-size: 12px; }
+.desktop-computer-panel { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding: 18px; margin: 16px 0; background: var(--green-soft); border: 1px solid var(--line); border-radius: 8px; }
+.desktop-computer-panel > div { flex: 1 1 300px; }
+.desktop-computer-panel h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; }
+.desktop-computer-panel p { margin: 0 0 6px; max-width: 72ch; }
+.desktop-computer-panel small { color: var(--muted); }
+.desktop-computer-panel .desktop-computer-help { flex-basis: 100%; max-width: 80ch; margin: 0; color: var(--ink); }

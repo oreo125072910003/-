@@ -7,11 +7,11 @@ const text = (value, limit) => typeof value === 'string' ? value.slice(0, limit)
 
 export function validateGrants(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['skills', 'tools'].includes(key))) throw fail('DSH_GRANTS_INVALID', '请选择有效的 Harness 技能与工具。');
-  const list = (value, expression) => {
-    if (!Array.isArray(value) || value.length > 64 || value.some(name => typeof name !== 'string' || !expression.test(name)) || new Set(value).size !== value.length) throw fail('DSH_GRANTS_INVALID', '每类最多选择 64 项，名称必须与 Harness 当前清单完全一致，不能重复。');
+  const list = (value, expression, limit) => {
+    if (!Array.isArray(value) || value.length > limit || value.some(name => typeof name !== 'string' || !expression.test(name)) || new Set(value).size !== value.length) throw fail('DSH_GRANTS_INVALID', `最多选择 300 项技能、500 项工具，名称必须与 Harness 当前清单完全一致，不能重复。`);
     return [...value];
   };
-  return { skills: list(input.skills ?? [], SKILL_NAME), tools: list(input.tools ?? [], TOOL_NAME) };
+  return { skills: list(input.skills ?? [], SKILL_NAME, 300), tools: list(input.tools ?? [], TOOL_NAME, 500) };
 }
 function metadata(raw) {
   if (!raw || raw.ok !== true || raw.metadataOnly !== true || !Array.isArray(raw.skills) || !Array.isArray(raw.tools) || raw.skills.length > 300 || raw.tools.length > 500) throw fail('DSH_CATALOG_INVALID', 'Harness 返回的能力清单格式无效。');
@@ -60,7 +60,7 @@ export function createDshAccess({ runtime, settingsProvider, store, onChange } =
   async function getState() {
     const live = await getCatalog(), saved = savedGrants();
     const catalog = live.ok ? live : { ...structuredClone(lastCatalog), ok: false, stale: true, ...(lastError ? { error: { ...lastError } } : {}) };
-    return { source: 'dsh', core: 'dsh', connected, metadataOnly: true, fetchedAt, catalog, saved, ...split(saved, catalog, connected), externalContentInheritsOwner: false };
+    return { source: 'dsh', core: 'dsh', connected, metadataOnly: true, fetchedAt, catalog, saved, ...split(saved, catalog, connected), computerEnabled: store.getSettings().dshDesktopComputerAccess === true, externalContentInheritsOwner: false };
   }
   async function saveGrants(input) {
     const selected = validateGrants(input), catalog = await getCatalog();
@@ -77,10 +77,13 @@ export function createDshAccess({ runtime, settingsProvider, store, onChange } =
   async function grantsForTask({ source } = {}) {
     if (source !== 'desktop') return EMPTY();
     const saved = savedGrants();
-    if (!saved.skills.length && !saved.tools.length) return EMPTY();
+    const computer = store.getSettings().dshDesktopComputerAccess === true;
+    if (!saved.skills.length && !saved.tools.length && !computer) return EMPTY();
     const catalog = await getCatalog();
     if (!catalog.ok) return EMPTY();
-    return split(saved, catalog, true).effective;
+    const effective = split(saved, catalog, true).effective;
+    if (computer) effective.tools = [...new Set([...effective.tools, ...catalog.tools.filter(row => row.computerGrantable && row.name.startsWith('xiaozhushou_')).map(row => row.name)])];
+    return effective;
   }
   return { getCatalog, getState, saveGrants, grantsForTask };
 }

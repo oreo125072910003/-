@@ -10,6 +10,7 @@ import { inspectRuntime } from '../packages/runtime-harness/index.mjs';
 
 const root=fileURLToPath(new URL('../',import.meta.url));
 const metadata=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
+const distribution=process.env.XIAOZHUSHOU_DISTRIBUTION==='1';
 const releaseRoot=path.join(root,'dist','releases',metadata.version);
 const stage=fs.mkdtempSync(path.join(os.tmpdir(),'xiaozhushou-package-'));
 const contractOutput=path.join(root,'代码','合同助手','desktop','out','desktop-release');
@@ -52,10 +53,10 @@ try{
   const appPackage={...metadata,devDependencies:undefined,scripts:undefined};
   fs.writeFileSync(path.join(stage,'package.json'),JSON.stringify(appPackage,null,2)+'\n');
   fs.mkdirSync(path.join(stage,'config'),{recursive:true});
-  const runtime=await inspectRuntime();
+  const runtime=distribution?{available:false}:await inspectRuntime();
   if(runtime.available)fs.writeFileSync(path.join(stage,'config','runtime-locations.json'),JSON.stringify({harnessCommand:runtime.command},null,2)+'\n');
   const wechatLocations=path.join(root,'config','wechat-locations.json');
-  if(fs.existsSync(wechatLocations)){
+  if(!distribution&&fs.existsSync(wechatLocations)){
     const location=JSON.parse(fs.readFileSync(wechatLocations,'utf8')).workspace;
     if(typeof location==='string'&&path.isAbsolute(location))fs.writeFileSync(path.join(stage,'config','wechat-locations.json'),JSON.stringify({workspace:location},null,2)+'\n');
   }

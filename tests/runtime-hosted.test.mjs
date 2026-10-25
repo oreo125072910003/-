@@ -75,6 +75,20 @@ test('host health and protocol probe reuse host login without model request', as
   assert.equal((await probeHostedRuntimeConnection(f.settings)).modelCalled, false);
   assert.equal(f.calls.length, 0);
 });
+test('desktop computer request stops before submission when the live host needs a reload', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'xzs-old-host-'));
+  const tokenFile=path.join(root,'token.txt');await writeFile(tokenFile,'synthetic-test-token-with-40-characters-123456');
+  const routes=[];
+  const server=http.createServer((request,response)=>{
+    routes.push(request.url);response.setHeader('content-type','application/json');
+    response.end(JSON.stringify({ok:true,protocol:'xiaozhushou-harness-host-v1',project:'xiaozhushou',toolPolicy:'product-owner-task-grants-v1',credentialsSource:'harness-existing-login',capabilities:{trustedComputerTasks:true}}));
+  });
+  t.after(async()=>{await new Promise(resolve=>server.close(resolve));await rm(root,{recursive:true,force:true});});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const result=await runHostedTask({prompt:'读取合成文件',workspace:root,settings:{hostedEndpoint:'http://127.0.0.1:'+server.address().port,hostedTokenFile:tokenFile,hostedExecutionPolicy:'trusted-desktop-computer-task-v1',hostedOwnerGrants:{skills:[],tools:['xiaozhushou_read_local_file']}}});
+  assert.equal(result.ok,false);assert.equal(result.error.code,'HOST_DESKTOP_COMPUTER_UNSUPPORTED');assert.match(result.error.message,/系统托盘完整退出/);assert.deepEqual(routes,['/health']);
+});
+
 test('client and native host complete text only after matching terminal event and durable flush', async t => {
   const f = await fixture(t); const events = [];
   const result = await runHostedTask({ prompt: '你好', workspace: f.workspace, settings: f.settings, onEvent: e => events.push(e) });

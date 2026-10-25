@@ -121,7 +121,7 @@ export function createWechatDshAccess({store,dshAccess,legacySources=[],getWecha
         return LEGACY_COMPUTER_TOOLS[base]?[LEGACY_COMPUTER_TOOLS[base]]:[];
       }).filter(name=>available.has(name)):[];
       const tools=[...new Set([...selected.tools,...basic,...replacements])];
-      if(tools.length>64)throw fail('原选择较多，功能修复未覆盖保存，请在能力中心检查。');
+      if(tools.length>500)throw fail('原选择较多，功能修复未覆盖保存，请在能力中心检查。');
       const computerTools=tools.filter(name=>available.has(name)&&computerGrantableTool(name)&&name.startsWith('xiaozhushou_'));
       const computerEnabled=kind==='private'&&(previous.computerAccess?.enabled===true||replacements.some(computerGrantableTool));
       value.chats[entry]={...previous,grants:{...selected,tools},source:'desktop-feature-recovery',updatedAt:new Date().toISOString(),

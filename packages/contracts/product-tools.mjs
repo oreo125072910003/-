@@ -12,12 +12,12 @@ export const PRODUCT_TOOLS = Object.freeze([
   tool('attachment', '选择本轮成果作为附件，随本轮成功回复交付原微信会话。此工具只登记待交付文件，不能指定收件人；未取得发送回执前不能声称已送达。', object({ artifactId: string(100), mediaType: { enum: ['image', 'file'] } }, ['artifactId', 'mediaType'])),
   tool('sticker', '列出当前原会话可用的微信原生表情，或选择其中一个随回复发送；不能自造表情编号或指定其他联系人。', object({ action: { enum: ['list', 'select'] }, id: string(64) }, ['action'])),
   tool('mail', '读取已连接的邮箱、收件列表或正文，或保存待主人核对的邮件草稿。没有直接发送接口。邮箱尚未连接时明确说明。', object({ action: { enum: ['accounts', 'inbox', 'read', 'draft'] }, accountId: string(100), messageId: string(100), to: { type: 'array', maxItems: 50, items: string(320) }, subject: string(500), text: string(100000) }, ['action'])),
-  tool('screenshot', '截取当前电脑桌面并保存本轮 PNG 成果。只在主人已经为此私聊启用电脑权限时可用。需要发回时再调用 attachment。', object({} ), true),
+  tool('screenshot', '截取当前电脑桌面并保存本轮 PNG 成果。只在主人已经为当前桌面任务或此私聊启用电脑权限时可用。需要发回时再调用 attachment。', object({} ), true),
   tool('list_local_dir', '列出主人授权电脑上的一个目录。只返回名称、类型和大小，不递归。', object({ path: string(1000) }, ['path']), true),
   tool('read_local_file', '读取主人授权电脑上的文本、DOCX、XLSX 或 PDF 文件，有大小及文字上限。', object({ path: string(1000) }, ['path']), true),
   tool('write_local_file', '在主人授权电脑的已存在目录中新建文本文件；不会覆盖已有文件。', object({ path: string(1000), text: string(200000) }, ['path', 'text']), true),
   tool('run_local_shell', '在主人授权的本机运行一次 PowerShell 命令，可完成当前明确要求的软件检查、构建、安装或升级等任务，无需另有名为 agent 的工具。有时间、输出和取消限制，不得扩大授权或向无关联系人发送信息。', object({ command: string(12000), timeoutMs: { type: 'integer', minimum: 1000, maximum: 60000 } }, ['command']), true),
-  tool('export_file', '将主人授权的普通本地文件复制为本轮不可变成果，供 attachment 交付；仅电脑授权私聊可用。', object({ path: string(1000) }, ['path']), true),
+  tool('export_file', '将主人授权的普通本地文件复制为本轮不可变成果，供 attachment 交付；仅已启用电脑能力的桌面任务或私聊可用。', object({ path: string(1000) }, ['path']), true),
 ]);
 export const productTool = name => PRODUCT_TOOLS.find(tool => tool.name === name);
 export const LEGACY_COMPUTER_TOOLS = Object.freeze({

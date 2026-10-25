@@ -41,7 +41,7 @@ test('wildcards, altered case, non-invocable skills and ungrantable tools fail w
 });
 test('grant lists are bounded, unique, exact strings and do not accept extra authority fields', async () => {
   const f = fixture();
-  for (const input of [{ tools: ['x', 'x'] }, { skills: ['x'.repeat(161)] }, { skills: Array.from({ length: 65 }, (_, i) => 'skill' + i) }, { tools: ['a\nb'] }, { tools: 'shell' }, { skills: ['a/b'] }, { skills: [], tools: [], source: 'desktop' }, null, []]) await assert.rejects(f.access.saveGrants(input), { code: 'DSH_GRANTS_INVALID' });
+  for (const input of [{ tools: ['x', 'x'] }, { skills: ['x'.repeat(161)] }, { skills: Array.from({ length: 301 }, (_, i) => 'skill' + i) }, { tools: ['a\nb'] }, { tools: 'shell' }, { skills: ['a/b'] }, { skills: [], tools: [], source: 'desktop' }, null, []]) await assert.rejects(f.access.saveGrants(input), { code: 'DSH_GRANTS_INVALID' });
   assert.equal(f.calls, 0); assert.equal(f.writes.length, 0);
 });
 test('wechat, missing and unrecognized source always receive zero owner capabilities without host read', async () => {

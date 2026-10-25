@@ -103,6 +103,7 @@ export async function runHostedTask({ prompt, workspace, sessionId, conversation
     if (cancelled) throw fault('CANCELLED', '任务已取消。');
     config = await connection(settings); const health = verifyHealth(await request(config, '/health', { maxBytes: 65536 }));
     if(settings.hostedExecutionPolicy==='worker-text-only-v1'&&health.capabilities?.workerTextOnly!==true)throw fault('HOST_WORKER_POLICY_UNSUPPORTED','当前 Harness 插件尚未确认文字协作隔离，请更新插件后重试；没有提交本轮。');
+    if(settings.hostedExecutionPolicy==='trusted-desktop-computer-task-v1'&&health.capabilities?.desktopComputerTasks!==true)throw fault('HOST_DESKTOP_COMPUTER_UNSUPPORTED','当前 DSH 连接组件尚不支持桌面电脑任务。安装新版小助手连接组件后，请从系统托盘完整退出 DeepSeek Harness，再重新打开并刷新小助手。原有账号和会话选择已保留。');
     if(settings.hostedExecutionPolicy==='trusted-computer-task-v1'&&health.capabilities?.trustedComputerTasks!==true)throw fault('HOST_COMPUTER_POLICY_UNSUPPORTED','当前 Harness 插件尚未支持独立电脑授权；没有提交本轮，请更新插件。');
     if (taskImages.length && health.capabilities?.images !== true) throw fault('HOST_IMAGES_UNSUPPORTED', '当前 Harness 宿主尚未支持图片输入，请更新并启用图片能力后重试；本轮没有提交。');
     signal?.addEventListener('abort', onAbort, { once: true }); if (signal?.aborted) onAbort();

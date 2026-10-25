@@ -1,7 +1,7 @@
 {
   "name": "xiaozhushou-desktop",
   "productName": "小助手",
-  "version": "0.3.10",
+  "version": "0.3.12",
   "description": "有持续身份、任务与成果记录的个人桌面助手，使用 DeepSeek Harness 核心",
   "private": true,
   "type": "module",

@@ -18,6 +18,9 @@ function Get-DesktopOwner {
     if (-not $lock.pid -or [int]$lock.pid -le 0) { throw 'Invalid product owner record. No process was stopped.' }
     $owner = Get-Process -Id ([int]$lock.pid) -ErrorAction SilentlyContinue
     if (-not $owner) { return $null }
+    if ([string]::IsNullOrWhiteSpace($owner.Path)) {
+        throw '无法读取小助手运行路径，未停止任何程序。请从小助手系统托盘退出，再通过统一入口重新打开。'
+    }
     $releases = [IO.Path]::GetFullPath((Join-Path $projectRoot 'dist\releases')) + '\'
     if (-not $owner.Path.StartsWith($releases,[StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $owner.Path) -ne '小助手.exe') {
         throw 'This data directory is owned by a different process. No process was stopped.'

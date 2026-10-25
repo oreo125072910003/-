@@ -29,7 +29,18 @@ test('missing real plugin capabilities never become usable just by importing a m
   const dataDir=fs.mkdtempSync(path.join(os.tmpdir(),'assistant-extension-service-'));
   const service=await createAssistantService({dataDir,runtime:{inspectRuntime:async()=>({available:false})}});
   t.after(async()=>{await service.close();fs.rmSync(dataDir,{recursive:true,force:true});});
-  await service.importBundledSkill('literature-review');
-  await assert.rejects(service.enableSkill('literature-review'),/缺少可用工具/);
+  await service.importBundledSkill('contract-drafting');
+  await assert.rejects(service.enableSkill('contract-drafting'),/缺少可用工具/);
   assert.equal(service.getExtensionsState().skills[0].usable,false);
+});
+
+test('literature method can use the product document writer without an unrelated external plugin',async t=>{
+  const dataDir=fs.mkdtempSync(path.join(os.tmpdir(),'assistant-extension-service-'));
+  const service=await createAssistantService({dataDir,runtime:{inspectRuntime:async()=>({available:false})}});
+  t.after(async()=>{await service.close();fs.rmSync(dataDir,{recursive:true,force:true});});
+  await service.importBundledSkill('literature-review');
+  await service.enableSkill('literature-review');
+  const skill=service.getExtensionsState().skills.find(item=>item.id==='literature-review');
+  assert.equal(skill.usable,true);
+  assert.deepEqual(skill.missingCapabilities,[]);
 });

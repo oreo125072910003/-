@@ -10,25 +10,27 @@ const fail = code => Object.assign(new Error(code), { code });
 const inside = (root, file) => { const relative = path.relative(root, file); return relative !== '' && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative); };
 
 export function normalizeOwnerGrants(body) {
-  if(body.executionPolicy!==undefined&&!['owner-grants-v1','worker-text-only-v1','trusted-computer-task-v1'].includes(body.executionPolicy))throw fail('EXECUTION_POLICY_INVALID');
+  if(body.executionPolicy!==undefined&&!['owner-grants-v1','worker-text-only-v1','trusted-computer-task-v1','trusted-desktop-computer-task-v1'].includes(body.executionPolicy))throw fail('EXECUTION_POLICY_INVALID');
   if(body.executionPolicy==='worker-text-only-v1')return {skills:[],tools:[]};
+  const desktop=body.executionPolicy==='trusted-desktop-computer-task-v1';
+  if(desktop && (body.conversation!==undefined || body.computerScope!==undefined || body.authority!=='product-owner'))throw fail('COMPUTER_SCOPE_INVALID');
   const computer=body.executionPolicy==='trusted-computer-task-v1';
   if(computer&&(!body.computerScope||body.computerScope.kind!=='private'||!['accountId','kind','target'].every(k=>Object.hasOwn(body.computerScope,k))||Object.keys(body.computerScope).length!==3||![body.computerScope.accountId,body.computerScope.target].every(v=>typeof v==='string'&&/^[1-9]\d{0,15}$/.test(v))||body.conversation?.channel!=='wechat'))throw fail('COMPUTER_SCOPE_INVALID');
   if (body.ownerGrants === undefined) return { skills: [], tools: [] };
   if (body.authority !== 'product-owner') throw fail('OWNER_AUTHORITY_REQUIRED');
   const grants = body.ownerGrants;
   if (!grants || typeof grants !== 'object' || Array.isArray(grants) || Object.keys(grants).some(key => !['skills', 'tools'].includes(key))) throw fail('OWNER_GRANTS_INVALID');
-  const list = (values, check) => {
+  const list = (values, check, limit) => {
     if (values === undefined) return [];
-    if (!Array.isArray(values) || values.length > 64 || values.some(value => typeof value !== 'string' || !check(value)) || new Set(values).size !== values.length) throw fail('OWNER_GRANTS_INVALID');
+    if (!Array.isArray(values) || values.length > limit || values.some(value => typeof value !== 'string' || !check(value)) || new Set(values).size !== values.length) throw fail('OWNER_GRANTS_INVALID');
     return [...values];
   };
-  return { skills: list(grants.skills, value => /^[^\u0000-\u001f\/\\]{1,160}$/.test(value)), tools: list(grants.tools, name=>grantableTool(name)||computer&&computerGrantableTool(name)) };
+  return { skills: list(grants.skills, value => /^[^\u0000-\u001f\/\\]{1,160}$/.test(value), 300), tools: list(grants.tools, name=>grantableTool(name)||(computer||desktop&&name.startsWith('xiaozhushou_'))&&computerGrantableTool(name), 500) };
 }
 
 /** Grants are trusted product settings, never extracted from the model prompt or incoming messages. */
 export async function bindOwnerAccess(agentCtx, hostCtx, agent, { grants, active, signal, personaPrefix, executionPolicy, productConnection }) {
-  const toolAllowed=name=>grantableTool(name)||executionPolicy==='trusted-computer-task-v1'&&computerGrantableTool(name);
+  const toolAllowed=name=>grantableTool(name)||(executionPolicy==='trusted-computer-task-v1'||executionPolicy==='trusted-desktop-computer-task-v1'&&name.startsWith('xiaozhushou_'))&&computerGrantableTool(name);
   const tools = hostCtx.get?.('tools') ?? hostCtx.tools, skills = hostCtx.get?.('skills');
   const schemas = tools?.schemas?.(agent) ?? [];
   const available = new Set([...schemas.map(tool => tool.name), ...PRODUCT_TOOLS.map(tool => tool.name)]);

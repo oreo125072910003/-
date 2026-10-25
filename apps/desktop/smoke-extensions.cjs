@@ -48,13 +48,15 @@ exports.verifyExtensionsUI = async function verifyExtensionsUI({ window, service
     await waitFor(() => evaluate(`document.querySelector('.legacy-catalog-status')?.textContent.includes('DSH 目录已连通') && Boolean(document.querySelector('[data-action="legacy-catalog-refresh"]:not(:disabled)'))`), '真实返回的目录状态未显示');
     const catalogUI = await evaluate(`({counts:[...document.querySelectorAll('.legacy-catalog-overview strong')].map(node=>Number(node.textContent)),qualified:document.querySelector('.legacy-catalog-overview')?.textContent.includes('调用权限和执行结果另行核验'),statuses:document.querySelector('.legacy-report-table')?.textContent})`);
     if (catalogUI.counts[0] !== syntheticCatalog.skills.length || catalogUI.counts[1] !== syntheticCatalog.tools.length || !catalogUI.qualified || !catalogUI.statuses.includes('需要适配') || !catalogUI.statuses.includes('由 DSH 管理')) throw Error('原有能力状态与服务回执不一致。');
+    await snapshot('desktop-legacy-capabilities.png');
+    await evaluate(`document.querySelector('[data-action="capability-tab"][data-tab="access"]').click()`);
     await waitFor(() => evaluate(`Boolean(document.querySelector('[data-dsh-kind="tools"][value="smoke_owner_tool"]'))`), 'DSH 主人授权未显示');
     const defaultGrants = await evaluate(`({selected:document.querySelectorAll('[data-dsh-kind]:checked').length,unsupported:document.querySelectorAll('[data-dsh-kind][value="smoke_unsupported_tool"]').length,scope:document.querySelector('.dsh-access-intro')?.textContent.includes('微信来信和邮件正文不会继承')})`);
     if (defaultGrants.selected || defaultGrants.unsupported || !defaultGrants.scope) throw Error('DSH 主人授权不是空默认或暴露了不支持的工具。');
     await evaluate(`document.querySelector('[data-dsh-kind="skills"][value="smoke-owner-skill"]').click(); document.querySelector('[data-dsh-kind="tools"][value="smoke_owner_tool"]').click(); document.querySelector('#dsh-grants-form').requestSubmit();`);
     await waitFor(() => calls.grants === 1 && access.effective.tools.length === 1, '明确选择的 DSH 主人授权未保存');
-    await waitFor(() => evaluate(`document.querySelector('.dsh-access-summary')?.textContent.includes('当前有效：技能 1 项，工具 1 项')`), 'DSH 有效授权未显示');
-    await snapshot('desktop-legacy-capabilities.png');
+    await waitFor(() => evaluate(`([...document.querySelectorAll('.dsh-access-summary span')].find(node=>node.textContent.startsWith('当前有效：'))?.textContent || '').includes('技能 1 项') && ([...document.querySelectorAll('.dsh-access-summary span')].find(node=>node.textContent.startsWith('当前有效：'))?.textContent || '').includes('工具 1 项')`), 'DSH 有效授权未显示');
+    await snapshot('desktop-dsh-access.png');
 
     await evaluate(`document.querySelector('[data-page="home"]').click(); const type=document.querySelector('#task-type'); type.value='literature'; type.dispatchEvent(new Event('change',{bubbles:true}));`);
     const literatureUI = await evaluate(`({limit:document.querySelector('#task-prompt').maxLength,attachmentsHidden:document.querySelector('[data-action="attach"]').hidden,skills:document.querySelectorAll('#skill-picker-slot input').length,workflows:document.querySelectorAll('#work-mode').length,mode:document.querySelector('#composer-mode').textContent})`);

@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.3.10';
+export const APP_VERSION = '0.3.12';
 export const TASK_STATUSES = new Set(['queued', 'running', 'validating', 'succeeded', 'partial', 'failed', 'cancelled', 'interrupted', 'waiting_dependency']);
 export const TERMINAL_STATUSES = new Set(['succeeded', 'partial', 'failed', 'cancelled', 'interrupted']);
 
@@ -19,7 +19,7 @@ export function taskInput(value) {
   if(!['single','writing-review','research-compare'].includes(workflowId))throw Error('不支持这个协作流程。');
   if(kind==='organize'&&workflowId!=='single')throw Error('资料整理不能同时运行 AI 协作。');
   const skillIds=value.skillIds??[];
-  if(!Array.isArray(skillIds)||skillIds.length>3||skillIds.some(id=>typeof id!=='string'||!/[a-z0-9]/.test(id)||!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)))throw Error('每次最多选择 3 个有效技能。');
+  if(!Array.isArray(skillIds)||skillIds.length>32||skillIds.some(id=>typeof id!=='string'||!/[a-z0-9]/.test(id)||!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)))throw Error('每次最多选择 32 个有效技能。');
   if(kind==='organize'&&skillIds.length)throw Error('本地资料整理使用固定流程，请在 AI 工作中选择技能。');
   const attachmentPaths = value.attachmentPaths ?? [];
   if(kind==='literature'&&(workflowId!=='single'||skillIds.length||attachmentPaths.length))throw Error('文献检索使用独立来源接口，请单独提交检索词。');

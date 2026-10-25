@@ -48,7 +48,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
   const changes = () => events.emit('change');
   const ownerContext=Object.freeze({source:'desktop',role:'owner'});
   const externalContext=Object.freeze({source:'external',role:'correspondent'});
-  const availableCapabilities=()=>['agent.text','files.organize','artifact.read','document.read','document.write','workers.text','literature.search','mail.read','mail.draft'];
+  const availableCapabilities=()=>['agent.text','files.organize','artifact.read','document.read','document.write','documents.write','workers.text','literature.search','mail.read','mail.draft'];
   const extensions=await createExtensionManager({dataDir:path.join(root,'extensions'),authorize:async context=>context===ownerContext,
     secretResolver:(reference,{pluginId})=>secretStore?.get('plugin:'+pluginId+':'+reference),availableCapabilities}).catch(error=>{store.close();throw error;});
   try {
@@ -89,7 +89,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     const current = settings();
     if(hosted){
       const source=taskSources.get(taskId),messageId=taskWechatMessages.get(taskId);
-      const access=source==='desktop'?{grants:await dshAccess.grantsForTask({source})}:messageId?await wechatDshAccess.accessForMessage(store.getWechatMessage(messageId)):{grants:{skills:[],tools:[]}};
+      const access=source==='desktop'?{grants:await dshAccess.grantsForTask({source}),...(current.dshDesktopComputerAccess===true?{executionPolicy:'trusted-desktop-computer-task-v1'}:{})}:messageId?await wechatDshAccess.accessForMessage(store.getWechatMessage(messageId)):{grants:{skills:[],tools:[]}};
       return {hostedConfigFile:path.join(root,'harness-host','client.json'),...(taskId?{hostedOwnerGrants:access.grants,...(access.executionPolicy?{hostedExecutionPolicy:access.executionPolicy,hostedComputerScope:access.computerScope}:{})}:{})};
     }
     const key = await secretStore?.get('deepseek-api-key');
@@ -347,12 +347,17 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     getDshAccessState(){return dshAccess.getState();},
     refreshDshAccessCatalog(){return dshAccess.getState();},
     async saveDshOwnerGrants(value){await dshAccess.saveGrants(value);return dshAccess.getState();},
+    async setDesktopComputerAccess({enabled}={}){
+      if(typeof enabled!=='boolean')throw Error('请选择启用或关闭电脑与文件能力。');
+      if(enabled){const catalog=await dshAccess.getCatalog();if(!catalog.ok)throw Error('请先连接 DSH，再启用电脑与文件能力。');}
+      store.saveSettings({dshDesktopComputerAccess:enabled});changes();return dshAccess.getState();
+    },
     async restoreProductFeatures(){
       const state=await dshAccess.getState();if(!state.connected)throw Error('请先连接 DSH，再修复功能。');
       const available=new Set(state.catalog.tools.filter(tool=>tool.grantable).map(tool=>tool.name));
       const basic=PRODUCT_TOOLS.filter(tool=>!tool.computer&&tool.name!=='xiaozhushou_sticker'&&available.has(tool.name)).map(tool=>tool.name);
       const saved={skills:state.saved.skills,tools:[...new Set([...state.saved.tools,...basic])]};
-      if(saved.tools.length>64)throw Error('原选择较多，请在能力中心检查；现有选择已经保留。');
+      if(saved.tools.length>500)throw Error('原选择较多，请在能力中心检查；现有选择已经保留。');
       store.saveSettings({dshOwnerGrants:saved});
       let wechatResult;
       try{
@@ -525,6 +530,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('设置格式无效。');
       const patch={};
       if('runtimeMode'in value&&value.runtimeMode!=='hosted')throw Error('小助手始终使用 DSH 核心。其他 API 请作为辅助能力配置。');
+      if('defaultSkillIds'in value)patch.defaultSkillIds=taskInput({prompt:'保存工作方法',skillIds:value.defaultSkillIds}).skillIds;
       if('assistantName'in value)patch.assistantName=boundedText(value.assistantName,'名字',30);
       if('persona'in value)patch.persona=boundedText(value.persona,'人格说明',6000);
       if('runtimeCommand'in value){patch.runtimeCommand=boundedText(value.runtimeCommand,'Harness 程序路径',4096,{empty:true});if(patch.runtimeCommand&&!path.isAbsolute(patch.runtimeCommand)&&!/^dsh(?:\.cmd|\.exe)?$/i.test(patch.runtimeCommand))throw new Error('请选择完整 Harness 程序路径，或填写 dsh。');}

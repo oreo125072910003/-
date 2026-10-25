@@ -1,0 +1,55 @@
+const {app,BrowserWindow,ipcMain}=require('electron');
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const root=path.resolve(__dirname,'..'),output=path.join(root,'dist','capability-ui');
+const skills=[{id:'material-writing',name:'材料写作',enabled:true,usable:true,description:'起草材料',executors:['harness-text'],requiredCapabilities:[],diagnostics:[]}];
+const access={connected:true,computerEnabled:false,saved:{skills:[],tools:[]},effective:{skills:[],tools:[]},unavailable:{skills:[],tools:[]},catalog:{skills:[{name:'office',description:'文档',modelInvocable:true},{name:'internal',modelInvocable:false}],tools:[...Array.from({length:80},(_,i)=>({name:'tool_'+i,description:i===0?'files 文件':'示例工具 '+i,grantable:true})),{name:'unsupported',grantable:false,reason:'尚需适配'},{name:'xiaozhushou_read_local_file',computerGrantable:true,grantable:false}]}};
+let settings={defaultSkillIds:['material-writing']},writes=0,closed=false,computerSupported=false,runtimeAvailable=true;
+const plugin={id:'synthetic',name:'合成插件',version:'1.0',enabled:true,allowedTools:['read'],lastDiagnostic:{ok:true,at:new Date().toISOString(),toolCount:2,tools:[{name:'read',description:'读取',available:true},{name:'unsupported',available:false,reason:'不支持的参数'}]}};
+const mock={getBootstrap:()=>({identity:{name:'小助手'},runtime:{available:runtimeAvailable,capabilities:{desktopComputerTasks:computerSupported}},capabilities:[],appVersion:'0.3.11'}),listTasks:()=>[],getSettings:()=>settings,getWechatState:()=>({settings:{},connection:{state:'offline'},messages:[]}),getExtensionsState:()=>({skills,mcp:[plugin],bundledSkills:[],availableCapabilities:['documents.write']}),getWorkflowsState:()=>({workflows:[],workers:[]}),getDshAccessState:()=>access,refreshDshAccessCatalog:()=>access,getMailState:()=>({accounts:[],messages:[],drafts:[]}),
+  saveDshOwnerGrants:grants=>{writes++;access.saved=grants;access.effective=grants;return access;},setDesktopComputerAccess:({enabled})=>{access.computerEnabled=enabled;return access;},saveSettings:value=>{settings={...settings,...value};return settings;},setMcpTools:({allowedTools})=>{plugin.allowedTools=allowedTools;return plugin;}};
+app.whenReady().then(async()=>{
+  fs.mkdirSync(output,{recursive:true});
+  const methods=vm.runInNewContext(fs.readFileSync(path.join(root,'apps/desktop/preload.cjs'),'utf8').match(/const methods = (\[[\s\S]+?\]);/)[1]);
+  for(const method of methods)ipcMain.handle('assistant:'+method,(_event,...args)=>{if(!mock[method])throw Error('Unexpected synthetic call: '+method);return mock[method](...args);});
+  const window=new BrowserWindow({show:false,width:1440,height:960,webPreferences:{preload:path.join(root,'apps/desktop/preload.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});
+  const errors=[];window.webContents.on('console-message',(_event,details)=>{if(details.level==='error')errors.push(details.message);});
+  const evaluate=source=>window.webContents.executeJavaScript(source);
+  const click=selector=>evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+  const wait=async source=>{const deadline=Date.now()+6000;while(Date.now()<deadline){if(await evaluate(source))return;await new Promise(resolve=>setTimeout(resolve,30));}throw Error('Timed out: '+source);};
+  const capture=async name=>{await evaluate('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');fs.writeFileSync(path.join(output,name),(await window.webContents.capturePage()).toPNG());};
+  try{
+    await window.loadFile(path.join(root,'apps/desktop/renderer/index.html'));await wait('Boolean(document.querySelector("[data-page=capabilities]"))');
+    await evaluate('document.querySelector(".work-options").open=true');assert.equal(await evaluate('document.querySelector("[name=skillIds]").checked'),true);
+    await click('[data-action=task-skills-clear]');await wait('!document.querySelector("[name=skillIds]").checked');
+    await click('[data-action=task-skills-all]');await wait('document.querySelector("[name=skillIds]").checked');
+    await click('[data-page=capabilities]');await wait('Boolean(document.querySelector("[data-action=enable-all-capabilities]"))');
+    await click('[data-action=enable-all-capabilities]');await wait('document.querySelector(".capability-readiness").textContent.includes("已保存 1 项技能 / 80 项工具")');
+    assert.equal(access.computerEnabled,true);assert.equal(writes,1);assert.equal(access.saved.tools.includes('unsupported'),false);
+    await wait('document.querySelector(".desktop-computer-panel").textContent.includes("等待重载 DSH")');
+    assert.equal(await evaluate('document.querySelector("#toast").textContent.includes("功能已开启")'),false);
+    await capture('pending-reload.png');
+    runtimeAvailable=false;access.connected=false;
+    await click('[data-action=refresh]');await wait('document.querySelector(".desktop-computer-panel").textContent.includes("等待连接 DSH")');
+    computerSupported=true;runtimeAvailable=true;access.connected=true;
+    await click('[data-action=refresh]');await wait('document.querySelector(".desktop-computer-panel").textContent.includes("已启用，自动记住")');
+    await capture('overview.png');
+    await click('[data-action=capability-tab][data-tab=access]');await wait('Boolean(document.querySelector("#dsh-grants-form"))');
+    await evaluate('document.querySelectorAll("#dsh-grants-form details").forEach(node=>node.open=true);document.querySelector("[data-dsh-kind=tools][value=tool_40]").focus();document.querySelectorAll(".dsh-grant-list")[1].scrollTop=1600');
+    const before=await evaluate('document.querySelectorAll(".dsh-grant-list")[1].scrollTop');
+    await click('[data-dsh-kind=tools][value=tool_40]');
+    assert.equal(await evaluate('document.querySelectorAll(".dsh-grant-list")[1].scrollTop'),before);
+    assert.equal(await evaluate('document.activeElement.value'),'tool_40');
+    await evaluate('document.querySelector("#dsh-grants-keyword").value="files";document.querySelector("#dsh-grants-search").requestSubmit()');
+    await click('[data-action=dsh-deselect-all]');assert.equal(await evaluate('document.querySelector("[data-dsh-kind=tools]").checked'),false);
+    await click('[data-action=dsh-all-save]');await wait('!document.querySelector("[data-action=dsh-all-save]").disabled');
+    assert.equal(access.saved.tools.length,80);assert.equal(access.saved.skills.length,1);
+    await evaluate('document.querySelector("#dsh-grants-keyword").value="";document.querySelector("#dsh-grants-search").requestSubmit()');
+    await capture('selection.png');
+    await click('[data-action=capability-tab][data-tab=mcp]');await wait('Boolean(document.querySelector("[data-action=mcp-all-save]"))');
+    assert.equal(await evaluate('document.querySelector("#mcp-tools-form [value=read]").checked'),true);
+    await click('[data-action=mcp-all-save]');await wait('!document.querySelector("[data-action=mcp-all-save]").disabled');assert.deepEqual(plugin.allowedTools,['read']);
+    await capture('plugins.png');assert.deepEqual(errors,[]);
+    fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({ok:true,fullCatalogTools:80,nonInvocableSkipped:true,cachedPluginTools:true,scrollAndFocusPreserved:true,settingsRemembered:true,reloadAndOfflineStatusAccurate:true,consoleErrors:errors},null,2));
+    console.log(JSON.stringify({ok:true,output}));
+  }finally{window.destroy();closed=true;app.quit();}
+}).catch(error=>{console.error(error.stack);app.exit(1);});

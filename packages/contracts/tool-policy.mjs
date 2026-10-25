@@ -12,7 +12,7 @@ export function describeTool(name) {
   if(typeof name!=='string'||!NAME.test(name))return {category:'invalid',grantable:false,reason:'工具名称无效。'};
   const lower=name.toLowerCase();
   const product=productTool(name);
-  if(product)return {server:'xiaozhushou',basename:name,category:product.computer?'computer-control':'business-tool',grantable:!product.computer,computerGrantable:product.computer,reason:product.computer?'使用本轮已核验的私聊电脑权限。':'小助手本轮成果与通信功能。'};
+  if(product)return {server:'xiaozhushou',basename:name,category:product.computer?'computer-control':'business-tool',grantable:!product.computer,computerGrantable:product.computer,reason:product.computer?'需要为桌面任务或当前私聊启用电脑与文件能力。':'小助手本轮成果与通信功能。'};
   const mcp=lower.match(/^mcp__([a-z0-9_-]+)__(.+)$/);
   const alternate=lower.match(/^([a-z0-9_-]+)[.:]([a-z0-9_]+)$/);
   const server=mcp?.[1]??alternate?.[1]??'',basename=mcp?.[2]??alternate?.[2]??lower;
