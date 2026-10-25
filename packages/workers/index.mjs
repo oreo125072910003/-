@@ -135,5 +135,9 @@ export function createWorkerCoordinator({ runWorker, authorize = async () => fal
 /** Credentials/settings stay in this trusted adapter closure, outside work packages. */
 export function createHarnessWorkerAdapter({ runtime, settingsProvider }) {
   if (typeof runtime?.runTask !== 'function' || typeof settingsProvider !== 'function') throw error('INVALID_ADAPTER', 'Harness 执行器配置不完整。');
-  return async work => { const settings = await settingsProvider({ role: work.role, parentTaskId: work.task.parentTaskId, workspace: work.workspace }); return runtime.runTask({ prompt: work.prompt, workspace: work.workspace, signal: work.signal, settings, onEvent: work.onEvent }); };
+  return async work => {
+    const inherited=await settingsProvider({role:work.role,parentTaskId:work.task.parentTaskId,workspace:work.workspace});
+    const settings={...inherited,hostedOwnerGrants:{skills:[],tools:[]},hostedExecutionPolicy:'worker-text-only-v1'};
+    return runtime.runTask({prompt:work.prompt,workspace:work.workspace,signal:work.signal,settings,onEvent:work.onEvent});
+  };
 }

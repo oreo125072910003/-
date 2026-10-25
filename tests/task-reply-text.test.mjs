@@ -1,0 +1,20 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {createAssistantService} from '../apps/service/index.mjs';
+test('full reply reading retains the part after summary and rejects tampering or unfinished tasks',async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'xzs-full-reply-'));
+  const output='完整正文'.repeat(4000)+'TAIL_BEYOND_SUMMARY';
+  const service=await createAssistantService({dataDir:root,runtime:{inspectHostedRuntime:async()=>({available:true,detail:'synthetic'}),runHostedTask:async()=>({ok:true,finalText:output})}});
+  t.after(async()=>{await service.close();fs.rmSync(root,{recursive:true,force:true});});
+  const task=await service.createTask({prompt:'合成全文'});
+  assert.throws(()=>service.getTaskReplyText(task.id),/尚未成功/);
+  for(let n=0;n<100&&service.getTask(task.id).task.status!=='succeeded';n++)await new Promise(r=>setTimeout(r,5));
+  assert.equal(service.getTask(task.id).task.status,'succeeded');
+  assert.ok(!service.getTask(task.id).task.summary.includes('TAIL_BEYOND_SUMMARY'));
+  const reply=service.getTaskReplyText(task.id);assert.equal(reply.taskId,task.id);assert.equal(reply.text,output+'\n');
+  fs.appendFileSync(service.resolveArtifact(reply.artifactId),'changed');
+  assert.throws(()=>service.getTaskReplyText(task.id),/修改|变化/);
+});

@@ -39,11 +39,12 @@ export async function prepareHostedPluginInstall({ productDataRoot, workspacesRo
   await writeFile(markerFile, 'xiaozhushou-harness-host-v1\n', { mode: 0o600 });
   const contents = await Promise.all(['package.json', 'index.mjs', 'server.mjs', 'image-input.mjs', 'text-policy.mjs', 'owner-access.mjs', 'locale/zh.json', 'locale/en.json', 'icon.svg'].map(async name => [name, await readFile(path.join(sourceDir, name), 'utf8')]));
   contents.push(['contract-image-input.mjs', await readFile(path.join(sourceDir, '../contracts/image-input.mjs'), 'utf8')]);
+  contents.push(['contract-tool-policy.mjs',await readFile(path.join(sourceDir,'../contracts/tool-policy.mjs'),'utf8')]);
   const revision = createHash('sha256').update('revisioned-relative-imports-v1\0').update(contents.map(([name, text]) => name + '\0' + text).join('\0')).digest('hex').slice(0, 16);
   // ESM caches each dependency by URL. Revising index alone can still run the
   // previous server after an official live reload in the same Harness process.
   for (const [name, source] of contents) {
-    const localized = source.replaceAll('../contracts/image-input.mjs', './contract-image-input.mjs');
+    const localized = source.replaceAll('../contracts/image-input.mjs', './contract-image-input.mjs').replaceAll('../contracts/tool-policy.mjs','./contract-tool-policy.mjs');
     const content=name.endsWith('.mjs')?localized.replace(/(['"])(\.\/[a-z-]+\.mjs)\1/g,(_match,quote,module)=>quote+module+'?revision='+revision+quote):localized;
     await mkdir(path.dirname(path.join(destination, name)), { recursive: true }); await writeFile(path.join(destination, name), content);
   }
@@ -52,7 +53,7 @@ export async function prepareHostedPluginInstall({ productDataRoot, workspacesRo
   const tokenFile = path.join(tokenDir, 'bridge-token.txt');
   await writeFile(tokenFile, randomBytes(32).toString('base64url') + '\n', { flag: 'wx', mode: 0o600 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
   const moduleUri = name => pathToFileURL(path.join(destination, name)).href + '?revision=' + revision;
-  const bridgeConfig = { productDataRoot: dataRoot, workspacesRoot: workspaces, tokenFile, port, provider, model, agentPreset: 'xiaozhushou-desktop-text-v1' };
+  const bridgeConfig = { productDataRoot: dataRoot, workspacesRoot: workspaces, tokenFile, port, provider, model, agentPreset: 'xiaozhushou-desktop-text-v1',revision,pluginVersion:JSON.parse(contents.find(([name])=>name==='package.json')[1]).version };
   const patch = '- insert:\n' +
     '    - id: xiaozhushou-harness-host\n      name: ' + JSON.stringify(moduleUri('index.mjs')) + '\n      config: ' + JSON.stringify(bridgeConfig) + '\n' +
     '    - id: preset-xiaozhushou-desktop-text\n      name: "@deepseek-ai/dsh-agent-preset"\n      config:\n        id: xiaozhushou-desktop-text-v1\n        name: 小助手\n        description: 小助手独立产品会话，复用现有 Harness 登录\n        order: 21\n        plugins:\n' +

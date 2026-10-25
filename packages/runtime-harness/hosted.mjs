@@ -64,7 +64,7 @@ function verifyTask(value, taskId) {
 export async function inspectHostedRuntime(settings = {}) {
   try {
     const config = await connection(settings), health = verifyHealth(await request(config, '/health', { maxBytes: 65536 }));
-    return { available: true, ready: health.modelVerified === true, source: 'existing-harness-host', version: null, protocol: PROTOCOL, endpoint: config.endpoint, provider: health.provider, model: health.model, credentialsConfigured: true, credentialsVerified: false, credentialsSource: 'harness-existing-login', modelVerified: health.modelVerified === true,
+    return { available: true, ready: health.modelVerified === true, source: 'existing-harness-host', version: health.pluginVersion??null,revision:health.revision??null, protocol: PROTOCOL, endpoint: config.endpoint, provider: health.provider, model: health.model, credentialsConfigured: true, credentialsVerified: false, credentialsSource: 'harness-existing-login', modelVerified: health.modelVerified === true,
       detail: health.modelVerified ? '已连接现有 Harness，并完成过真实模型回复。' : '已连接现有 Harness，复用已有登录；尚未验证真实模型回复。', capabilities: { ...health.capabilities, compatible: true, modelVerified: health.modelVerified === true, protocol: PROTOCOL, toolPolicy: health.toolPolicy === 'product-owner-task-grants-v1' ? 'explicit-owner-task-grants' : 'conversation-only' } };
   } catch (error) { return { available: false, ready: false, source: 'existing-harness-host', detail: error.message, error: { code: error.code || 'HOST_INSPECTION_FAILED', message: error.message }, capabilities: { compatible: false, modelVerified: false } }; }
 }
@@ -102,13 +102,17 @@ export async function runHostedTask({ prompt, workspace, sessionId, conversation
     const taskImages = validateTaskImages(images);
     if (cancelled) throw fault('CANCELLED', '任务已取消。');
     config = await connection(settings); const health = verifyHealth(await request(config, '/health', { maxBytes: 65536 }));
+    if(settings.hostedExecutionPolicy==='worker-text-only-v1'&&health.capabilities?.workerTextOnly!==true)throw fault('HOST_WORKER_POLICY_UNSUPPORTED','当前 Harness 插件尚未确认文字协作隔离，请更新插件后重试；没有提交本轮。');
+    if(settings.hostedExecutionPolicy==='trusted-computer-task-v1'&&health.capabilities?.trustedComputerTasks!==true)throw fault('HOST_COMPUTER_POLICY_UNSUPPORTED','当前 Harness 插件尚未支持独立电脑授权；没有提交本轮，请更新插件。');
     if (taskImages.length && health.capabilities?.images !== true) throw fault('HOST_IMAGES_UNSUPPORTED', '当前 Harness 宿主尚未支持图片输入，请更新并启用图片能力后重试；本轮没有提交。');
     signal?.addEventListener('abort', onAbort, { once: true }); if (signal?.aborted) onAbort();
     if (cancelled) throw fault('CANCELLED', '任务已取消。');
     emit('status', '正在使用现有 Harness 登录建立小助手会话…');
     submitted = true;
     const personaPrefix = settings.personaPrefix ?? settings.persona;
-    let value = verifyTask(await request(config, '/tasks', { method: 'POST', body: { taskId, prompt, workspace, ...(taskImages.length ? { images: taskImages } : {}), ...(sessionId ? { sessionId } : {}), ...(conversation ? { conversation } : {}), ...(personaPrefix ? { personaPrefix } : {}), ...(settings.hostedOwnerGrants ? { authority: 'product-owner', ownerGrants: settings.hostedOwnerGrants } : {}) } }), taskId);
+    const executionPolicy=settings.hostedExecutionPolicy;
+    const grants=executionPolicy==='worker-text-only-v1'?{skills:[],tools:[]}:settings.hostedOwnerGrants;
+    let value = verifyTask(await request(config, '/tasks', { method: 'POST', body: { taskId, prompt, workspace, ...(taskImages.length ? { images: taskImages } : {}), ...(sessionId ? { sessionId } : {}), ...(conversation ? { conversation } : {}), ...(personaPrefix ? { personaPrefix } : {}), ...(executionPolicy?{executionPolicy}:{}), ...(executionPolicy==='trusted-computer-task-v1'?{computerScope:settings.hostedComputerScope}:{}), ...(grants ? { authority: 'product-owner', ownerGrants: grants } : {}) } }), taskId);
     lastSession = value.sessionId;
     const deadline = Date.now() + (settings.timeoutMs ?? 10 * 60 * 1000);
     while (!final(value)) {

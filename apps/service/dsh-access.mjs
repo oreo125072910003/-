@@ -4,7 +4,7 @@ const SKILL_NAME = /^[^\u0000-\u001f\u007f\/\\]{1,160}$/;
 const TOOL_NAME = /^[\w.:-]{1,160}$/;
 const text = (value, limit) => typeof value === 'string' ? value.slice(0, limit) : '';
 
-function validateGrants(input) {
+export function validateGrants(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['skills', 'tools'].includes(key))) throw fail('DSH_GRANTS_INVALID', '请选择有效的 Harness 技能与工具。');
   const list = (value, expression) => {
     if (!Array.isArray(value) || value.length > 64 || value.some(name => typeof name !== 'string' || !expression.test(name)) || new Set(value).size !== value.length) throw fail('DSH_GRANTS_INVALID', '每类最多选择 64 项，名称必须与 Harness 当前清单完全一致，不能重复。');
@@ -23,7 +23,7 @@ function metadata(raw) {
   };
   return { ok: true, source: 'harness-host', metadataOnly: true,
     skills: unique(raw.skills, SKILL_NAME, row => ({ name: row.name, description: text(row.description, 1000), provider: text(row.provider, 160) || 'dsh', modelInvocable: row.modelInvocable !== false, executableInProduct: false })),
-    tools: unique(raw.tools, TOOL_NAME, row => ({ name: row.name, description: text(row.description, 1000), grantable: row.grantable === true, executableInProduct: false })),
+    tools: unique(raw.tools, TOOL_NAME, row => ({ name: row.name, description: text(row.description, 1000),...describeTool(row.name),grantable:row.grantable===true&&grantableTool(row.name),computerGrantable:row.computerGrantable===true&&computerGrantableTool(row.name), executableInProduct: false })),
     executionPolicy: 'explicit-product-owner-task-allowlist', externalContentInheritsOwner: false };
 }
 function split(saved, catalog, connected) {
@@ -83,3 +83,4 @@ export function createDshAccess({ runtime, settingsProvider, store, onChange } =
   }
   return { getCatalog, getState, saveGrants, grantsForTask };
 }
+import { grantableTool, describeTool, computerGrantableTool } from '../../packages/contracts/tool-policy.mjs';
