@@ -6,6 +6,7 @@ import { HookOneBot, conversationId, onebotId } from '../../代码/项目/script
 import { normalizeOneBotEvent } from '../../代码/项目/components/qq-bridge/src/onebot/normalize.js';
 import { validateStickerSettings } from '../../代码/项目/components/qq-bridge/src/core/sticker-policy.js';
 import { createWechatMediaTransport } from './media-transport.mjs';
+import { createWechatHookMediaRunner } from './hook-media.mjs';
 
 const MAX_EVENT_BYTES = 256_000;
 const MAX_JSON_BYTES = 1_200_000;
@@ -532,7 +533,7 @@ export function createWechatBridge({
         },
         verify: async () => { const found = await verify(); return { ...found, selfWxid: adapter.ownWxid }; },
         resolveTarget: resolveMediaTarget, readMessages: wxid => adapter.messages(wxid),
-        ...(mediaNativeRunner ? { nativeRunner: mediaNativeRunner } : {}), receiptTimeoutMs, pollMs,
+        nativeRunner:mediaNativeRunner??createWechatHookMediaRunner({baseUrl:config.hookBaseUrl,token:config.nativeToken,fetchImpl:boundedJsonFetch}), receiptTimeoutMs, pollMs,
       });
       const found = await verify();
       if (epoch !== generation) throw fault('WECHAT_START_CANCELLED');

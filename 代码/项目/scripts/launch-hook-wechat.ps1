@@ -1,4 +1,4 @@
-param([switch]$PrepareOnly,[switch]$UpdateHook)
+param([switch]$PrepareOnly,[switch]$UpdateHook,[string]$MediaDataRoot = '')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 & node (Join-Path $PSScriptRoot 'project-config.mjs')
@@ -11,14 +11,31 @@ if ((Get-Item -LiteralPath $exe).VersionInfo.FileVersion -ne $config.hook.expect
 $signature = Get-AuthenticodeSignature -LiteralPath $exe
 if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Tencent') { throw 'WeChat executable signature check failed.' }
 $directory = Split-Path -Parent $exe
+$mediaManifest = Join-Path $directory 'xiaozhushou-media-root.json'
+if ($MediaDataRoot) {
+    if (-not [IO.Path]::IsPathRooted($MediaDataRoot) -or $MediaDataRoot.StartsWith('\\') -or $MediaDataRoot.Contains('"')) { throw 'MediaDataRoot must be a local absolute product data directory.' }
+    $MediaDataRoot = [IO.Path]::GetFullPath($MediaDataRoot).TrimEnd('\')
+    $mediaDirectory = Join-Path $MediaDataRoot 'wechat'
+    if (-not (Test-Path -LiteralPath $mediaDirectory -PathType Container)) { throw 'Product wechat data directory does not exist.' }
+    $currentDirectory = Get-Item -LiteralPath $mediaDirectory -Force
+    while ($currentDirectory) {
+        if ($currentDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Linked product data directories are not supported.' }
+        $currentDirectory = $currentDirectory.Parent
+    }
+}
 . (Join-Path $PSScriptRoot 'hook-client-health.ps1')
-$existing = @(Get-CimInstance Win32_Process -Filter "Name='Weixin.exe'" | Where-Object { $_.CommandLine -notmatch '--type=|--crashpad-handler' })
-$ours = @($existing | Where-Object ExecutablePath -eq $exe)
+$existing = @(Get-Process -Name Weixin -ErrorAction SilentlyContinue)
+$ours = @($existing | Where-Object Path -eq $exe)
 if ($ours.Count) {
     if ($PrepareOnly) { throw 'Close the matching WeChat before replacing its native component.' }
     $currentBuild = Get-Content -LiteralPath (Join-Path $root 'state\hook\native\build.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $installedDll = Join-Path $directory 'version.dll'
     if (-not (Test-Path -LiteralPath $installedDll) -or (Get-FileHash -LiteralPath $installedDll -Algorithm SHA256).Hash.ToLowerInvariant() -ne $currentBuild.sha256) { throw 'HOOK_COMPONENT_UPDATE_PENDING: Exit the matching WeChat from its tray before reopening it to apply the updated sender.' }
+    if ($MediaDataRoot) {
+        if (-not (Test-Path -LiteralPath $mediaManifest -PathType Leaf)) { throw 'HOOK_COMPONENT_UPDATE_PENDING: Exit matching WeChat before configuring product media.' }
+        $mediaSettings = Get-Content -LiteralPath $mediaManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($mediaSettings.version -ne 1 -or $mediaSettings.dataRoot -ne $MediaDataRoot) { throw 'HOOK_COMPONENT_UPDATE_PENDING: Exit matching WeChat before changing product media configuration.' }
+    }
     Write-Output 'Matching WeChat is open; checking its sender initialization...'
     Wait-HookClient $exe $config.hook.baseUrl $config.hook.expectedVersion (Join-Path $root 'state\hook\native-token.txt')
     Write-Output 'Matching WeChat sender is ready. Finish login, then start WeChatAgent.'; exit 0
@@ -39,11 +56,17 @@ try {
     & (Join-Path $PSScriptRoot 'pin-hook-client.ps1') -Unlock
     Copy-Item -LiteralPath $dll -Destination $destination -Force
     Copy-Item -LiteralPath (Join-Path $root 'state\hook\native-token.txt') -Destination (Join-Path $directory 'wechatagent-hook.token') -Force
+    if ($MediaDataRoot) {
+        if (Test-Path -LiteralPath $mediaManifest -PathType Leaf) { Copy-Item -LiteralPath $mediaManifest -Destination (Join-Path $native 'media-root.previous.json') -Force }
+        $mediaJson = @{version=1;dataRoot=$MediaDataRoot} | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText($mediaManifest+'.next',$mediaJson,[Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath ($mediaManifest+'.next') -Destination $mediaManifest -Force
+    }
 } finally { & (Join-Path $PSScriptRoot 'pin-hook-client.ps1') }
 if ($PrepareOnly) { Write-Output 'Matching client prepared with verified Hook DLL and local token; not launched.'; exit 0 }
 if ($existing.Count) { throw 'Another desktop WeChat is running. Exit it from the tray before opening the isolated Hook client; this script does not terminate it.' }
 $port = ([Uri]$config.hook.baseUrl).Port
-if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) { throw 'Hook port is already in use; inspect the listener before launching.' }
+if (@([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object Port -eq $port).Count) { throw 'Hook port is already in use; inspect the listener before launching.' }
 $clientProcess = Start-Process -FilePath $exe -ArgumentList ('StartPort='+$port+' CallBackURL="http://127.0.0.1:'+ $config.ports.adapter + '/unused"') -WorkingDirectory $directory -WindowStyle Normal -PassThru
 Write-Output 'Waiting for matching WeChat launcher handoff and sender initialization...'
 Wait-HookClient $exe $config.hook.baseUrl $config.hook.expectedVersion (Join-Path $root 'state\hook\native-token.txt')

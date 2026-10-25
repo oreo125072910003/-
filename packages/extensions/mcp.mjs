@@ -137,6 +137,9 @@ export class StdioMcpClient extends EventEmitter {
       if (process.platform === 'win32') {
         // Kill only the PID spawned and still retained by this connection.
         await new Promise(resolve => { const killer = spawn(process.env.SystemRoot ? `${process.env.SystemRoot}\\System32\\taskkill.exe` : 'taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', shell: false }); const timer = setTimeout(() => { killer.kill(); resolve(); }, 3000); killer.once('exit', () => { clearTimeout(timer); resolve(); }); killer.once('error', () => { clearTimeout(timer); resolve(); }); });
+        // taskkill's process-tree query can stall when Windows management is
+        // unavailable. The retained child handle still identifies our process.
+        if (!exited()) child.kill('SIGKILL');
       } else child.kill('SIGKILL');
       await Promise.race([new Promise(resolve => child.once('exit', resolve)), delay(3000)]);
     }

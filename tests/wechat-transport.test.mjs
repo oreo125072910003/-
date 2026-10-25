@@ -31,7 +31,7 @@ async function fixture(t, options = {}) {
   };
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1');
-    const native = url.pathname === '/WeChatAgent/health' || url.pathname === '/SendTextMsg' || url.pathname === '/GetSelfProfile' || url.pathname === '/SendStickerMsg';
+    const native = ['/WeChatAgent/health','/SendTextMsg','/GetSelfProfile','/SendStickerMsg','/SendImgMsg','/SendFileMsg'].includes(url.pathname);
     if (request.headers.authorization !== 'Bearer ' + (native ? nativeToken : readerToken)) return json(response, {}, 401);
     await backend.onRequest?.(url,request);
     if (url.pathname === '/api/v1/reader/status' && backend.holdStatus) {
@@ -55,6 +55,7 @@ async function fixture(t, options = {}) {
       integration: 'WeChatAgent-1', backend: 'wechat-hook', version: backend.version, startupState: 'ready',
       databaseAccounts: [backend.hookAccount ?? backend.account],
       nativeStickerSend: true,
+      nativeImageSend:backend.mediaCapability===true,nativeFileSend:backend.mediaCapability===true,mediaProtocol:'xiaozhushou-native-media-v1',
     });
     if (url.pathname === '/GetSelfProfile' && backend.noNativeProfile) return json(response, {}, 404);
     if (url.pathname === '/GetSelfProfile') return json(response, {
@@ -90,6 +91,19 @@ async function fixture(t, options = {}) {
         localType: 1, isSend: true, createTime: Math.floor(Date.now() / 1000), fullText: sent.msg });
       backend.afterSubmit?.();
       return json(response, { ret: 0 });
+    }
+    if(['/SendImgMsg','/SendFileMsg'].includes(url.pathname)){
+      assert.equal(request.headers['x-wechatagent-account'],backend.account.toLowerCase());
+      let body='';for await(const chunk of request)body+=chunk;
+      const sent=JSON.parse(body);backend.mediaRequests??=[];backend.mediaRequests.push({route:url.pathname,body:sent});
+      if(backend.mediaReject)return json(response,{ret:1,error:'IMAGE_INTEGRITY_FAILED',attempted:false},400);
+      const bytes=fsSync.readFileSync(sent.path),md5=crypto.createHash('md5').update(bytes).digest('hex');
+      const fileReceipt=backend.fileMd5InAppmsg?
+        `<msg><appmsg><title>${sent.name}</title><type>6</type><appattach><totallen>${sent.size}</totallen></appattach><md5>${md5}</md5></appmsg></msg>`:
+        `<msg><appmsg><title>${sent.name}</title><type>6</type><appattach><totallen>${sent.size}</totallen><filemd5>${md5}</filemd5></appattach></appmsg></msg>`;
+      const image=url.pathname==='/SendImgMsg';backend.rows.push({localId:backend.mediaRequests.length+500,serverId:backend.confirm?'987654321987654321':'0',localType:image?3:25769803825,isSend:true,createTime:Math.floor(Date.now()/1000),
+        fullText:image?`<msg><img md5="${md5}"/></msg>`:fileReceipt});
+      return json(response,{ret:0,attempted:true,delivered:false,reused:false,deliveryId:sent.deliveryId});
     }
     if (url.pathname === '/SendStickerMsg') {
       assert.equal(request.headers['x-wechatagent-account'], backend.account.toLowerCase());
@@ -264,6 +278,27 @@ test('attachment UI refuses identical private/group titles and aliases before ru
     await f.bridge.start(f.config);await until(()=>f.bridge.getStatus().state==='ready');
     await assert.rejects(f.bridge.sendAttachment({kind:'private',target:'101',path:filename,name:'synthetic.txt',size:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),mime:'text/plain',mediaType:'file',deliveryId:'b'.repeat(64)}),{code:'WECHAT_ATTACHMENT_TARGET_AMBIGUOUS',attempted:false});
     assert.equal(runnerCalls,0);
+  });
+});
+
+test('default bridge submits image and file through authenticated Hook and confirms exact DB receipts',async t=>{
+  const f=await fixture(t,{healthIntervalMs:60000,mediaCapability:true,fileMd5InAppmsg:true});await f.bridge.start(f.config);await until(()=>f.bridge.getStatus().state==='ready');
+  for(const [i,mediaType] of ['image','file'].entries()){
+    const name=mediaType==='image'?'合成图片.png':'合成文件.txt',filename=path.join(f.directory,name),bytes=Buffer.from('synthetic-'+mediaType);fsSync.writeFileSync(filename,bytes);
+    const input={kind:'private',target:'101',path:filename,name,size:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),mime:mediaType==='image'?'image/png':'text/plain',mediaType,deliveryId:String(i+1).repeat(64)};
+    const delivered=await f.bridge.sendAttachment(input);assert.equal(delivered.receipt,'wechat-server-id');assert.equal(delivered.message_id,'987654321987654321');
+    assert.equal(f.backend.mediaRequests[i].route,mediaType==='image'?'/SendImgMsg':'/SendFileMsg');assert.equal(f.backend.mediaRequests[i].body.wxidorgid,'wxid_test_friend');
+    await f.bridge.sendAttachment(input);assert.equal(f.backend.mediaRequests.length,i+1,'same delivery must never submit twice');
+  }
+});
+
+test('native capability failure and explicit pre-submit rejection never fall back to desktop sending',async t=>{
+  for(const mode of ['unsupported','rejected','unconfirmed'])await t.test(mode,async child=>{
+    const f=await fixture(child,{healthIntervalMs:60000,mediaCapability:mode!=='unsupported',mediaReject:mode==='rejected',confirm:mode!=='unconfirmed'});await f.bridge.start(f.config);await until(()=>f.bridge.getStatus().state==='ready');
+    const filename=path.join(f.directory,'synthetic.txt'),bytes=Buffer.from('synthetic');fsSync.writeFileSync(filename,bytes);
+    const input={kind:'private',target:'101',path:filename,name:'synthetic.txt',size:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),mime:'text/plain',mediaType:'file',deliveryId:'b'.repeat(64)};
+    await assert.rejects(f.bridge.sendAttachment(input),{code:mode==='unsupported'?'WECHAT_ATTACHMENT_HOOK_UNAVAILABLE':mode==='rejected'?'WECHAT_ATTACHMENT_HOOK_REJECTED':'WECHAT_ATTACHMENT_DELIVERY_UNCONFIRMED',attempted:mode==='unconfirmed'});
+    assert.equal(f.backend.mediaRequests?.length??0,mode==='unsupported'?0:1);
   });
 });
 

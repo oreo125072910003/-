@@ -4,7 +4,7 @@ function Wait-HookClient([string]$Executable,[string]$BaseUrl,[string]$ExpectedV
     if($token -notmatch '^[a-f0-9]{64}$'){throw 'HOOK_TOKEN_MISSING'}
     $watch=[Diagnostics.Stopwatch]::StartNew();$missingSince=$null
     do {
-        $matching=@(Get-CimInstance Win32_Process -Filter "Name='Weixin.exe'" | Where-Object { $_.ExecutablePath -eq $Executable -and $_.CommandLine -notmatch '--type=|--crashpad-handler' })
+        $matching=@(Get-Process -Name Weixin -ErrorAction SilentlyContinue | Where-Object Path -eq $Executable)
         if(-not $matching.Count){
             if($null -eq $missingSince){$missingSince=$watch.ElapsedMilliseconds}
             if($watch.ElapsedMilliseconds-$missingSince -ge 8000){throw 'WECHAT_LAUNCH_EXITED: No matching client survived the launcher handoff.'}
@@ -17,10 +17,10 @@ function Wait-HookClient([string]$Executable,[string]$BaseUrl,[string]$ExpectedV
         if($health){
             if($health.integration -ne 'WeChatAgent-1' -or $health.backend -ne 'wechat-hook'){throw 'HOOK_HEALTH_INVALID_RESPONSE'}
             if($health.version -ne $ExpectedVersion){throw 'HOOK_VERSION_MISMATCH'}
-            if([int]$health.pid -notin @($matching | ForEach-Object {[int]$_.ProcessId})){
+            if([int]$health.pid -notin @($matching | ForEach-Object {[int]$_.Id})){
                 # The launcher can hand over between the snapshot and HTTP reply.
-                $matching=@(Get-CimInstance Win32_Process -Filter "Name='Weixin.exe'" | Where-Object { $_.ExecutablePath -eq $Executable -and $_.CommandLine -notmatch '--type=|--crashpad-handler' })
-                if([int]$health.pid -notin @($matching | ForEach-Object {[int]$_.ProcessId})){throw 'HOOK_PORT_OWNER_MISMATCH: The listener does not belong to this matching client.'}
+                $matching=@(Get-Process -Name Weixin -ErrorAction SilentlyContinue | Where-Object Path -eq $Executable)
+                if([int]$health.pid -notin @($matching | ForEach-Object {[int]$_.Id})){throw 'HOOK_PORT_OWNER_MISMATCH: The listener does not belong to this matching client.'}
             }
             if($health.startupState -eq 'ready'){return}
         }

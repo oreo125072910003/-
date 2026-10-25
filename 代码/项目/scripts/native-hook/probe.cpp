@@ -8,6 +8,7 @@
 const char* WeChatAgentInitState() { return "ready"; }
 namespace WeixinSend { void SendText(const std::string&, const std::string&) { ExitProcess(9); } }
 namespace WeixinSend { bool SendStickerFile(const std::string&,const std::string&) { ExitProcess(9);return false; } }
+namespace WeChatAgentMedia {bool Ready(){return false;} bool Submit(const std::string&,const std::wstring&,bool){ExitProcess(9);return false;}}
 namespace WeixinSendXML { void Initialize() {} bool ForwardXmlMessage(const std::string&,const std::string&) { ExitProcess(9);return false; } }
 namespace WeChatAgentSticker { bool StartTrace(const std::string&) {ExitProcess(9);return false;} std::string TraceJson(){return "{}";} }
 int wmain(int argc, wchar_t** argv) {

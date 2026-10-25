@@ -162,6 +162,21 @@ test('attachment integrity, names, media limits and symlink checks fail before U
   assert.equal(f.state.calls, 0);
 });
 
+test('native file receipt supports appmsg md5 and rejects conflicting or incomplete content proof', async t => {
+  const f = fixture(t), attempt = { baseline: [], startedAt: Date.now(), selfWxid: f.state.selfWxid };
+  const nativeXml = `<msg><appmsg><title>${escape(f.checked.name)}</title><type>6</type><appattach><totallen>${f.checked.size}</totallen></appattach><md5>${f.checked.md5}</md5></appmsg></msg>`;
+  assert.equal(matchesWechatAttachmentReceipt(receipt(f.checked, { fullText: nativeXml }), f.checked, attempt), true);
+  for (const fullText of [
+    nativeXml.replace(f.checked.md5, 'b'.repeat(32)),
+    nativeXml.replace(`<md5>${f.checked.md5}</md5>`, ''),
+    nativeXml.replace('</appattach>', `<filemd5>${'b'.repeat(32)}</filemd5></appattach>`),
+    nativeXml.replace('</appattach>', `<md5>${'b'.repeat(32)}</md5></appattach>`),
+    nativeXml.replace('</appattach>', `<md5>${f.checked.md5}</md5></appattach>`).replace(`</appattach><md5>${f.checked.md5}`, `</appattach><md5>${'b'.repeat(32)}`),
+    nativeXml.replace(`<totallen>${f.checked.size}</totallen>`, '<totallen>1</totallen>'),
+    nativeXml.replace(escape(f.checked.name), '另一份文件.pdf'),
+  ]) assert.equal(matchesWechatAttachmentReceipt(receipt(f.checked, { fullText }), f.checked, attempt), false);
+});
+
 test('receipt matching rejects wrong hash, name, size, direction, type, time, identity and zero IDs', async t => {
   const f = fixture(t), startedAt = Date.now(), attempt = { baseline: [], startedAt, selfWxid: f.state.selfWxid };
   assert.equal(matchesWechatAttachmentReceipt(receipt(f.checked), f.checked, attempt), true);

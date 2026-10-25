@@ -24,6 +24,7 @@ const attachmentRejectedCodes = new Set([
   'WECHAT_ATTACHMENT_UI_INPUT_UNREADABLE','WECHAT_ATTACHMENT_UI_DRAFT_PRESENT',
   'WECHAT_ATTACHMENT_UI_OCR_UNAVAILABLE',
   'WECHAT_ATTACHMENT_TARGET_AMBIGUOUS','SENDER_BUSY','CONVERSATION_NOT_ALLOWED',
+  'WECHAT_ATTACHMENT_HOOK_UNAVAILABLE','WECHAT_ATTACHMENT_HOOK_REJECTED',
   'WECHAT_NOT_READY','WECHAT_NOT_CONNECTED','WECHAT_ACCOUNT_CHANGED'
 ]);
 const textRejectedCodes = new Set(['SENDER_BUSY','CONVERSATION_NOT_ALLOWED','WECHAT_NOT_READY','WECHAT_NOT_CONNECTED',
@@ -78,7 +79,9 @@ const descriptions = {
   WECHAT_ATTACHMENT_INTEGRITY_FAILED:'附件快照未通过完整性核对，请重新选择文件。',
   WECHAT_ATTACHMENT_TARGET_AMBIGUOUS:'目标会话存在重名或映射不明确，未能唯一核对收件人。',
   WECHAT_ATTACHMENT_UI_OCR_UNAVAILABLE:'本机微信需要简体中文界面识别组件，当前组件不可用。',
-  WECHAT_ATTACHMENT_DELIVERY_UNCONFIRMED:'微信尚未提供与此附件精确匹配的服务器送达回执。'
+  WECHAT_ATTACHMENT_DELIVERY_UNCONFIRMED:'微信尚未提供与此附件精确匹配的服务器送达回执。',
+  WECHAT_ATTACHMENT_HOOK_UNAVAILABLE: '微信原生附件组件尚未就绪，请更新 Hook 并重启微信。',
+  WECHAT_ATTACHMENT_HOOK_REJECTED: '微信原生组件在提交前拒绝了附件，请核对附件和当前账号。',
 };
 const explain = error => { const code = String(error?.message ?? error ?? ''); return descriptions[code] ? `${descriptions[code]}（${code}）` : publicError(error); };
 

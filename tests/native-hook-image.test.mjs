@@ -105,6 +105,15 @@ test('native image guards and durable one-shot delivery use the real C++ routes 
         const record = fs.readFileSync(f.ledgerFiles()[0], 'utf8'); assert.doesNotMatch(record, /测试图片|wxid_synthetic|中文资料/); await p.stop();
         const restarted = await start(f); assert.equal((await restarted.raw()).body.reused, true); assert.equal(f.auditRows().length, 1); await restarted.stop();
       });
+      await t.test('file route pins a Unicode TXT snapshot and shares delivery IDs with the image route',async()=>{
+        const f=fixture();const file=path.join(f.outgoing,'合成测试文件😀.txt'),bytes=Buffer.from('合成文件，不含个人资料。');fs.writeFileSync(file,bytes);
+        const body={...f.request,path:file,name:path.basename(file),mime:'text/plain',size:bytes.length,sha256:hash(bytes)};
+        const p=await start(f);const sent=await p.raw(body,{route:'/SendFileMsg'});
+        assert.equal(sent.status,200);assert.equal(sent.body.delivered,false);assert.equal(f.auditRows().length,1);
+        assert.equal((await p.raw(body,{route:'/SendFileMsg'})).body.reused,true);
+        assert.equal((await p.raw(body)).body.error,'IMAGE_DELIVERY_CONFLICT');
+        assert.throws(()=>fs.writeFileSync(file,'changed'),/EBUSY|EACCES|EPERM/);await p.stop();
+      });
       await t.test('unknown outcome and process crash retain the one-shot reservation across restart', async () => {
         for (const outcome of ['unknown', 'crash']) {
           const f = fixture(); f.configure({ outcome }); let p = await start(f);

@@ -21,6 +21,7 @@
 #include "json.hpp"
 #include "wx_send.h"
 #include "sticker_sender.h"
+#include "media_sender.h"
 #include "global.h"
 #include "wechatagent_hook.h"
 #include "deferred_init.h"
@@ -154,10 +155,8 @@ static std::set<std::string> DatabaseAccounts() {
 }
 
 namespace {
-// Keep the driver disabled in production: the reviewed upstream image builder
-// overwrites UTF-16 path length/capacity with UTF-8 byte counts. Its vtables and
-// ownership ABI have not been verified against a real 4.1.10.27 image send.
-// Never call WeixinSend::SendImage just because an address is executable.
+// Media uses product-owned native factories. A local installation manifest
+// supplies the one permitted snapshot root; HTTP cannot choose that root.
 struct ImageDriver {
     std::filesystem::path root;
     std::function<bool()> ready = [] { return false; };
@@ -244,19 +243,20 @@ static std::string ImageHash(const unsigned char* bytes, size_t length) {
     return value;
 }
 static std::string ImageHash(const std::string& value) { return ImageHash(reinterpret_cast<const unsigned char*>(value.data()), value.size()); }
-static ImageSnapshot InspectImage(const ImageDriver& driver, const json& data) {
+static ImageSnapshot InspectImage(const ImageDriver& driver, const json& data, bool file = false) {
     auto root = ImagePath(driver.root.native());
     auto image = ImagePath(StrictWide(data.at("path").get<std::string>()));
     auto name = StrictWide(data.at("name").get<std::string>());
     if (!SamePath(image.parent_path().parent_path(), root / L"wechat" / L"outgoing") || image.filename().native() != name ||
         !std::regex_match(Utf8(image.parent_path().filename().native()), std::regex("wxatt_[a-f0-9]{32}")) ||
-        !data.at("size").is_number_unsigned() || data.at("size").get<uint64_t>() == 0 || data.at("size").get<uint64_t>() > 8 * 1024 * 1024) throw ImageFault("IMAGE_SNAPSHOT_REFUSED");
+        !data.at("size").is_number_unsigned() || data.at("size").get<uint64_t>() == 0 || data.at("size").get<uint64_t>() > (file?50:8) * 1024 * 1024) throw ImageFault("IMAGE_SNAPSHOT_REFUSED");
     auto pins = PinChain(image, false);
-    auto bytes = ReadPinned(pins.back(), 8 * 1024 * 1024);
+    auto bytes = ReadPinned(pins.back(), (file?50:8) * 1024 * 1024);
     if (bytes.size() != data.at("size").get<uint64_t>() || ImageHash(bytes.data(), bytes.size()) != data.at("sha256").get<std::string>()) throw ImageFault("IMAGE_INTEGRITY_FAILED");
     auto extension = image.extension().native();
     for (auto& value : extension) value = towlower(value);
     auto mime = data.at("mime").get<std::string>();
+    if(file){if(!std::regex_match(mime,std::regex("[a-z0-9.+-]+/[a-z0-9.+-]+")))throw ImageFault("IMAGE_FORMAT_UNSUPPORTED");return {std::move(pins),image};}
     bool png = bytes.size() >= 8 && !memcmp(bytes.data(), "\x89PNG\r\n\x1a\n", 8);
     bool jpeg = bytes.size() >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff;
     if (!(png && extension == L".png" && mime == "image/png") && !(jpeg && (extension == L".jpg" || extension == L".jpeg") && mime == "image/jpeg")) throw ImageFault("IMAGE_FORMAT_UNSUPPORTED");
@@ -279,11 +279,11 @@ static void ImageReply(httplib::Response& response, int status, const char* code
     response.set_content(json{{"ret", 1}, {"error", code}, {"attempted", attempted}, {"retryable", false}}.dump(), "application/json");
 }
 static void RegisterImageRoute(httplib::Server& server, std::function<bool(const httplib::Request&, httplib::Response&)> authorized,
-    std::shared_ptr<ImageDriver> driver) {
+    std::shared_ptr<ImageDriver> driver, bool file = false) {
     // Held snapshot handles prevent replacement or writes while native work may
     // still consume its path. The bounded driver lifetime is the Hook process.
     auto held = std::make_shared<std::map<std::string, ImageSnapshot>>();
-    server.Post("/SendImgMsg", [authorized, driver, held](const httplib::Request& request, httplib::Response& response) {
+    server.Post(file?"/SendFileMsg":"/SendImgMsg", [authorized, driver, held, file](const httplib::Request& request, httplib::Response& response) {
         if (!authorized(request, response)) return;
         bool attempted = false;
         try {
@@ -311,7 +311,7 @@ static void RegisterImageRoute(httplib::Server& server, std::function<bool(const
             auto ledger = root / L"wechat" / L"native-image-deliveries";
             if (!CreateDirectoryW(ledger.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) throw ImageFault("IMAGE_STATE_UNAVAILABLE", 503);
             auto ledgerPin = PinFile(ledger, true);
-            auto key = ImageHash(json::array({account, id}).dump()), fingerprint = ImageHash(data.dump());
+            auto key = ImageHash(json::array({account, id}).dump()), fingerprint = ImageHash(json::array({file?"file":"image",data}).dump());
             auto filename = ledger / (key + ".json");
             auto attributes = GetFileAttributesW(filename.c_str());
             if (attributes != INVALID_FILE_ATTRIBUTES) {
@@ -328,7 +328,7 @@ static void RegisterImageRoute(httplib::Server& server, std::function<bool(const
             }
             if (GetLastError() != ERROR_FILE_NOT_FOUND) throw ImageFault("IMAGE_STATE_UNAVAILABLE", 503);
             if (held->size() >= 128) throw ImageFault("IMAGE_INFLIGHT_LIMIT", 429);
-            auto snapshot = InspectImage(*driver, data);
+            auto snapshot = InspectImage(*driver, data, file);
             identity();
             if (!driver->ready()) throw ImageFault("IMAGE_NATIVE_ABI_UNVERIFIED", 503);
             auto record = json{{"version", 1}, {"deliveryId", id}, {"fingerprint", fingerprint}, {"state", "unknown"}};
@@ -373,6 +373,17 @@ void ConfigureWeChatAgentImageProbe(const std::filesystem::path& root, const std
 #endif
 
 void RegisterWeChatAgentRoutes(httplib::Server& server) {
+#ifndef WECHATAGENT_IMAGE_PROBE
+    // Only the trusted local updater writes this manifest beside version.dll.
+    // Absent or invalid configuration keeps the existing unsupported response.
+    try {
+        std::ifstream manifest(std::filesystem::path(ModulePath()).parent_path()/L"xiaozhushou-media-root.json");
+        if(manifest){auto options=json::parse(manifest);if(options.size()!=2||options.at("version")!=1)throw std::runtime_error("manifest");
+            auto root=ImagePath(StrictWide(options.at("dataRoot").get<std::string>()));auto pins=PinChain(root/L"wechat",true);
+            imageDriver->root=root;imageDriver->ready=WeChatAgentMedia::Ready;
+            imageDriver->submit=[](const std::string& target,const std::wstring& path){return WeChatAgentMedia::Submit(target,path,false);};}
+    }catch(...){imageDriver=std::make_shared<ImageDriver>();}
+#endif
     std::ifstream file(std::filesystem::path(ModulePath()).parent_path() / L"wechatagent-hook.token");
     std::string token;
     std::getline(file, token);
@@ -393,10 +404,16 @@ void RegisterWeChatAgentRoutes(httplib::Server& server) {
         json data = {{"backend", "wechat-hook"}, {"integration", "WeChatAgent-1"},
             {"version", CoreVersion()}, {"pid", GetCurrentProcessId()}, {"databaseAccounts", DatabaseAccounts()}, {"nativeStickerSend",StickerReady()},
             {"initialization", "deferred-module-v1"}, {"startupState", WeChatAgentInitState()},
-            {"nativeImageSend", false}, {"imageSendStatus", "IMAGE_NATIVE_ABI_UNVERIFIED"}};
+            {"nativeImageSend", imageDriver->ready()&&bool(imageDriver->submit)}, {"nativeFileSend", imageDriver->ready()&&bool(imageDriver->submit)},
+            {"mediaProtocol", "xiaozhushou-native-media-v1"}, {"imageSendStatus", imageDriver->ready()&&bool(imageDriver->submit)?"native-factory-v1":"IMAGE_NATIVE_ABI_UNVERIFIED"}};
         res.set_content(data.dump(), "application/json");
     });
     RegisterImageRoute(server, authorized, imageDriver);
+    auto fileDriver=std::make_shared<ImageDriver>(*imageDriver);
+#ifndef WECHATAGENT_IMAGE_PROBE
+    if(fileDriver->submit)fileDriver->submit=[](const std::string& target,const std::wstring& path){return WeChatAgentMedia::Submit(target,path,true);};
+#endif
+    RegisterImageRoute(server, authorized, fileDriver, true);
     server.Post("/SendStickerMsg",[authorized](const httplib::Request& req,httplib::Response& res){
         if(!authorized(req,res))return;
         try{

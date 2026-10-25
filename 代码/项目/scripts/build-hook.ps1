@@ -44,8 +44,10 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'native-hook\sticker_sender.cpp'
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'native-hook\sticker_trace.cpp') -Destination (Join-Path $build 'src') -Force
 foreach ($name in @('deferred_init.h','http_server.h')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot ('native-hook\'+$name)) -Destination (Join-Path $build 'include') -Force }
 foreach ($name in @('deferred_init.cpp','http_server.cpp')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot ('native-hook\'+$name)) -Destination (Join-Path $build 'src') -Force }
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'native-hook\media_sender.h') -Destination (Join-Path $build 'include') -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'native-hook\media_sender.cpp') -Destination (Join-Path $build 'src') -Force
 $project = Join-Path $build 'x64_Version_dll.vcxproj'
-Replace-Checked $project '<ClCompile Include="src\http_routes.cpp" />' '<ClCompile Include="src\http_routes.cpp" /><ClCompile Include="src\wechatagent_hook.cpp" /><ClCompile Include="src\sticker_sender.cpp" /><ClCompile Include="src\sticker_trace.cpp" /><ClCompile Include="src\deferred_init.cpp" />'
+Replace-Checked $project '<ClCompile Include="src\http_routes.cpp" />' '<ClCompile Include="src\http_routes.cpp" /><ClCompile Include="src\wechatagent_hook.cpp" /><ClCompile Include="src\sticker_sender.cpp" /><ClCompile Include="src\sticker_trace.cpp" /><ClCompile Include="src\deferred_init.cpp" /><ClCompile Include="src\media_sender.cpp" />'
 Replace-Checked $project 'psapi.lib;gdiplus.lib;' 'version.lib;psapi.lib;gdiplus.lib;'
 if (-not $MsBuild) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'

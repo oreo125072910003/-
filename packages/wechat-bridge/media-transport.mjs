@@ -11,7 +11,7 @@ const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).
 // this fixed product script; source runs retain their ordinary filesystem path.
 const scriptPath = fileURLToPath(new URL('./send-attachment-ui.ps1', import.meta.url)).replace(/([\\/])app\.asar([\\/])/, '$1app.asar.unpacked$2');
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp']);
-const INPUT_PREFLIGHT_CODES = new Set(['WECHAT_ATTACHMENT_UI_INPUT_UNREADABLE', 'WECHAT_ATTACHMENT_UI_DRAFT_PRESENT']);
+const INPUT_PREFLIGHT_CODES = new Set(['WECHAT_ATTACHMENT_UI_INPUT_UNREADABLE', 'WECHAT_ATTACHMENT_UI_DRAFT_PRESENT', 'WECHAT_ATTACHMENT_HOOK_REJECTED']);
 let globalMediaBusy = false;
 
 // Only the fixed sender's explicit pre-paste report can revoke a submission
@@ -82,7 +82,7 @@ export function matchesWechatAttachmentReceipt(row, attachment, attempt) {
   if (base !== 49) return false;
   const app = tag(xml, 'appmsg', true), attachmentXml = app && tag(app, 'appattach', true);
   if (!app || !attachmentXml || tag(app, 'type') !== '6' || tag(app, 'title') !== attachment.name || tag(attachmentXml, 'totallen') !== String(attachment.size)) return false;
-  const candidates = [tag(attachmentXml, 'filemd5'), tag(attachmentXml, 'md5'), tag(app, 'filemd5')].filter(value => value !== null);
+  const candidates = [...app.matchAll(/<(filemd5|md5)(?:\s[^<>]*)?>([\s\S]*?)<\/\1\s*>/gi)].map(match => decodeXml(match[2].trim()));
   return candidates.length > 0 && candidates.every(value => /^[a-f0-9]{32}$/i.test(value) && value.toLowerCase() === attachment.md5);
 }
 
@@ -142,7 +142,7 @@ export async function runWechatAttachmentUi(request, { signal, beforeSubmit } = 
 }
 
 export function createWechatMediaTransport({ dataDir, signal, assertReady, verify, resolveTarget, readMessages,
-  nativeRunner = runWechatAttachmentUi, receiptTimeoutMs = 18000, pollMs = 400 } = {}) {
+  nativeRunner = async()=>{throw fault('WECHAT_ATTACHMENT_HOOK_UNAVAILABLE');}, receiptTimeoutMs = 18000, pollMs = 400 } = {}) {
   if (!path.isAbsolute(dataDir ?? '') || ![assertReady, verify, resolveTarget, readMessages, nativeRunner].every(value => typeof value === 'function')) throw fault('WECHAT_ATTACHMENT_INTERFACE_INVALID');
   const directory = path.join(dataDir, 'state', 'media-deliveries');
   fs.mkdirSync(directory, { recursive: true });
