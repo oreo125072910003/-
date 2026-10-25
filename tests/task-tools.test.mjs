@@ -122,3 +122,30 @@ test('local command runner returns the actual exit code and output and stops a t
   const result = await runProductCommand(windows ? "Write-Output 'task-tools-ok'; exit 7" : "echo task-tools-ok; exit 7", { cwd: f.workspace, timeoutMs: 5000 }); assert.equal(result.exitCode, 7); assert.match(result.output, /task-tools-ok/);
   const timed = await runProductCommand(windows ? 'Start-Sleep -Seconds 20' : 'sleep 20', { cwd: f.workspace, timeoutMs: 1000 }); assert.equal(timed.stopped, 'timeout');
 });
+
+test('an exited shell releases inherited output pipes while its desktop child stays open', { skip: process.platform !== 'win32', timeout: 10000 }, async t => {
+  const f = await fixture(t), literal = value => "'" + value.replaceAll("'", "''") + "'";
+  const marker = path.join(f.workspace, 'desktop-child.pid');
+  let childPid;
+  t.after(() => { if (childPid) { try { process.kill(childPid); } catch {} } });
+  const command = '$desktopChild = Start-Process -FilePath ' + literal(process.execPath) +
+    " -ArgumentList @('-e', 'setTimeout(()=>{},15000)') -NoNewWindow -PassThru -WorkingDirectory " + literal(os.tmpdir()) + '; ' +
+    '[IO.File]::WriteAllText(' + literal(marker) + ", [string]$desktopChild.Id); Write-Output 'parent-completed'; exit 0";
+  const started = Date.now(), result = await runProductCommand(command, { cwd: f.workspace, timeoutMs: 5000 });
+  childPid = Number(fs.readFileSync(marker, 'utf8').trim());
+  assert.equal(result.exitCode, 0); assert.match(result.output, /parent-completed/);
+  assert.equal(result.stopped, undefined, 'a completed shell is not a timed out command');
+  assert.equal(result.outputDetached, true); assert.ok(Date.now() - started < 4000);
+  process.kill(childPid, 0);
+  const next = await f.request('xiaozhushou_save_text', { name: 'next-message.txt', text: 'The next task can proceed.' });
+  assert.equal(next.isError, false);
+});
+
+test('cancelling a running command also releases task-tool shutdown', { skip: process.platform !== 'win32', timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const pending = f.request('xiaozhushou_run_local_shell', { command: 'Start-Sleep -Seconds 30', timeoutMs: 30000 });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const started = Date.now(); f.controller.abort();
+  const result = await pending; assert.equal(result.isError, true);
+  await f.access.close(); assert.ok(Date.now() - started < 4000);
+});

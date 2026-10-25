@@ -56,16 +56,45 @@ export function runProductCommand(command, { cwd, signal, timeoutMs = 30000 } = 
     const executable = windows ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe') : '/bin/sh';
     const script = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n" + command;
     const child = spawn(executable, windows ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')] : ['-c', command], { cwd, windowsHide: true, stdio: ['ignore','pipe','pipe'] });
-    const chunks = []; let size = 0, truncated = false, reason;
-    const terminate = why => { reason ??= why; if (windows && child.pid) { const killer = spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32/taskkill.exe'), ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' }); killer.on('error', () => child.kill()); } else child.kill('SIGKILL'); };
+    const chunks = []; let size = 0, truncated = false, reason, settled = false, exited = false, drainTimer, stopTimer, outputDetached = false;
+    const cleanup = () => { clearTimeout(timer); clearTimeout(drainTimer); clearTimeout(stopTimer); signal?.removeEventListener('abort', abort); };
+    const finish = (error, code = child.exitCode) => {
+      if (settled) return;
+      settled = true; cleanup();
+      child.stdout.destroy(); child.stderr.destroy();
+      if (error) { reject(error); return; }
+      if (reason === 'cancelled') { reject(Error('电脑任务已取消。')); return; }
+      resolve({ exitCode: code, output: Buffer.concat(chunks).toString('utf8'), truncated, ...(reason ? { stopped: reason } : {}), ...(outputDetached ? { outputDetached: true } : {}) });
+    };
+    const terminate = why => {
+      if (settled || reason) return;
+      reason = why;
+      // A GUI child can retain inherited output pipes after PowerShell exits.
+      // Never target that exited shell's PID again; it may already be reused.
+      if (exited || child.exitCode !== null || child.signalCode !== null) { outputDetached = true; finish(); return; }
+      const fallback = () => { if (!settled && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); };
+      if (windows && child.pid) {
+        const killer = spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32/taskkill.exe'), ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' });
+        killer.once('error', fallback); killer.once('exit', code => { if (code !== 0) fallback(); });
+      } else fallback();
+      stopTimer = setTimeout(() => {
+        if (exited || child.exitCode !== null || child.signalCode !== null) { outputDetached = true; finish(); }
+        else finish(Object.assign(Error('已请求停止电脑命令，但尚未确认进程退出。'), { code: 'LOCAL_COMMAND_STOP_UNCONFIRMED', stopUnconfirmed: true }));
+      }, 2500);
+    };
     const read = chunk => { const remaining = 65536 - size; if (remaining > 0) { chunks.push(chunk.subarray(0, remaining)); size += Math.min(remaining, chunk.length); } if (chunk.length > remaining) { truncated = true; terminate('output-limit'); } };
     child.stdout.on('data', read); child.stderr.on('data', read);
     const abort = () => terminate('cancelled'), timer = setTimeout(() => terminate('timeout'), timeoutMs);
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
-    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
-    child.on('error', error => { cleanup(); reject(error); });
-    child.on('close', code => { cleanup(); if (reason === 'cancelled') { reject(Error('电脑任务已取消。')); return; } resolve({ exitCode: code, output: Buffer.concat(chunks).toString('utf8'), truncated, ...(reason ? { stopped: reason } : {}) }); });
+    child.once('error', error => finish(error));
+    child.once('exit', code => {
+      exited = true; clearTimeout(timer); clearTimeout(stopTimer);
+      // Drain trailing output briefly, without waiting for launched desktop
+      // programs to close their inherited handles before admitting another task.
+      drainTimer = setTimeout(() => { outputDetached = true; finish(undefined, code); }, 250);
+    });
+    child.once('close', code => finish(undefined, code));
   });
 }
 
