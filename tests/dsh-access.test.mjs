@@ -4,7 +4,7 @@ import { createDshAccess } from '../apps/service/dsh-access.mjs';
 
 const catalog = () => ({ ok: true, metadataOnly: true, source: 'harness-host',
   skills: [{ name: 'office-docx', description: '原 Harness Word 技能', provider: 'dsh', modelInvocable: true }, { name: 'internal-only', modelInvocable: false }],
-  tools: [{ name: 'mcp_contract_find', description: '合同检索', grantable: true }, { name: 'shell', grantable: false }] });
+  tools: [{ name: 'mcp__contract_helper__library_search', description: '合同检索', grantable: true }, { name: 'shell', grantable: false }] });
 function fixture(options = {}) {
   let settings = { ...(options.settings || {}) }, response = options.response || catalog(), calls = 0, changes = 0;
   const requests = [], writes = [];
@@ -29,8 +29,8 @@ test('default grants are empty even while all original host capabilities are vis
 });
 test('trusted explicit save uses exact live names and persists only dshOwnerGrants', async () => {
   const f = fixture({ settings: { assistantName: '小助手' } });
-  const result = await f.access.saveGrants({ skills: ['office-docx'], tools: ['mcp_contract_find'] });
-  assert.deepEqual(result.saved, { skills: ['office-docx'], tools: ['mcp_contract_find'] });
+  const result = await f.access.saveGrants({ skills: ['office-docx'], tools: ['mcp__contract_helper__library_search'] });
+  assert.deepEqual(result.saved, { skills: ['office-docx'], tools: ['mcp__contract_helper__library_search'] });
   assert.deepEqual(f.writes, [{ dshOwnerGrants: result.saved }]); assert.equal(f.settings.assistantName, '小助手'); assert.equal(f.changes, 1);
   const state = await f.access.getState(); assert.deepEqual(state.effective, result.saved); assert.deepEqual(state.unavailable, { skills: [], tools: [] });
 });
@@ -45,20 +45,20 @@ test('grant lists are bounded, unique, exact strings and do not accept extra aut
   assert.equal(f.calls, 0); assert.equal(f.writes.length, 0);
 });
 test('wechat, missing and unrecognized source always receive zero owner capabilities without host read', async () => {
-  const f = fixture({ settings: { dshOwnerGrants: { skills: ['office-docx'], tools: ['mcp_contract_find'] } } });
+  const f = fixture({ settings: { dshOwnerGrants: { skills: ['office-docx'], tools: ['mcp__contract_helper__library_search'] } } });
   for (const request of [{ source: 'wechat' }, { source: 'mail' }, { source: 'web' }, {}, undefined]) assert.deepEqual(await f.access.grantsForTask(request), { skills: [], tools: [] });
   assert.equal(f.calls, 0); assert.equal(f.writes.length, 0);
 });
 test('desktop task rechecks live source and receives only still-available exact grants', async () => {
-  const f = fixture({ settings: { dshOwnerGrants: { skills: ['office-docx', 'removed-skill'], tools: ['mcp_contract_find', 'removed_tool'] } } });
-  assert.deepEqual(await f.access.grantsForTask({ source: 'desktop' }), { skills: ['office-docx'], tools: ['mcp_contract_find'] });
-  f.response = { ...catalog(), tools: [{ name: 'mcp_contract_find', grantable: false }] };
+  const f = fixture({ settings: { dshOwnerGrants: { skills: ['office-docx', 'removed-skill'], tools: ['mcp__contract_helper__library_search', 'removed_tool'] } } });
+  assert.deepEqual(await f.access.grantsForTask({ source: 'desktop' }), { skills: ['office-docx'], tools: ['mcp__contract_helper__library_search'] });
+  f.response = { ...catalog(), tools: [{ name: 'mcp__contract_helper__library_search', grantable: false }] };
   assert.deepEqual(await f.access.grantsForTask({ source: 'desktop' }), { skills: ['office-docx'], tools: [] });
-  const state = await f.access.getState(); assert.deepEqual(state.unavailable, { skills: ['removed-skill'], tools: ['mcp_contract_find', 'removed_tool'] });
+  const state = await f.access.getState(); assert.deepEqual(state.unavailable, { skills: ['removed-skill'], tools: ['mcp__contract_helper__library_search', 'removed_tool'] });
   assert.equal(f.writes.length, 0);
 });
 test('disconnected Harness fails closed while keeping saved selection and stale metadata for explanation', async () => {
-  const f = fixture({ settings: { dshOwnerGrants: { skills: ['office-docx'], tools: ['mcp_contract_find'] } } });
+  const f = fixture({ settings: { dshOwnerGrants: { skills: ['office-docx'], tools: ['mcp__contract_helper__library_search'] } } });
   await f.access.getCatalog(); f.response = { ok: false, error: { code: 'HOST_UNAVAILABLE', message: 'Harness 未启动' } };
   const state = await f.access.getState(); assert.equal(state.connected, false); assert.equal(state.catalog.stale, true); assert.equal(state.catalog.skills[0].name, 'office-docx');
   assert.deepEqual(state.effective, { skills: [], tools: [] }); assert.deepEqual(state.unavailable, state.saved);
@@ -67,19 +67,19 @@ test('disconnected Harness fails closed while keeping saved selection and stale 
   const cleared = await f.access.saveGrants({ skills: [], tools: [] }); assert.deepEqual(cleared.saved, { skills: [], tools: [] }); assert.equal(f.writes.length, 1);
 });
 test('malformed or duplicate live catalog cannot confer authority', async () => {
-  const f = fixture({ response: { ...catalog(), tools: [{ name: 'mcp_contract_find', grantable: true }, { name: 'mcp_contract_find', grantable: true }] } });
+  const f = fixture({ response: { ...catalog(), tools: [{ name: 'mcp__contract_helper__library_search', grantable: true }, { name: 'mcp__contract_helper__library_search', grantable: true }] } });
   assert.equal((await f.access.getCatalog()).error.code, 'DSH_CATALOG_INVALID');
-  await assert.rejects(f.access.saveGrants({ tools: ['mcp_contract_find'] }), { code: 'DSH_CATALOG_UNAVAILABLE' });
+  await assert.rejects(f.access.saveGrants({ tools: ['mcp__contract_helper__library_search'] }), { code: 'DSH_CATALOG_UNAVAILABLE' });
   f.response = { ...catalog(), metadataOnly: false }; assert.equal((await f.access.getCatalog()).ok, false);
   f.response = { ...catalog(), tools: Array.from({ length: 501 }, (_, i) => ({ name: 'tool_' + i, grantable: true })) }; assert.equal((await f.access.getCatalog()).ok, false);
   assert.equal(f.writes.length, 0);
 });
 test('corrupted persisted grants are never forwarded and returned arrays cannot mutate persisted authority', async () => {
-  const f = fixture({ settings: { dshOwnerGrants: { tools: ['mcp_contract_find', 'mcp_contract_find'] } } });
+  const f = fixture({ settings: { dshOwnerGrants: { tools: ['mcp__contract_helper__library_search', 'mcp__contract_helper__library_search'] } } });
   assert.deepEqual(await f.access.grantsForTask({ source: 'desktop' }), { skills: [], tools: [] });
-  const saved = await f.access.saveGrants({ tools: ['mcp_contract_find'] }); saved.saved.tools.push('shell');
+  const saved = await f.access.saveGrants({ tools: ['mcp__contract_helper__library_search'] }); saved.saved.tools.push('shell');
   const effective = await f.access.grantsForTask({ source: 'desktop' }); effective.tools.push('shell');
-  assert.deepEqual(f.settings.dshOwnerGrants, { skills: [], tools: ['mcp_contract_find'] });
+  assert.deepEqual(f.settings.dshOwnerGrants, { skills: [], tools: ['mcp__contract_helper__library_search'] });
 });
 test('failed persistence does not notify while UI observer failure cannot undo a completed save', async () => {
   const failed = fixture({ saveError: true }); await assert.rejects(failed.access.saveGrants({ skills: ['office-docx'] }), /synthetic-save-failure/); assert.equal(failed.changes, 0);

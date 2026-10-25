@@ -13,7 +13,7 @@ test('actual MCP namespaces, bare control aliases and unclassified proxy tools d
   }
 });
 test('recognized contract and interface tools remain usable under the same catalog and final execution classification',async()=>{
-  for(const name of ['mcp__pcbridge__fetch_scores','mcp__pcbridge__fetch_paper','mcp__pcbridge__screenshot_url','mcp__contract_helper__query_inventory','mcp__contract_helper__recommend_materials','mcp_contract_find']){
+  for(const name of ['mcp__pcbridge__fetch_scores','mcp__pcbridge__fetch_paper','mcp__pcbridge__screenshot_url','mcp__contract_helper__query_inventory','mcp__contract_helper__recommend_materials','mcp__contract_helper__library_search']){
     assert.equal(describeTool(name).category,'business-tool');
     const grants=normalizeOwnerGrants({authority:'product-owner',ownerGrants:{tools:[name]}});
     const access=await bindOwnerAccess({}, {tools:{schemas:()=>[{name}]}},{},{grants,active:()=>true,signal:new AbortController().signal});

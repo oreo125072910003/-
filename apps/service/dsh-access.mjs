@@ -1,3 +1,4 @@
+import {describeTool,grantableTool,computerGrantableTool} from '../../packages/contracts/tool-policy.mjs';
 const EMPTY = () => ({ skills: [], tools: [] });
 const fail = (code, message) => Object.assign(new Error(message), { code });
 const SKILL_NAME = /^[^\u0000-\u001f\u007f\/\\]{1,160}$/;
@@ -83,4 +84,3 @@ export function createDshAccess({ runtime, settingsProvider, store, onChange } =
   }
   return { getCatalog, getState, saveGrants, grantsForTask };
 }
-import { grantableTool, describeTool, computerGrantableTool } from '../../packages/contracts/tool-policy.mjs';
