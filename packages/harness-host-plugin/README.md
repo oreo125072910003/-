@@ -8,7 +8,7 @@
 
 源目录的空补丁不能直接安装。应安装生成的 `installDirectory`：首选 Harness 正式插件管理器的本地 bundle 安装功能；正式 CLI 为 `dsh plugin --profile desktop add file:<installDirectory> --ignore-scripts`。CLI 使用自己的 profile 锁、兼容性检查和原子 manifest 保存，成功后会自动选择新的 bundle。启用 HMR 的 Harness 观察 profile manifest 并重组运行配置；CLI 安装成功本身不能证明已热生效。以本插件 `/health` 可访问、身份正确为准；若宿主报告需要重启，则完整退出托盘后正常重开。替换已加载包可能仍需重启。
 
-本插件依赖 `@deepseek-ai/dsh-llm@0.2.0-rc.2`。安装器按正常依赖机制解析，不复制旧项目的 node_modules。包无构建脚本。插件管理器、CLI 或安装流程所报告的失败应保留，不用手工覆盖 profile 绕过。
+本插件依赖 `@deepseek-ai/dsh-llm@0.2.0-rc.2`。生成补丁通过带 revision 的绝对文件 URL 加载 `installDirectory/index.mjs`，因此该目录自身必须能解析依赖。**先在生成的 `installDirectory` 中运行 `npm install --omit=dev --ignore-scripts --no-package-lock --no-audit --no-fund`，再执行上面的正式插件安装命令。** CLI 为 profile 安装依赖，不保证绝对 URL 指向的源目录也有依赖；只执行 CLI 可能显示已安装而宿主没有启动。包无构建脚本，不复制旧项目的 node_modules。插件管理器、CLI 或安装流程所报告的失败应保留，不用手工覆盖 profile 绕过。最后必须核对 `/health` 的 `pluginVersion`、`revision` 和所需能力，不能只看插件清单。
 
 ## HTTP 契约
 
