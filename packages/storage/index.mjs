@@ -158,8 +158,12 @@ export async function createStore(dataDir) {
   const mapWechatDelivery=row=>{if(!row)return null;const {payload,...fields}=row;return {mediaType:'text',stickerId:'',requestId:'',...JSON.parse(payload||'{}'),...fields};};
   function insertWechatMessage(message){
     const existing=query('SELECT id FROM wechat_messages WHERE inbound_key=?',[message.inboundKey])[0];
-    if(existing)return {inserted:false,message:api.getWechatMessage(existing.id)};
-    const payload={outgoing:message.outgoing===true,source:message.source??'live',messageType:message.messageType??'text',images:message.images??[],time:message.time??null,serverId:message.serverId??''};
+    if(existing){
+      const previous=api.getWechatMessage(existing.id);
+      if(message.files?.length&&!previous.files?.length){const raw=query('SELECT payload FROM wechat_messages WHERE id=?',[existing.id])[0];db.run('UPDATE wechat_messages SET payload=? WHERE id=?',[JSON.stringify({...JSON.parse(raw.payload||'{}'),files:message.files,messageType:'file'}),existing.id]);}
+      return {inserted:false,message:api.getWechatMessage(existing.id)};
+    }
+    const payload={outgoing:message.outgoing===true,source:message.source??'live',messageType:message.messageType??'text',images:message.images??[],files:message.files??[],time:message.time??null,serverId:message.serverId??''};
     db.run('INSERT INTO wechat_messages(id,inbound_key,account_id,kind,conversation_id,conversation_name,sender_id,sender_name,text,external_id,received_at,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
       [message.id,message.inboundKey,message.accountId,message.kind,message.conversationId,message.conversationName,message.senderId,message.senderName,message.text,message.externalId,message.receivedAt,JSON.stringify(payload)]);
     return {inserted:true,message:api.getWechatMessage(message.id)};

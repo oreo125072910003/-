@@ -131,6 +131,7 @@ async function fixture(t, options = {}) {
     onMessage: message => { if (backend.callbackFails) throw Error('SIMULATED_DATABASE_FAILURE'); messages.push(message);return backend.eventHandler?.(message); }, onState: state => {states.push(state);backend.stateHandler?.(state);}, onError: error => errors.push(error),
     reconnectDelayMs: 20, healthIntervalMs: options.healthIntervalMs??25, requestTimeoutMs: 300, receiptTimeoutMs: 80, pollMs: 10,
     ...(options.mediaNativeRunner?{mediaNativeRunner:options.mediaNativeRunner}:{}),
+    ...(options.fileReader?{fileReader:options.fileReader}:{}),
   });
   const config = { dataDir: directory, readerBaseUrl: base, hookBaseUrl: base, readerToken, nativeToken,
     allowedPrivate: ['101'], allowedGroups: ['202'] };
@@ -290,6 +291,21 @@ test('default bridge submits image and file through authenticated Hook and confi
     assert.equal(f.backend.mediaRequests[i].route,mediaType==='image'?'/SendImgMsg':'/SendFileMsg');assert.equal(f.backend.mediaRequests[i].body.wxidorgid,'wxid_test_friend');
     await f.bridge.sendAttachment(input);assert.equal(f.backend.mediaRequests.length,i+1,'same delivery must never submit twice');
   }
+});
+
+test('file cards and history retain bound references, verify returned bytes and reject wrong media identities',async t=>{
+  const bytes=Buffer.from('synthetic-document'),reads=[];let bad=false;
+  const f=await fixture(t,{healthIntervalMs:60000,fileReader:async input=>{reads.push(input);return{ok:true,id:bad?'0'.repeat(64):input.id,name:input.name,size:bytes.length,b64:bytes.toString('base64'),sha256:crypto.createHash('sha256').update(bytes).digest('hex')};}});
+  await f.bridge.start(f.config);await until(()=>f.bridge.getStatus().state==='ready');
+  f.emit(f.message({rawid:'f'.repeat(64),type:49,content:'[文件] 合成.docx',card:{apptype:6,title:'合成.docx',label:'文件',url:''}}));
+  await until(()=>f.messages.length===1);const file=f.messages[0].files[0];assert.equal(file.name,'合成.docx');
+  const result=await f.bridge.resolveFile({kind:'private',target:'101',file});assert.equal(result.b64,bytes.toString('base64'));assert.equal(reads[0].talker,'wxid_test_friend');
+  bad=true;await assert.rejects(f.bridge.resolveFile({kind:'private',target:'101',file}),{code:'FILE_INTEGRITY_FAILED'});
+  f.backend.rows=[{localId:42,serverId:'9001',localType:25769803825,createTime:1793000000,isSend:0,senderUsername:'wxid_test_friend',fullText:`<msg><appmsg><type>6</type><title>合成.docx</title><appattach><totallen>${bytes.length}</totallen></appattach></appmsg></msg>`,parsedContent:'[文件]'}];
+  const history=await f.bridge.getHistory({kind:'private',target:'101'});assert.equal(history.messages[0].files.length,1);assert.equal(history.messages[0].message_type,'file');
+  assert.equal(history.messages[0].files[0].size,bytes.length);
+  f.backend.rows[0].localType=1;
+  assert.equal((await f.bridge.getHistory({kind:'private',target:'101'})).messages[0].files.length,0,'XML pasted as text is not a file attachment');
 });
 
 test('native capability failure and explicit pre-submit rejection never fall back to desktop sending',async t=>{

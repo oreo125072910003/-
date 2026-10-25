@@ -1,5 +1,7 @@
 # 产品微信通信适配
 
+0.3.10 已接通普通文件与合并转发附件的会话绑定引用、历史发现和本机读取子进程。正常来信的 Word/Excel 会进入本轮任务资料；模型可通过已有文档工具查询并读取原会话历史文件。协议及边界见 [FILE-INPUT.md](FILE-INPUT.md)。
+
 本模块复用现有 `代码/项目/scripts/hook-onebot.mjs` 的账号/版本校验、消息规范化、白名单和文本发送回执，不调用旧适配器的 `start()`，也不启动它的 HTTP 服务、OneBot WebSocket 或另一个 WeChatAgent 程序。
 
 ```js

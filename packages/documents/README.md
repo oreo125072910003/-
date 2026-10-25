@@ -20,8 +20,9 @@ const result = await extractDocument({
 
 - 文本：UTF-8 与带 BOM 的 UTF-16LE，支持 txt/md/csv/json/tex/bib/yaml/yml/log。不猜测 GBK 等未知编码，二进制文本拒绝。
 - DOCX：先检查 ZIP 条目、路径、重复、宏/嵌入对象、XML 实体与展开大小，再用 mammoth 提取原始文字。不渲染样式或图片，不读取外部关系目标。外部引用有明确诊断。
+- XLSX：沿用 Office ZIP 与活动内容检查，按 workbook 的实际关系映射和顺序提取工作表名称、单元格坐标、共享/内联文字、数字及布尔值。公式只提供文件保存的缓存结果与公式文字，不执行或重算，不获取外部数据。最多 20 张表、10000 单元格，仍受文字和解析时限约束。
 - PDF：使用 PDF.js 文字层提取，带页号与实际读取页数；禁用 eval、字体加载、XFA 和 WASM。不会执行 PDF JavaScript 或点击链接；扫描页没有 OCR，不能假装已读取图片内容。
-- 旧 DOC、扫描 OCR、表格图片语义和 Office 宏暂不支持。
+- 旧 DOC/XLS、扫描 OCR、表格图片语义和 Office 宏暂不支持；旧格式需另存为 DOCX/XLSX。
 
 原文件大小默认最多 16 MiB，硬上限 32 MiB。文字默认 18000 字符，硬上限 200000；PDF 默认 40 页，硬上限 200。DOCX 最多 512 条目、单展开条目 8 MiB、总展开 32 MiB。重解析在独立 worker thread 中执行，JS old-generation 上限 192 MiB，默认 15 秒后终止自有线程；这是资源边界，不是 OS 文件或网络沙箱。
 

@@ -56,8 +56,8 @@ export function runProductCommand(command, { cwd, signal, timeoutMs = 30000 } = 
     const executable = windows ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe') : '/bin/sh';
     const script = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n" + command;
     const child = spawn(executable, windows ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')] : ['-c', command], { cwd, windowsHide: true, stdio: ['ignore','pipe','pipe'] });
-    const chunks = []; let size = 0, truncated = false, reason, settled = false, exited = false, drainTimer, stopTimer, outputDetached = false;
-    const cleanup = () => { clearTimeout(timer); clearTimeout(drainTimer); clearTimeout(stopTimer); signal?.removeEventListener('abort', abort); };
+    const chunks = []; let size = 0, truncated = false, reason, settled = false, exited = false, drainTimer, stopTimer, killerTimer, killer, outputDetached = false;
+    const cleanup = () => { clearTimeout(timer); clearTimeout(drainTimer); clearTimeout(stopTimer); clearTimeout(killerTimer);if(killer&&killer.exitCode===null&&killer.signalCode===null)killer.kill();signal?.removeEventListener('abort', abort); };
     const finish = (error, code = child.exitCode) => {
       if (settled) return;
       settled = true; cleanup();
@@ -74,8 +74,11 @@ export function runProductCommand(command, { cwd, signal, timeoutMs = 30000 } = 
       if (exited || child.exitCode !== null || child.signalCode !== null) { outputDetached = true; finish(); return; }
       const fallback = () => { if (!settled && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); };
       if (windows && child.pid) {
-        const killer = spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32/taskkill.exe'), ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' });
+        killer = spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32/taskkill.exe'), ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' });
         killer.once('error', fallback); killer.once('exit', code => { if (code !== 0) fallback(); });
+        // Management queries can stall. The retained child handle still
+        // identifies this task's shell, independently of a later PID reuse.
+        killerTimer=setTimeout(()=>{if(killer.exitCode===null&&killer.signalCode===null)killer.kill();fallback();},750);
       } else fallback();
       stopTimer = setTimeout(() => {
         if (exited || child.exitCode !== null || child.signalCode !== null) { outputDetached = true; finish(); }
@@ -107,7 +110,7 @@ export async function captureProductScreenshot(destination, options = {}) {
 
 /** One capability per live product task. No authority or address is taken from
  * model arguments; every operation rechecks the current product-side grant. */
-export async function createTaskToolAccess({ task, tools, signal, authorize, addArtifact, resolveArtifact, onDelivery, mail, wechat, conversation, screenshot = captureProductScreenshot, runCommand = runProductCommand } = {}) {
+export async function createTaskToolAccess({ task, tools, signal, authorize, addArtifact, resolveArtifact, onDelivery, mail, wechat, conversation, readWechatDocument, screenshot = captureProductScreenshot, runCommand = runProductCommand } = {}) {
   const selected = new Set(tools.filter(name => productTool(name)));
   if (!selected.size) return { connection: undefined, async close() {} };
   const token = randomBytes(32).toString('base64url'), requests = new Map(), operations = new Set();
@@ -158,6 +161,10 @@ export async function createTaskToolAccess({ task, tools, signal, authorize, add
         return { queued: true, artifact: publicArtifact(item), delivery: conversation ? '本轮成功后发送到原微信会话' : '已保存在本轮成果，供主人打开或发送' };
       }
       case 'xiaozhushou_read_document': case 'xiaozhushou_read_local_file': {
+        if(toolName==='xiaozhushou_read_document'&&typeof args.path==='string'&&args.path.startsWith('wechat://')){
+          if(!conversation||typeof readWechatDocument!=='function')throw Error('此任务没有原微信会话文件读取能力。');
+          const result=await readWechatDocument(args.path);await check(toolName);return result;
+        }
         const local = toolName === 'xiaozhushou_read_local_file', current = file(args.path, local);
         const result = await extractDocument({ path: current.absolute, allowedRoot: local ? path.dirname(current.absolute) : workspace, maxChars: 40000, signal: bounded });
         await check(toolName); return result;

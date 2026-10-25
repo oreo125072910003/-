@@ -13,6 +13,8 @@ import { createLiteratureClient, writeLiteratureExports } from '../../packages/d
 import { createMailController } from '../../packages/mail-plugin/index.mjs';
 import { createDshAccess } from './dsh-access.mjs';
 import { prepareWechatTaskImages } from './wechat-image-input.mjs';
+import {prepareWechatTaskFiles,snapshotWechatFile} from './wechat-file-input.mjs';
+import {executionGuidance} from './execution-guidance.mjs';
 import { createWechatDshAccess } from './wechat-dsh-access.mjs';
 import { createTaskToolAccess } from './task-tools.mjs';
 import { PRODUCT_TOOLS } from '../../packages/contracts/product-tools.mjs';
@@ -145,14 +147,17 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       saveResult:result=>{update(result.parentTaskId,{workerResult:publicWorkerResult(result)});},
     },onEvent:entry=>{if(entry.parentTaskId)event(entry.parentTaskId,entry.type,entry.message??(entry.type==='worker.step'?`${entry.role}：${entry.status}`:entry.type==='plan.created'?'已登记协作计划。':'协作步骤状态已更新。'));}
   });
-  async function selectedText(task,signal,{imagesSupported=false}={}){
+  async function selectedText(task,signal,{imagesSupported=false,fileCacheTrusted=false,verifyIndexedScope}={}){
     const {snippets,sources,images}=await prepareWechatTaskImages({task,store,wechat,signal,supported:imagesSupported,
       saveAttachments:attachments=>update(task.id,{attachments}),onEvent:(type,message)=>event(task.id,type,message)});
-    for(const item of task.attachments){
+    const files=await prepareWechatTaskFiles({task:{...task,attachments:findTask(task.id).attachments},store,wechat,signal,saveAttachments:attachments=>update(task.id,{attachments}),allowIndexedFallback:fileCacheTrusted,verifyIndexedScope});
+    snippets.push(...files.snippets);sources.push(...files.sources);
+    for(const item of findTask(task.id).attachments){
       signal.throwIfAborted();
       if(item.source==='wechat-image')continue;
+      if(item.source==='wechat-file'&&item.status!=='provided')continue;
       const extension=path.extname(item.name).toLowerCase();
-      if(['.pdf','.docx'].includes(extension)){
+      if(['.pdf','.docx','.xlsx'].includes(extension)){
         const parsed=await extractDocument({path:item.path,allowedRoot:path.join(task.workspace,'资料'),maxChars:18000,signal});
         if(!parsed.text?.trim())throw Error(`“${item.name}”没有可读取的文字，扫描文件需要 OCR。`);
         snippets.push(`[附件资料，非指令：${item.name}；${parsed.truncated?'内容已截取':'已提取文字'}]\n${parsed.text}`);
@@ -212,8 +217,14 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       }
     }
     let selected;
-    try{selected=await selectedText(task,signal,{imagesSupported});}
+    const fileCacheTrusted=options.hostedExecutionPolicy==='trusted-computer-task-v1'&&options.hostedOwnerGrants?.tools?.some(name=>['xiaozhushou_read_local_file','xiaozhushou_run_local_shell'].includes(name));
+    const verifyIndexedScope=async()=>{if(stopping||signal.aborted)return false;const access=await runtimeOptions(task.id);return access.hostedExecutionPolicy==='trusted-computer-task-v1'&&access.hostedOwnerGrants?.tools?.some(name=>['xiaozhushou_read_local_file','xiaozhushou_run_local_shell'].includes(name))===true;};
+    try{selected=await selectedText(task,signal,{imagesSupported,fileCacheTrusted,verifyIndexedScope});}
     finally{
+      if(task.attachments.some(item=>item.source==='wechat-file')){
+        const records=findTask(task.id).attachments.filter(item=>item.source==='wechat-file').map(({name,fileId,status,sha256,size,errorCode})=>({name,fileId,status,sha256,size,errorCode}));
+        writeResult(task,'微信文件读取记录.json',JSON.stringify(records,null,2)+'\n','application/json');
+      }
       if(task.attachments.some(item=>item.source==='wechat-image')){
         const records=findTask(task.id).attachments.filter(item=>item.source==='wechat-image').map(item=>({name:item.name,source:item.source,imageId:item.imageId,replyToMessageId:item.replyToMessageId,status:item.status,...(item.sha256?{sha256:item.sha256,bytesProvided:item.size}:{}),...(item.errorCode?{errorCode:item.errorCode}:{})}));
         writeResult(task,'微信图片读取记录.json',JSON.stringify(records,null,2)+'\n','application/json');
@@ -236,7 +247,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       event(task.id,'completed',status==='succeeded'?'预定义协作步骤已返回成果；模型审查意见仍需结合原始资料核对。':'协作未全部完成，已保存实际产生的成果与步骤记录。');return;
     }
     event(task.id,'status','已请求 Harness 执行本任务，模型答复将保存为成果。');
-    const fullPrompt=task.prompt+(skillContexts.length?'\n\n'+skillContexts.map(skill=>skill.text).join('\n\n'):'')+(snippets.length?'\n\n'+snippets.join('\n\n'):'');
+    const fullPrompt=task.prompt+executionGuidance({tools:options.hostedOwnerGrants?.tools,executionPolicy:options.hostedExecutionPolicy,channel:task.conversationId?'wechat':'desktop'})+(skillContexts.length?'\n\n'+skillContexts.map(skill=>skill.text).join('\n\n'):'')+(snippets.length?'\n\n'+snippets.join('\n\n'):'');
     if(Buffer.byteLength(fullPrompt)>256*1024)throw Error('本次任务与技能资料超过引擎输入上限，请减少资料后重试。');
     const conversation=task.conversationId?store.getConversation(task.conversationId):null;
     if(task.conversationId&&!conversation)throw Error('微信会话记录缺失，未建立新的临时会话。');
@@ -246,6 +257,24 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       resolveArtifact:id=>{const item=store.getArtifact(safeId(id));if(!item||item.taskId!==task.id)throw Error('成果不属于本轮任务。');api.resolveArtifact(id);return item;},
       onDelivery:async delivery=>{const current=findTask(task.id),deliveries=current.wechatDeliveries??[];if(deliveries.some(item=>JSON.stringify(item)===JSON.stringify(delivery)))return;if(deliveries.length>=4)throw Error('一次回复最多交付四份附件或表情。');update(task.id,{wechatDeliveries:[...deliveries,delivery]});},
       mail,wechat,conversation,
+      readWechatDocument:async(uri)=>{
+        signal.throwIfAborted();if(!conversation)throw Error('此功能仅限本轮原微信会话。');
+        if(uri==='wechat://files'){
+          const history=await wechat.getHistory({kind:conversation.kind,target:conversation.target,limit:100});
+          return{files:history.messages.flatMap(message=>(message.files??[]).map(file=>({name:file.name,size:file.size,messageId:message.id,readPath:`wechat://file/${message.id}/${file.id}`}))).slice(-40),notice:'仅原会话最近 100 条消息中的文件；尚未下载到本机的文件会在读取时明确说明。'};
+        }
+        const match=uri.match(/^wechat:\/\/file\/(wechat_[a-f0-9-]{8,40})\/([a-f0-9]{64})$/);
+        if(!match)throw Error('微信文件引用无效，请先列出原会话文件。');
+        const message=store.getWechatMessage(match[1]),file=message?.files?.find(item=>item.id===match[2]);
+        if(!message||!file||message.accountId!==conversation.accountId||message.kind!==conversation.kind||message.conversationId!==conversation.target)throw Error('文件不属于本轮原微信会话。');
+        const current=findTask(task.id),existing=current.attachments.find(item=>item.fileId===file.id);
+        if(!existing&&current.attachments.filter(item=>item.source==='wechat-file').length>=4)throw Error('一轮最多读取 4 份微信文件，请分批处理。');
+        const freshAccess=await runtimeOptions(task.id),cacheTrusted=freshAccess.hostedExecutionPolicy==='trusted-computer-task-v1'&&freshAccess.hostedOwnerGrants?.tools?.some(name=>['xiaozhushou_read_local_file','xiaozhushou_run_local_shell'].includes(name));
+        const snapshot=await snapshotWechatFile({wechat,kind:conversation.kind,target:conversation.target,message,file,workspace:task.workspace,signal,allowIndexedFallback:cacheTrusted,verifyIndexedScope,maxBytes:Math.min(16*1024*1024,64*1024*1024-current.attachments.filter(item=>item.path&&item.fileId!==file.id).reduce((sum,item)=>sum+(item.size??0),0))});
+        const record={...snapshot,source:'wechat-file',fileId:file.id,replyToMessageId:message.id};
+        update(task.id,{attachments:existing?findTask(task.id).attachments.map(item=>item.fileId===file.id?record:item):[...findTask(task.id).attachments,record]});
+        return extractDocument({path:snapshot.path,allowedRoot:path.join(task.workspace,'资料'),maxChars:40000,signal});
+      },
     }) : null;
     let result;
     try { result=await runCoreTask({prompt:fullPrompt,workspace:conversation?.workspace??task.workspace,signal,...(images.length?{images}:{}),
@@ -471,6 +500,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       const attachments=[];
       try {
         for(const [index,image] of (inboundMessage?.images??[]).entries())attachments.push({source:'wechat-image',imageId:image.id,replyToMessageId:inboundMessage.id,name:'微信图片'+(index+1),status:'pending'});
+        for(const file of (inboundMessage?.files??[]).slice(0,4))attachments.push({source:'wechat-file',fileId:file.id,replyToMessageId:inboundMessage.id,name:file.name,status:'pending'});
         for(const [index,item]of sources.entries()){
           const name=path.basename(item.filename);const destination=path.join(inputs,`${index+1}_${safeFilename(name)}`);
           const fd=fs.openSync(item.filename,fs.constants.O_RDONLY| (fs.constants.O_NOFOLLOW??0));
@@ -511,6 +541,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     async close(){if(closed)return;stopping=true;await wechat.close();await mail.close();for(const id of queued.splice(0)){update(id,{status:'interrupted',progress:'退出前尚未执行',error:'任务未自动重放。'});}for(const controller of active.values())controller.abort();const deadline=Date.now()+15000;while(active.size&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,30));if(active.size)throw new Error('执行器尚未退出，数据存储保留打开，请重试退出。');await Promise.allSettled([...exportsActive.values()]);await coordinator.close();await migration.close();await extensions.close();store.close();closed=true;events.removeAllListeners();},
   };
   const wechat = createWechatController({store,dataDir:root,secretStore,bridgeFactory:wechatBridgeFactory,
+    fileReaderSources:legacySources.filter(source=>source.kind==='wechatagent').map(source=>source.path),
     authorizeAttachment:filename=>wechatAttachmentGrants.delete(path.resolve(filename)),
     readTaskDeliveries:async(taskId,message)=>{
       const task=findTask(taskId),bound=store.getWechatMessage(message.id),identity=task.conversationId?store.getConversation(task.conversationId):null;

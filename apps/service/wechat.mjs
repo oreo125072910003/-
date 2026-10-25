@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {cleanWechatFiles} from '../../packages/wechat-bridge/file-references.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { boundedText, publicError, safeId } from '../../packages/contracts/index.mjs';
 import { createWechatAutoResponder } from './wechat-auto.mjs';
@@ -118,7 +119,7 @@ function readSelectedFile(root, relative, maximum = 131072) {
   } finally { fs.closeSync(descriptor); }
 }
 
-export function createWechatController({ store, dataDir, secretStore, bridgeFactory, createTask, getTask, readTaskReply, readTaskDeliveries, cancelTask, authorizeAttachment, autoOptions = {}, onChange = () => {} }) {
+export function createWechatController({ store, dataDir, secretStore, bridgeFactory, createTask, getTask, readTaskReply, readTaskDeliveries, cancelTask, authorizeAttachment, fileReaderSources=[], autoOptions = {}, onChange = () => {} }) {
   let bridge = null, generation = 0, closing = false, pendingConnect = null, pendingDisconnect = null, closingOperation = null;
   let connection = { state: 'offline', detail: '微信尚未连接。请先导入本机现有微信连接。', accountVerified: false, readerConnected: false };
   const sends = new Set();
@@ -197,7 +198,7 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
       message = { id: 'wechat_' + randomUUID(), accountId, kind: value.kind, conversationId, senderId,
         conversationName: String(value.conversation_name ?? conversationId).slice(0, 200), senderName: String(value.sender_name ?? senderId).slice(0, 200),
         text: boundedText(value.text, '微信消息', 16000), externalId: boundedText(String(value.message_id ?? ''), '微信消息标识', 256), receivedAt: stamp() };
-      message.images=images(value.images);message.messageType=message.images.length?message.images[0].kind==='sticker'?'sticker':'image':'text';
+      message.images=images(value.images);message.files=cleanWechatFiles(value.files);message.messageType=message.files.length?'file':message.images.length?message.images[0].kind==='sticker'?'sticker':'image':'text';
       message.time=messageTime(value.time);message.source='live';message.outgoing=false;
       message.interaction=value.interaction==='pat'?'pat':undefined;
       message.segments=Array.isArray(value.segments)?value.segments.filter(segment=>segment?.type==='at').slice(0,64).map(segment=>({type:'at',data:{id:String(segment.data?.qq??segment.data?.id??'')}})):[];
@@ -437,10 +438,18 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
         messages.push({id:'wechat_'+randomUUID(),inboundKey:hash([config.boundAccountId,kind,target,externalId]),accountId:config.boundAccountId,kind,conversationId:target,
           conversationName:boundedText(String(result.name??target),'会话名称',200,{empty:true})||target,senderId,senderName:String(row.sender_name??'名称暂不可用').slice(0,200),
           text:boundedText(row.text||'[非文本消息]','微信历史消息',16000),externalId,receivedAt:new Date(time*1000).toISOString(),time,outgoing,source:'history',
-          messageType:['text','image','sticker','other'].includes(row.message_type)?row.message_type:'other',images:images(row.images),serverId:String(row.server_id??'').slice(0,32)});
+          messageType:['text','image','sticker','file','other'].includes(row.message_type)?row.message_type:'other',images:images(row.images),files:cleanWechatFiles(row.files),serverId:String(row.server_id??'').slice(0,32)});
       }
       const saved=store.addWechatMessages(messages);onChange();
       return{kind,target,name:result.name??target,messages:saved.map(item=>item.message),pagination:'latest-only'};
+    },
+    async resolveFile({kind,target,messageId,id,signal,allowIndexedFallback=false}={}){
+      const {config,sender,epoch}=readyTarget(kind,target),message=store.getWechatMessage(messageId);
+      const file=message?.files?.find(item=>item.id===id);
+      if(!message||message.accountId!==config.boundAccountId||message.kind!==kind||message.conversationId!==target||!file||typeof sender.resolveFile!=='function')throw Object.assign(Error('FILE_REFERENCE_INVALID'),{code:'FILE_REFERENCE_INVALID'});
+      const result=await sender.resolveFile({kind,target,file,signal,allowIndexedFallback:allowIndexedFallback===true});
+      if(epoch!==generation)throw Object.assign(Error('FILE_ACCOUNT_CHANGED'),{code:'FILE_ACCOUNT_CHANGED'});
+      readyTarget(kind,target);return result;
     },
     async resolveImage({kind,target,id}={}){
       const {sender,epoch}=readyTarget(kind,target);
@@ -486,7 +495,7 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
       bridge = factory({ onMessage: message => receive(message, epoch), onState: state => stateChanged(state, epoch),
         onError: error => { if (epoch === generation && !closing) { connection = { ...connection, state: 'error', accountVerified: false, detail: explain(error) };autoReply.connectionChanged(false); onChange(); } } });
       connection = { state: 'connecting', detail: '正在核对微信版本、账号和消息读取连接。', accountVerified: false, readerConnected: false }; onChange();
-      try { await bridge.start({ ...config, ...secret, dataDir: path.join(dataDir, 'wechat'), nickname: store.getSettings().assistantName || '小助手' }); }
+      try { await bridge.start({ ...config, ...secret, fileReaderSources, dataDir: path.join(dataDir, 'wechat'), nickname: store.getSettings().assistantName || '小助手' }); }
       catch (error) {
         if (epoch === generation) { const failed = bridge; bridge = null; await failed?.stop().catch(() => {}); connection = { state: 'error', detail: explain(error), accountVerified: false, readerConnected: false }; onChange(); }
         throw Error(explain(error));

@@ -36,8 +36,9 @@ export async function extractDocument({ path: filename, allowedRoot, maxChars, m
     let content; try { content = bytes[0] === 0xff && bytes[1] === 0xfe ? new TextDecoder('utf-16le', { fatal: true }).decode(bytes.subarray(2)) : new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { throw coded('UNSUPPORTED_ENCODING', '文本编码不是 UTF-8 或带 BOM 的 UTF-16LE，当前没有猜测转换编码。'); }
     if (content.includes('\0')) throw coded('BINARY_CONTENT', '此附件包含二进制内容，不能作为文本读取。'); content = content.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n'); result = { text: content.slice(0, limits.maxChars), truncated: content.length > limits.maxChars, diagnostics: [], pageCount: null, pagesRead: null, coverage: 'plain-text' };
   } else if (extension === '.docx') { if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) throw coded('INVALID_DOCX', 'DOCX 文件签名无效。'); result = await isolatedExtract(bytes, 'docx', { ...limits, signal }); }
+  else if(extension==='.xlsx'){if(bytes[0]!==0x50||bytes[1]!==0x4b)throw coded('INVALID_XLSX','XLSX 文件签名无效。');result=await isolatedExtract(bytes,'xlsx',{...limits,signal});}
   else if (extension === '.pdf') { if (!bytes.subarray(0, 1024).includes(Buffer.from('%PDF-'))) throw coded('INVALID_PDF', 'PDF 文件签名无效。'); result = await isolatedExtract(bytes, 'pdf', { ...limits, signal }); }
-  else throw coded('UNSUPPORTED_TYPE', '当前支持文本、DOCX 和带文字层的 PDF，扫描件 OCR 和旧版 DOC 尚未接通。');
+  else throw coded('UNSUPPORTED_TYPE', '当前支持文本、DOCX、XLSX 和带文字层的 PDF；旧 DOC/XLS 需另存为 DOCX/XLSX，扫描件 OCR 尚未接通。');
   abortCheck(signal); return { ...result, source: { name: path.basename(absolute), path: absolute, sha256: digest(bytes), bytes: bytes.length, type: extension.slice(1) }, extractedChars: result.text.length };
 }
 

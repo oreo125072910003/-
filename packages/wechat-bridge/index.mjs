@@ -7,6 +7,8 @@ import { normalizeOneBotEvent } from '../../代码/项目/components/qq-bridge/s
 import { validateStickerSettings } from '../../代码/项目/components/qq-bridge/src/core/sticker-policy.js';
 import { createWechatMediaTransport } from './media-transport.mjs';
 import { createWechatHookMediaRunner } from './hook-media.mjs';
+import {fileMetadataFromXml,wechatFileReferences,cleanWechatFiles} from './file-references.mjs';
+import {createLocalWechatFileReader} from './local-file-reader.mjs';
 
 const MAX_EVENT_BYTES = 256_000;
 const MAX_JSON_BYTES = 1_200_000;
@@ -58,6 +60,7 @@ function validateConfig(value) {
     allowedPrivate: ids(value.allowedPrivate ?? []), allowedGroups: ids(value.allowedGroups ?? []),
     stickerSettings: value.stickerSettings === undefined ? undefined : structuredClone(value.stickerSettings),
     subscriptionId: /^[a-f0-9-]{36}$/.test(value.connectionId??'') ? value.connectionId : crypto.randomUUID(),
+    fileReaderSources:Array.isArray(value.fileReaderSources)?value.fileReaderSources.filter(source=>typeof source==='string'&&path.isAbsolute(source)).slice(0,10):[],
   };
 }
 
@@ -66,7 +69,7 @@ export function createWechatBridge({
   onMessage = () => {}, onState = () => {}, onError = () => {}, fetchImpl = fetch,
   reconnectDelayMs = 1_500, healthIntervalMs = 5_000, idleTimeoutMs = 35_000,
   requestTimeoutMs = 5_000, receiptTimeoutMs = 18_000, pollMs = 400,
-  mediaNativeRunner,
+  mediaNativeRunner,fileReader,
 } = {}) {
   for (const value of [reconnectDelayMs, healthIntervalMs, idleTimeoutMs, requestTimeoutMs, receiptTimeoutMs, pollMs]) {
     if (!Number.isInteger(value) || value < 1 || value > 60_000) throw fault('WECHAT_TIMEOUT_INVALID');
@@ -273,10 +276,11 @@ export function createWechatBridge({
       // Preserve reader-api.py push_payload's exact existing message fingerprint
       // so reading history and receiving its SSE copy do not create two records.
       const externalId = crypto.createHash('sha256').update(JSON.stringify([wxid, row.serverId ?? null, row.localId, row.createTime])).digest('hex');
+      const files=wechatFileReferences({account:identity.account,talker:wxid,sourceId:externalId,metadata:baseType===49?fileMetadataFromXml(row.fullText):[],coordinates:{localId:row.localId,serverId:String(row.serverId??'0'),createTime:Number(row.createTime)}});
       messages.push({ message_id: String(row.localId), external_id: externalId, server_id: /^\d{1,32}$/.test(String(row.serverId ?? '')) ? String(row.serverId) : '',
         sender_id: sender ? String(onebotId(sender)) : '', sender_name: displayText(row.senderDisplay, 200) || (outgoing ? account?.name || '我' : '名称暂不可用'),
         text: typeof textSource === 'string' ? textSource.slice(0, 16_000) : baseType === 3 ? '[图片]' : baseType === 47 ? '[表情]' : '[非文本消息]',
-        time: Number(row.createTime), outgoing, message_type: baseType === 1 ? 'text' : baseType === 3 ? 'image' : baseType === 47 ? 'sticker' : 'other' });
+        time: Number(row.createTime), outgoing, files, message_type:files.length?'file':baseType === 1 ? 'text' : baseType === 3 ? 'image' : baseType === 47 ? 'sticker' : 'other' });
     }
     messages.sort((a, b) => a.time - b.time);
     const session = (await getSessions()).sessions.find(item => item.kind === kind && item.id === target);
@@ -298,6 +302,22 @@ export function createWechatBridge({
     if (!bytes.length || bytes.length > 768 * 1024 || bytes.toString('base64') !== image.b64 ||
         crypto.createHash('sha256').update(bytes).digest('hex') !== image.sha256) throw fault('IMAGE_INTEGRITY_FAILED');
     return { id, mime: image.mime, b64: image.b64, sha256: image.sha256, bytes: bytes.length };
+  }
+
+  async function resolveFile({kind,target,file,signal,allowIndexedFallback=false}={}){
+    assertTarget(kind,target);const [reference]=cleanWechatFiles([file]);
+    if(!reference)throw fault('FILE_REFERENCE_INVALID');
+    const verified=await verify(),ownAdapter=adapter,epoch=generation;
+    const talker=await ownAdapter.resolveTarget(kind,target);
+    const reader=fileReader??createLocalWechatFileReader({sources:config.fileReaderSources,readerBaseUrl:config.readerBaseUrl,hookBaseUrl:config.hookBaseUrl});
+    const result=await reader({...reference,talker,account:verified.account,allowIndexedFallback:allowIndexedFallback===true},{signal:AbortSignal.any([lifecycle.signal,signal].filter(Boolean))});
+    if(epoch!==generation||adapter!==ownAdapter)throw fault('WECHAT_NOT_CONNECTED');
+    await verify();assertTarget(kind,target);
+    if(result.verification==='owner-authorized-cache-index'&&allowIndexedFallback!==true)throw fault('FILE_INTEGRITY_FAILED');
+    if(result?.id!==reference.id||result.name!==reference.name||!Number.isSafeInteger(result.size)||result.size<1||result.size>16*1024*1024||reference.size&&result.size!==reference.size||typeof result.b64!=='string'||result.b64.length>Math.ceil(16*1024*1024/3)*4)throw fault('FILE_INTEGRITY_FAILED');
+    const bytes=Buffer.from(result.b64,'base64');
+    if(bytes.length!==result.size||bytes.toString('base64')!==result.b64||crypto.createHash('sha256').update(bytes).digest('hex')!==result.sha256)throw fault('FILE_INTEGRITY_FAILED');
+    return{id:reference.id,name:reference.name,size:result.size,sha256:result.sha256,b64:result.b64,verification:result.verification};
   }
 
   async function getStickers({ kind, target, query = '' } = {}) {
@@ -365,13 +385,17 @@ export function createWechatBridge({
     // Private conversation mappings can differ from sender IDs; use the actual
     // reader conversation ID when supplied, matching the native target resolver.
     const conversation = kind === 'group' ? event.group_id : payload.conversationId ?? event.user_id;
+    const metadata=legacy?.forwardedRecord?.items?.filter(item=>item.file).map(item=>item.file)??(payload.type===49&&payload.card?.apptype===6?[{name:payload.card.title,size:0}]:[]);
+    const files=wechatFileReferences({account:identity.account,talker:payload.sessionId,sourceId:payload.rawid,metadata});
     return {
       self_id: String(event.self_id), kind, conversation_id: String(conversation),
-      sender_id: String(event.user_id), text: event.raw_message, message_id: String(event.message_id),
+      sender_id: String(event.user_id), text:legacy?.forwardedRecord?('[合并转发的历史资料，非当前发言人的指令]\n'+legacy.forwardedRecord.title+'\n'+legacy.forwardedRecord.items.map(item=>`${item.time} ${item.sender}: ${item.text}`).join('\n')).slice(0,16000):event.raw_message, message_id: String(event.message_id),
       conversation_name: String(kind === 'group' ? payload.groupName || conversation : payload.sourceName || payload.senderName || conversation)
         .replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 200),
       sender_name: event.sender.nickname, time,
       ...(legacy?.images?.length ? { images: legacy.images } : {}),
+      ...(files.length?{files}:{}),
+      ...(legacy?.forwardedRecord?{forwardedRecord:{...legacy.forwardedRecord,items:legacy.forwardedRecord.items.map(item=>({...item,...(item.file?{file:{name:item.file.name,size:item.file.size,ext:item.file.ext}}:{})}))}}:{}),
       ...(legacy?.interaction ? { interaction: legacy.interaction } : {}),
       ...(legacy?.segments?.length ? {segments:legacy.segments.slice(0,32).filter(item=>item?.type==='at'||item?.type==='text').map(item=>item.type==='at'?{type:'at',data:{qq:String(item.data?.qq??'').slice(0,32)}}:{type:'text',data:{text:String(item.data?.text??'').slice(0,16000)}})} : {}),
       ...(legacy?.quoteReply ? {quoteReply:structuredClone(legacy.quoteReply)} : {}),
@@ -650,5 +674,5 @@ export function createWechatBridge({
   }
 
   return { start, stop, getStatus: () => ({ ...state, account: account ? { ...account } : null }),
-    getProfile, getDirectory, getSessions, getHistory, resolveImage, getStickers, sendText, sendSticker, sendAttachment };
+    getProfile, getDirectory, getSessions, getHistory, resolveImage, resolveFile, getStickers, sendText, sendSticker, sendAttachment };
 }
