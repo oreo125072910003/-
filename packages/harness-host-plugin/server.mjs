@@ -315,6 +315,16 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
         handles.set(sid, handle); agent = ctx.agents.get(sid);
       }
       if (!agent || agent.status === 'running') throw fault('SESSION_BUSY', 'Harness 会话尚未空闲。', 409);
+      if (resumed && agent.ctx?.[TEXT_POLICY] !== true) {
+        // Harness can restore this registered conversation before the product host
+        // starts. In that case agents.get() skips our create/resume setup callback.
+        // Reattach only the product guard, preserving the native session/history
+        // and its existing preset. Never adopt a different or running Agent.
+        if (agent.session?.id !== sid || !path.isAbsolute(agent.session?.header?.cwd || '') ||
+            await realpath(agent.session.header.cwd) !== workspace) throw fault('SESSION_REFUSED', '恢复的原生会话与小助手工作区不匹配。', 403);
+        if (agent.status === 'running') throw fault('SESSION_BUSY', 'Harness 会话尚未空闲。', 409);
+        installTextPolicy(agent.ctx);
+      }
       if (agent.ctx?.[TEXT_POLICY] !== true) throw fault('SAFE_PRESET_UNAVAILABLE', '小助手会话没有经过独立文本权限检查。');
       task.agent = agent;
       if (task.nativeTerminal) { if (closed) { await handles.get(sid)?.dispose?.(); handles.delete(sid); } return; }

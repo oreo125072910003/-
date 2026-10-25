@@ -154,6 +154,55 @@ test('only product-created native sessions can resume in the identical workspace
   const moved = await runHostedTask({ prompt: '换目录', workspace: other, sessionId: first.sessionId, settings: f.settings });
   assert.equal(moved.error.code, 'SESSION_REFUSED');
 });
+
+test('an already restored owned conversation receives the current scoped guard without losing its session', async t => {
+  const observed = [];
+  const f = await fixture(t, { behaviour(agent, emit) {
+    observed.push({ names: [...agent.ctx[OWNER_ACCESS].names()],
+      query: agent.ctx.tools.check({ agent, name: 'mcp__contract_helper__library_search' }),
+      shell: agent.ctx.tools.check({ agent, name: 'run_local_shell' }) });
+    emit(agent, 'assistant/message', { turn: agent.turn, message: { content: [{ type: 'text', text: '恢复原会话成功' }] } });
+    emit(agent, 'turn/end', { turn: agent.turn, reason: { kind: 'completed' } });
+  } });
+  const first = await runHostedTask({ prompt: '第一轮', workspace: f.workspace, settings: f.settings });
+  const agent = f.agents.get(first.sessionId), oldContext = agent.ctx;
+  let guards = 0;
+  const restoredContext = { systemPrompt: oldContext.systemPrompt,
+    tools: { guard(fn) { guards++; this.check = fn; }, presentAs() {} },
+    on(name, callback) { if (name === 'system-prompt/assemble') this.assemble = callback; } };
+  agent.ctx = restoredContext;
+  const foreignContext = {};
+  f.agents.set('foreign-session', { ctx: foreignContext });
+  const second = await runHostedTask({ prompt: '继续原会话', workspace: f.workspace, sessionId: first.sessionId,
+    settings: { ...f.settings, hostedOwnerGrants: { skills: [], tools: ['mcp__contract_helper__library_search'] } } });
+  assert.equal(second.ok, true); assert.equal(second.sessionId, first.sessionId);
+  assert.equal(second.finalText, '恢复原会话成功');
+  assert.equal(f.calls.filter(call => call.type === 'create').length, 1);
+  assert.equal(guards, 1); assert.equal(restoredContext[TEXT_POLICY], true);
+  assert.deepEqual(observed[1].names, ['mcp__contract_helper__library_search']);
+  assert.equal(observed[1].query, undefined); assert.equal(typeof observed[1].shell, 'string');
+  assert.equal(foreignContext[TEXT_POLICY], undefined);
+  assert.equal(typeof restoredContext.tools.check({ agent, name: 'mcp__contract_helper__library_search' }), 'string');
+  const third = await runHostedTask({ prompt: '再次继续', workspace: f.workspace, sessionId: first.sessionId, settings: f.settings });
+  assert.equal(third.ok, true); assert.equal(third.sessionId, first.sessionId); assert.equal(guards, 1);
+  assert.deepEqual(observed[2].names, []);
+});
+
+test('restored agents with a different native workspace or an active turn are not adopted', async t => {
+  const f = await fixture(t);
+  const first = await runHostedTask({ prompt: '第一轮', workspace: f.workspace, settings: f.settings });
+  const agent = f.agents.get(first.sessionId);
+  delete agent.ctx[TEXT_POLICY]; delete agent.ctx.tools.check;
+  agent.session.header.cwd = os.tmpdir();
+  const mismatched = await runHostedTask({ prompt: '拒绝错配', workspace: f.workspace, sessionId: first.sessionId, settings: f.settings });
+  assert.equal(mismatched.ok, false); assert.equal(mismatched.error.code, 'SESSION_REFUSED');
+  assert.equal(agent.ctx.tools.check, undefined);
+  agent.session.header.cwd = f.workspace; agent.status = 'running';
+  const busy = await runHostedTask({ prompt: '等待空闲', workspace: f.workspace, sessionId: first.sessionId, settings: f.settings });
+  assert.equal(busy.ok, false); assert.equal(busy.error.code, 'SESSION_BUSY');
+  assert.equal(agent.ctx.tools.check, undefined);
+  assert.equal(f.calls.filter(call => call.type === 'prompt').length, 1);
+});
 test('host rejects workspace escape and unmounted tool policy before any prompt', async t => {
   const f = await fixture(t, { mount: false });
   const failed = await runHostedTask({ prompt: '测试', workspace: f.workspace, settings: f.settings });
