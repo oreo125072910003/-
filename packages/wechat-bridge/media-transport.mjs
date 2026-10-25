@@ -155,6 +155,9 @@ export function createWechatMediaTransport({ dataDir, signal, assertReady, verif
   return {
     async send(value) {
       assertReady(value?.kind, value?.target);
+      const taskSignal=value?.signal?AbortSignal.any([signal,value.signal].filter(Boolean)):signal;
+      taskSignal?.throwIfAborted();
+      await value?.beforeSubmit?.();
       const attachment = inspectWechatAttachment(value);
       if (globalMediaBusy) throw fault('SENDER_BUSY');
       globalMediaBusy = true;
@@ -190,13 +193,16 @@ export function createWechatMediaTransport({ dataDir, signal, assertReady, verif
           if (checked.account !== identity.account || checked.selfWxid !== identity.selfWxid || mapped.wxid !== target.wxid || mapped.name !== target.name) throw fault('WECHAT_ACCOUNT_CHANGED');
           assertReady(attachment.kind, attachment.target);
           inspectWechatAttachment(attachment);
+          taskSignal?.throwIfAborted();
+          await value?.beforeSubmit?.();
+          taskSignal?.throwIfAborted();
           attempt.attempted = true; attempt.state = 'dispatching'; attempt.startedAt = Date.now(); save(filename, attempt);
         };
         let native;
         try {
           native = await nativeRunner(Object.freeze({ path: attachment.path, name: attachment.name, sha256: attachment.sha256,
             size: attachment.size, mime: attachment.mime, mediaType: attachment.mediaType, deliveryId: attachment.deliveryId,
-            targetName: target.name, targetWxid: target.wxid, account: identity.account }), { signal, beforeSubmit });
+            targetName: target.name, targetWxid: target.wxid, account: identity.account }), { signal:taskSignal, beforeSubmit });
         } catch (error) {
           if (error?.attempted === false && INPUT_PREFLIGHT_CODES.has(error?.code)) attempt.attempted = false;
           throw error;
@@ -221,7 +227,7 @@ export function createWechatMediaTransport({ dataDir, signal, assertReady, verif
             save(filename, attempt); return attempt.response;
           }
           if (candidates.length > 1) throw fault('WECHAT_ATTACHMENT_RECEIPT_AMBIGUOUS', true);
-          await delay(pollMs, undefined, { signal });
+          await delay(pollMs, undefined, { signal:taskSignal });
         } while (Date.now() < deadline);
         throw fault('WECHAT_ATTACHMENT_DELIVERY_UNCONFIRMED', true);
       } catch (error) {

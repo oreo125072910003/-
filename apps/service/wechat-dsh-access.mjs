@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { validateGrants } from './dsh-access.mjs';
 import { grantableTool, computerGrantableTool } from '../../packages/contracts/tool-policy.mjs';
+import { PRODUCT_TOOLS, LEGACY_COMPUTER_TOOLS } from '../../packages/contracts/product-tools.mjs';
 
 const EMPTY=()=>({skills:[],tools:[]});
 const fail=message=>Object.assign(Error(message),{code:'WECHAT_DSH_ACCESS_DENIED'});
@@ -103,5 +104,33 @@ export function createWechatDshAccess({store,dshAccess,legacySources=[],getWecha
     }catch{return empty();}
   }
   async function grantsForMessage(message){return (await accessForMessage(message)).grants;}
-  return {getState,saveGrants,saveComputerAccess,importLegacy,grantsForMessage,accessForMessage};
+  async function restoreFeatures(){
+    const identity=await verified(),catalog=await dshAccess.getCatalog();
+    if(!catalog.ok)throw fail('DSH 功能目录尚未就绪。');
+    const available=new Set(catalog.tools.map(tool=>tool.name)),value=registry(),current=config();
+    const basic=PRODUCT_TOOLS.filter(tool=>!tool.computer&&tool.name!=='xiaozhushou_mail'&&available.has(tool.name)).map(tool=>tool.name);
+    let restored=0,computerChats=0;
+    for(const [kind,target]of [...(current.allowedPrivate??[]).map(target=>['private',target]),...(current.allowedGroups??[]).map(target=>['group',target])]){
+      const entry=`${identity.accountId}:${key(kind,target)}`,previous=value.chats[entry]??{grants:EMPTY()},selected=savedFor(identity.accountId,kind,target);
+      const original=selected.tools.filter(name=>/^mcp__pcbridge__/.test(name));
+      const replacements=kind==='private'?original.flatMap(name=>{
+        const base=name.slice('mcp__pcbridge__'.length);
+        if(base==='run_local_agent')return PRODUCT_TOOLS.filter(tool=>tool.computer).map(tool=>tool.name);
+        if(base==='run_local_shell')return ['xiaozhushou_run_local_shell','xiaozhushou_screenshot'];
+        if(base==='send_image')return ['xiaozhushou_attachment','xiaozhushou_export_file'];
+        return LEGACY_COMPUTER_TOOLS[base]?[LEGACY_COMPUTER_TOOLS[base]]:[];
+      }).filter(name=>available.has(name)):[];
+      const tools=[...new Set([...selected.tools,...basic,...replacements])];
+      if(tools.length>64)throw fail('原选择较多，功能修复未覆盖保存，请在能力中心检查。');
+      const computerTools=tools.filter(name=>available.has(name)&&computerGrantableTool(name)&&name.startsWith('xiaozhushou_'));
+      const computerEnabled=kind==='private'&&(previous.computerAccess?.enabled===true||replacements.some(computerGrantableTool));
+      value.chats[entry]={...previous,grants:{...selected,tools},source:'desktop-feature-recovery',updatedAt:new Date().toISOString(),
+        ...(computerEnabled?{computerAccess:{enabled:true,tools:computerTools,approvedAt:new Date().toISOString(),source:'restore-original-private-selection'}}:{})};
+      restored++;if(computerEnabled)computerChats++;
+    }
+    const again=await verified();if(again.accountId!==identity.accountId||again.connectionId!==identity.connectionId)throw fail('微信连接已变化，未修复授权。');
+    store.saveSettings({dshWechatGrants:value,wechatConnection:{...config(),autoFailureNotice:true}});onChange();
+    return {restored:true,chats:restored,computerChats};
+  }
+  return {getState,saveGrants,saveComputerAccess,importLegacy,grantsForMessage,accessForMessage,restoreFeatures};
 }

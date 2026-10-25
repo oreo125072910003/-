@@ -6,6 +6,8 @@ import { TEXT_POLICY, apply as installTextPolicy } from './text-policy.mjs';
 import { bindOwnerAccess, normalizeOwnerGrants, describeTool } from './owner-access.mjs';
 import { validateTaskImages } from '../contracts/image-input.mjs';
 import { prepareNativeImageBlocks, supportsNativeImages, nativeImageTarget, offloadNativeImages } from './image-input.mjs';
+import { PRODUCT_TOOLS } from '../contracts/product-tools.mjs';
+import { validateProductConnection } from './product-access.mjs';
 
 export const HOST_PROTOCOL = 'xiaozhushou-harness-host-v1';
 const SESSION = /^xzs-[a-f0-9]{32}$/;
@@ -262,10 +264,11 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     if (body.taskId !== undefined && (typeof body.taskId !== 'string' || !TASK.test(body.taskId))) throw fault('INVALID_TASK', '任务标识无效。');
     if (body.personaPrefix !== undefined && (typeof body.personaPrefix !== 'string' || Buffer.byteLength(body.personaPrefix) > 16384 || body.personaPrefix.includes('\0'))) throw fault('INVALID_PERSONA', '小助手个性设置须为不超过 16 KiB 的文字。');
     const conversation = conversationInfo(body.conversation);
+    validateProductConnection(body.productConnection);
     let grants;
     try { grants = normalizeOwnerGrants(body); } catch (error) { throw fault(error.code, '主人能力授权格式无效，当前任务未启动。', 403); }
     const imageManifest = images.map(({ id, name, mime, sha256, bytes }) => ({ id, ...(name ? { name } : {}), mime, sha256, bytes }));
-    const digest = createHash('sha256').update(JSON.stringify([body.prompt, body.workspace, body.sessionId ?? null, grants,body.executionPolicy??'owner-grants-v1',body.computerScope??null, body.personaPrefix ?? null, conversation ?? null, imageManifest])).digest('hex');
+    const digest = createHash('sha256').update(JSON.stringify([body.prompt, body.workspace, body.sessionId ?? null, grants,body.executionPolicy??'owner-grants-v1',body.computerScope??null, body.personaPrefix ?? null, conversation ?? null, imageManifest,body.productConnection??null])).digest('hex');
     if (body.taskId && tasks.has(body.taskId)) {
       const existing = tasks.get(body.taskId);
       if (existing.digest !== digest) throw fault('TASK_CONFLICT', '任务标识已被不同请求使用。', 409);
@@ -330,7 +333,7 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
       if (task.nativeTerminal) { if (closed) { await handles.get(sid)?.dispose?.(); handles.delete(sid); } return; }
       await classifySession(task, group, conversation);
       if (task.nativeTerminal) return;
-      task.access = await bindOwnerAccess(agent.ctx, ctx, agent, { grants: task.grants, executionPolicy:body.executionPolicy,personaPrefix: body.personaPrefix, active: () => active.get(sid) === task && !task.nativeTerminal && !task.cancelReason && !task.turnEnded, signal: task.controller.signal });
+      task.access = await bindOwnerAccess(agent.ctx, ctx, agent, { grants: task.grants, executionPolicy:body.executionPolicy,productConnection:body.productConnection,personaPrefix: body.personaPrefix, active: () => active.get(sid) === task && !task.nativeTerminal && !task.cancelReason && !task.turnEnded, signal: task.controller.signal });
       if (task.nativeTerminal) { task.access.dispose(); return; }
       if (!resumed || imageBlocks.length || task.groupId && sessions[sid]?.groupId !== task.groupId) {
         task.controller.signal.throwIfAborted();
@@ -352,7 +355,8 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     const timer = setTimeout(() => controller.abort(), 5000);
     try {
       const skills = service?.list ? await service.list({ cwd: workspacesRoot, signal: controller.signal }) : [];
-      const schemas = tools?.schemas ? tools.schemas() : [];
+      const originalSchemas = tools?.schemas ? tools.schemas() : [];
+      const schemas = [...originalSchemas.filter(tool=>!PRODUCT_TOOLS.some(product=>product.name===tool.name)),...PRODUCT_TOOLS];
       return { ok: true, protocol: HOST_PROTOCOL, source: 'harness-host', metadataOnly: true,
         skills: (Array.isArray(skills) ? skills : []).slice(0, 300).map(item => ({ name: String(item.name || '').slice(0, 160), description: String(item.description || '').slice(0, 1000), provider: String(item.provider || 'dsh').slice(0, 160), modelInvocable: item.invocation?.modelInvocable !== false, executableInProduct: false })),
         tools: (Array.isArray(schemas) ? schemas : []).slice(0, 500).map(item => ({ name: String(item.name || '').slice(0, 160), description: String(item.description || '').slice(0, 1000), ...describeTool(item.name), executableInProduct: false })),

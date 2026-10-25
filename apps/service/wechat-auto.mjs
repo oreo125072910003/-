@@ -32,7 +32,7 @@ export function isWechatDirectMention(message, wakeWords = []) {
  * readTaskReply(id) must return the complete validated string, never task.summary.
  */
 export function createWechatAutoResponder({
-  settings, ready, permitted, createTask, getTask, readTaskReply, cancelTask,
+  settings, ready, permitted, createTask, getTask, readTaskReply, readTaskDeliveries, sendMedia, cancelTask,
   linkTask, send, hasManualReply = () => false, onChange = () => {},
   now = Date.now, pollMs = 200, deadlineMs = 120000, maxConcurrent = 2,
   maxQueued = 32, maxPerConversation = 8, maxCallsPerMinute = 20,
@@ -73,13 +73,14 @@ export function createWechatAutoResponder({
     try { await cancelTask(job.taskId); } catch { /* The parent service retains actual stop/unknown state. */ }
   }
   function abort(job, code) { job.stopReason = code; job.controller.abort(); }
-  function sendInOrder(job, text) {
+  function sendInOrder(job, text, media, index) {
     const operation = sendTail.then(() => {
       // Generation may overlap; the native sender has one shared send slot.
       // Revalidate only when this reply reaches that slot, never retry a submit.
       assertCurrent(job);
       notify({ state: 'sending', detail: '正在向原会话发送 DSH 已完成的完整回复。' });
-      return send(job.message, text, { signal: job.controller.signal, beforeSubmit: () => assertCurrent(job) });
+      const context={ signal: job.controller.signal, beforeSubmit: () => assertCurrent(job), ...(media?{index}:{}) };
+      return media?sendMedia(job.message,media,context):send(job.message, text, context);
     });
     sendTail = operation.catch(() => {});
     return operation;
@@ -132,6 +133,16 @@ export function createWechatAutoResponder({
         return;
       }
       if (text.length > 16000 || Buffer.byteLength(text, 'utf8') > 16000) throw failure('AUTO_REPLY_TOO_LONG');
+      const media=typeof readTaskDeliveries==='function'?await readTaskDeliveries(job.taskId,job.message):[];
+      assertCurrent(job);
+      if(!Array.isArray(media)||media.length>4||media.length&&typeof sendMedia!=='function')throw failure('AUTO_REPLY_INVALID');
+      for(const [index,item] of media.entries()){
+        const delivered=await sendInOrder(job,null,item,index);
+        if(delivered?.status!=='delivered'){
+          await sendInOrder(job,delivered?.status==='rejected'?'文件已经生成，但微信发送前的检查未通过。成果已保存在小助手任务记录，可打开后发送。':'文件已生成，微信暂未返回可核对的送达结果。请先核对聊天记录，避免重复发送。');
+          notify({state:'unconfirmed',detail:'本轮媒体尚未确认送达，已保留成果并停止后续发送。'});return;
+        }
+      }
       notify({ state: 'sending', detail: '回复已完成，正在等待本次发送。' });
       const delivery = await sendInOrder(job, text);
       notify({ state: delivery?.status === 'delivered' ? 'idle' : 'unconfirmed',
@@ -139,6 +150,9 @@ export function createWechatAutoResponder({
         completed: status.completed + (delivery?.status === 'delivered' ? 1 : 0) });
     } catch (error) {
       const code = Object.hasOwn(MESSAGES, error?.code) ? error.code : 'AUTO_FAILED';
+      if(settings().autoFailureNotice===true&&['AUTO_TASK_FAILED','AUTO_REPLY_INVALID','AUTO_FAILED'].includes(code)){
+        try{await sendInOrder(job,'这次没能完成处理，结果已记在小助手的任务记录中。你可以继续发消息，我会接着处理。');}catch{}
+      }
       notify({ state: ['AUTO_DISABLED', 'AUTO_DISCONNECTED', 'AUTO_REVOKED', 'AUTO_MANUAL_REPLY'].includes(code) ? 'paused' : 'error',
         detail: MESSAGES[code], lastError: { code, message: MESSAGES[code] } });
     } finally {

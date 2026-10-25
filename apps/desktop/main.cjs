@@ -59,7 +59,7 @@ async function registerIPC(){
     'getWechatState','saveWechatSettings','connectWechat','disconnectWechat','draftWechatReply','sendWechatReply','searchWechatContacts','refreshWechatProfile','getWechatSessions','getWechatHistory','resolveWechatImage','getWechatStickers','sendWechatMessage','sendWechatSticker','sendWechatAttachment',
     'importLegacyExtensions','refreshDshCatalog',
     'getMailState','importMailAccounts','syncMail','getMailMessage','createMailDraft','sendMailDraft','resolveMailAttachment','draftMailReply',
-    'getDshAccessState','refreshDshAccessCatalog','saveDshOwnerGrants',
+    'getDshAccessState','refreshDshAccessCatalog','saveDshOwnerGrants','restoreProductFeatures',
     'getWechatDshAccess','saveWechatDshGrants','importWechatDshGrants','saveWechatComputerAccess',
     'getExtensionsState','installBuiltinMcp','enableMcp','disableMcp','testMcp','setMcpTools','importBundledSkill','enableSkill','disableSkill']){
     ipcMain.handle('assistant:'+name,async(event,...args)=>{if(!trusted(event))throw Error('此窗口无权访问小助手。');return service[name](...args);});
@@ -142,7 +142,7 @@ async function registerIPC(){
   });
 }
 async function smokeTest(){
-  const artifactsDir=process.env.XIAOZHUSHOU_SMOKE_OUTPUT||path.join(projectRoot,'dist','smoke');
+  const artifactsDir=process.env.XIAOZHUSHOU_SMOKE_OUTPUT||(app.isPackaged?path.join(smokeRoot,'验收结果'):path.join(projectRoot,'dist','smoke'));
   const mediaNativeScript=app.isPackaged?path.join(process.resourcesPath,'app.asar.unpacked','packages','wechat-bridge','send-attachment-ui.ps1'):path.join(projectRoot,'packages','wechat-bridge','send-attachment-ui.ps1');
   if(!fs.existsSync(mediaNativeScript)||!fs.statSync(mediaNativeScript).isFile())throw Error('微信附件发送脚本未在本机文件系统中展开。');
   fs.mkdirSync(artifactsDir,{recursive:true});
@@ -267,7 +267,13 @@ async function start(){
   window.on('close',event=>{if(!quitting){event.preventDefault();window.hide();}});
   await window.loadURL(entry);
   window.show();
-  if(!smoke)void service.resumeWechatOnStartup().catch(()=>{});
+  if(!smoke)void (async()=>{
+    await service.resumeWechatOnStartup();
+    if(process.argv.includes('--restore-features')){
+      try{const result=await service.restoreProductFeatures();fs.writeFileSync(path.join(dataRoot,'feature-recovery-result.json'),JSON.stringify({at:new Date().toISOString(),...result},null,2));}
+      catch(error){fs.writeFileSync(path.join(dataRoot,'feature-recovery-result.json'),JSON.stringify({at:new Date().toISOString(),error:String(error.message)},null,2));}
+    }
+  })().catch(()=>{});
   const bitmap=Buffer.alloc(32*32*4);
   for(let y=0;y<32;y++)for(let x=0;x<32;x++){const i=(y*32+x)*4;const dx=x-15.5,dy=y-15.5;if(dx*dx+dy*dy<225){const white=Math.abs(dx)*0.65+Math.abs(dy)<7||Math.abs(dx)+Math.abs(dy)*0.65<7;bitmap[i]=white?235:68;bitmap[i+1]=white?246:93;bitmap[i+2]=white?248:30;bitmap[i+3]=255;}}
   const image=nativeImage.createFromBitmap(bitmap,{width:32,height:32,scaleFactor:1});

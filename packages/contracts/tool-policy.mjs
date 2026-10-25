@@ -1,5 +1,6 @@
 // Capability classification is shared by catalog, saved-grant validation and
 // the final native execution guard. Names are identities, never prompt claims.
+import { productTool } from './product-tools.mjs';
 const NAME = /^[\w.:-]{1,160}$/;
 const LOCAL_CONTROL = new Set(['run_local_agent','local_agent_status','run_local_shell','list_local_dir','read_local_file','write_local_file','export_file','send_image']);
 const PC_BUSINESS = new Set(['fetch_paper','fetch_player_stats','fetch_scores','pc_status','read_web_page']);
@@ -10,6 +11,8 @@ const CONTROL = /(?:^|[_.:-])(?:bash|shell|pwsh|powershell|terminal|exec_command
 export function describeTool(name) {
   if(typeof name!=='string'||!NAME.test(name))return {category:'invalid',grantable:false,reason:'工具名称无效。'};
   const lower=name.toLowerCase();
+  const product=productTool(name);
+  if(product)return {server:'xiaozhushou',basename:name,category:product.computer?'computer-control':'business-tool',grantable:!product.computer,computerGrantable:product.computer,reason:product.computer?'使用本轮已核验的私聊电脑权限。':'小助手本轮成果与通信功能。'};
   const mcp=lower.match(/^mcp__([a-z0-9_-]+)__(.+)$/);
   const alternate=lower.match(/^([a-z0-9_-]+)[.:]([a-z0-9_]+)$/);
   const server=mcp?.[1]??alternate?.[1]??'',basename=mcp?.[2]??alternate?.[2]??lower;

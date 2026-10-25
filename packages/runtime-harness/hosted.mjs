@@ -112,7 +112,7 @@ export async function runHostedTask({ prompt, workspace, sessionId, conversation
     const personaPrefix = settings.personaPrefix ?? settings.persona;
     const executionPolicy=settings.hostedExecutionPolicy;
     const grants=executionPolicy==='worker-text-only-v1'?{skills:[],tools:[]}:settings.hostedOwnerGrants;
-    let value = verifyTask(await request(config, '/tasks', { method: 'POST', body: { taskId, prompt, workspace, ...(taskImages.length ? { images: taskImages } : {}), ...(sessionId ? { sessionId } : {}), ...(conversation ? { conversation } : {}), ...(personaPrefix ? { personaPrefix } : {}), ...(executionPolicy?{executionPolicy}:{}), ...(executionPolicy==='trusted-computer-task-v1'?{computerScope:settings.hostedComputerScope}:{}), ...(grants ? { authority: 'product-owner', ownerGrants: grants } : {}) } }), taskId);
+    let value = verifyTask(await request(config, '/tasks', { method: 'POST', body: { taskId, prompt, workspace, ...(settings.hostedProductConnection ? {productConnection:settings.hostedProductConnection} : {}), ...(taskImages.length ? { images: taskImages } : {}), ...(sessionId ? { sessionId } : {}), ...(conversation ? { conversation } : {}), ...(personaPrefix ? { personaPrefix } : {}), ...(executionPolicy?{executionPolicy}:{}), ...(executionPolicy==='trusted-computer-task-v1'?{computerScope:settings.hostedComputerScope}:{}), ...(grants ? { authority: 'product-owner', ownerGrants: grants } : {}) } }), taskId);
     lastSession = value.sessionId;
     const deadline = Date.now() + (settings.timeoutMs ?? 10 * 60 * 1000);
     while (!final(value)) {

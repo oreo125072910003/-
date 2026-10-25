@@ -5,7 +5,7 @@ const methods = ['getBootstrap','listTasks','getTask','getTaskReplyText','create
   'getWechatState','importWechatConnection','saveWechatSettings','connectWechat','disconnectWechat','draftWechatReply','sendWechatReply','searchWechatContacts','refreshWechatProfile',
   'getWechatSessions','getWechatHistory','resolveWechatImage','getWechatStickers','sendWechatMessage','sendWechatSticker','pickWechatAttachments','sendWechatAttachment','importLegacyExtensions','refreshDshCatalog',
   'getMailState','importMailAccounts','importMailAccountsFile','syncMail','getMailMessage','createMailDraft','sendMailDraft','resolveMailAttachment','saveMailAttachment','draftMailReply',
-  'getDshAccessState','refreshDshAccessCatalog','saveDshOwnerGrants',
+  'getDshAccessState','refreshDshAccessCatalog','saveDshOwnerGrants','restoreProductFeatures',
   'getWechatDshAccess','saveWechatDshGrants','importWechatDshGrants','saveWechatComputerAccess',
   'getExtensionsState','importMcpManifest','installBuiltinMcp','enableMcp','disableMcp','testMcp','setMcpTools',
   'importSkill','importBundledSkill','enableSkill','disableSkill'];

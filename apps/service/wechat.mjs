@@ -113,7 +113,7 @@ function readSelectedFile(root, relative, maximum = 131072) {
   } finally { fs.closeSync(descriptor); }
 }
 
-export function createWechatController({ store, dataDir, secretStore, bridgeFactory, createTask, getTask, readTaskReply, cancelTask, authorizeAttachment, autoOptions = {}, onChange = () => {} }) {
+export function createWechatController({ store, dataDir, secretStore, bridgeFactory, createTask, getTask, readTaskReply, readTaskDeliveries, cancelTask, authorizeAttachment, autoOptions = {}, onChange = () => {} }) {
   let bridge = null, generation = 0, closing = false, pendingConnect = null, pendingDisconnect = null, closingOperation = null;
   let connection = { state: 'offline', detail: '微信尚未连接。请先导入本机现有微信连接。', accountVerified: false, readerConnected: false };
   const sends = new Set();
@@ -256,7 +256,7 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
     onChange();
     const promise=(async()=>{
       try{
-        const result=attachment?await sender.sendAttachment({kind,target,path:attachment.path,name:attachment.name,sha256:attachment.sha256,size:attachment.size,mime:attachment.mime,mediaType,deliveryId:record.delivery.deliveryId}):
+        const result=attachment?await sender.sendAttachment({kind,target,path:attachment.path,name:attachment.name,sha256:attachment.sha256,size:attachment.size,mime:attachment.mime,mediaType,deliveryId:record.delivery.deliveryId,beforeSubmit,signal:sendContext.signal}):
           mediaType==='sticker'?await sender.sendSticker({kind,target,id:stickerId,deliveryId:record.delivery.deliveryId,beforeSubmit,signal:sendContext.signal}):await sender.sendText({kind,target,text,deliveryId:record.delivery.deliveryId,beforeSubmit,signal:sendContext.signal});
         const confirmed=result?.receipt==='wechat-server-id'&&result?.delivered==='database-confirmed'&&(mediaType!=='sticker'||result.media_type==='wechat-sticker')&&
           (!attachment||result.media_type==='wechat-'+mediaType&&/^[1-9]\d{0,31}$/.test(String(result.message_id??'')));
@@ -277,7 +277,18 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
     ...autoOptions,settings:current,
     ready:()=>!closing&&!!bridge&&connection.state==='ready'&&connection.accountVerified&&connection.readerConnected&&connection.selfEventsVerified!==false,
     permitted:message=>message.accountId===current().boundAccountId&&message.accountId===connection.selfId&&allowed(message),
-    createTask,getTask,readTaskReply,cancelTask,linkTask:(messageId,taskId)=>store.linkWechatTask(messageId,taskId),
+    createTask,getTask,readTaskReply,readTaskDeliveries,cancelTask,linkTask:(messageId,taskId)=>store.linkWechatTask(messageId,taskId),
+    sendMedia:(message,item,sendContext)=>{
+      const {config}=readyTarget(message.kind,message.conversationId);
+      if(message.accountId!==config.boundAccountId)throw Error('微信账号已变化。');
+      const attachment=item.kind==='attachment'?store.getWechatAttachment(item.attachmentId):null;
+      if(item.kind==='attachment'&&!attachment)throw Error('本轮附件快照不存在。');
+      if(!['attachment','sticker'].includes(item.kind))throw Error('本轮媒体类型无效。');
+      return dispatch({kind:message.kind,target:message.conversationId,text:item.kind==='sticker'?'[表情]':attachment.mediaType==='image'?'[图片]':'[文件]',
+        mediaType:item.kind==='sticker'?'sticker':attachment.mediaType,stickerId:item.stickerId??'',attachment,messageId:message.id,
+        dedupeKey:hash(['wechat-auto-media-v1',message.accountId,message.kind,message.conversationId,message.inboundKey,sendContext.index]),
+        requestId:'auto_'+message.inboundKey.slice(0,24)+'_'+sendContext.index,automatic:true,sendContext});
+    },
     hasManualReply:message=>store.listWechatOutbox().some(row=>row.accountId===message.accountId&&row.kind===message.kind&&row.target===message.conversationId&&
       !String(row.requestId??'').startsWith('auto_')&&(row.messageId===message.id||Date.parse(row.createdAt)>=Date.parse(message.receivedAt))),
     send:(message,text,sendContext)=>dispatch({kind:message.kind,target:message.conversationId,text,messageId:message.id,

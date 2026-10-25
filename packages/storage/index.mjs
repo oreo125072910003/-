@@ -141,14 +141,16 @@ export async function createStore(dataDir) {
   if (schema !== '4') { db.close();releaseOwner();throw new Error('数据版本高于当前程序，请使用匹配版本打开。'); }
   try{if(!query('PRAGMA table_info(tasks)').some(column=>column.name==='skill_ids'))transaction(()=>db.run("ALTER TABLE tasks ADD COLUMN skill_ids TEXT NOT NULL DEFAULT '[]'"));}
   catch(error){db.close();releaseOwner();throw error;}
-  try{for(const [name,definition]of [['workflow_id',"TEXT NOT NULL DEFAULT 'single'"],['worker_result',"TEXT NOT NULL DEFAULT 'null'"]])if(!query('PRAGMA table_info(tasks)').some(column=>column.name===name))transaction(()=>db.run(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`));}
+  try{for(const [name,definition]of [['workflow_id',"TEXT NOT NULL DEFAULT 'single'"],['worker_result',"TEXT NOT NULL DEFAULT 'null'"],['delivery_plan',"TEXT NOT NULL DEFAULT '[]'"]])if(!query('PRAGMA table_info(tasks)').some(column=>column.name===name))transaction(()=>db.run(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`));}
   catch(error){db.close();releaseOwner();throw error;}
   function mapTask(row) {
     if (!row) return null;
-    return { id: row.id, title: row.title, prompt: row.prompt, kind: row.kind, status: row.status,
+    const original=row.conversation_id?query('SELECT m.text FROM wechat_messages m JOIN dsh_conversations c ON c.id=? AND c.account_id=m.account_id AND c.kind=m.kind AND c.target=m.conversation_id WHERE m.task_id=? ORDER BY m.received_at LIMIT 1',[row.conversation_id,row.id])[0]:null;
+    const title=original?`微信 · ${original.text.trim()||'图片与资料'}`.replace(/\s+/g,' ').slice(0,48):row.title;
+    return { id: row.id, title, prompt: row.prompt, ...(original?{requestText:original.text||'图片与资料'}:{}), kind: row.kind, status: row.status,
       progress: row.progress, summary: row.summary, error: row.error, createdAt: row.created_at,
       updatedAt: row.updated_at, workspace: row.workspace, attachments: JSON.parse(row.attachments),
-      attachmentNames: JSON.parse(row.attachments).map(a => a.name), sessionId: row.session_id, conversationId:row.conversation_id??null, skillIds:JSON.parse(row.skill_ids||'[]'),workflowId:row.workflow_id||'single',workerResult:JSON.parse(row.worker_result||'null') };
+      attachmentNames: JSON.parse(row.attachments).map(a => a.name), sessionId: row.session_id, conversationId:row.conversation_id??null, skillIds:JSON.parse(row.skill_ids||'[]'),workflowId:row.workflow_id||'single',workerResult:JSON.parse(row.worker_result||'null'),wechatDeliveries:JSON.parse(row.delivery_plan||'[]') };
   }
   const wechatMessageSelect='SELECT id,account_id AS accountId,kind,conversation_id AS conversationId,conversation_name AS conversationName,sender_id AS senderId,sender_name AS senderName,text,external_id AS externalId,received_at AS receivedAt,task_id AS taskId,payload FROM wechat_messages';
   const wechatDeliverySelect='SELECT id,message_id AS messageId,account_id AS accountId,kind,target,text,delivery_id AS deliveryId,status,error,created_at AS createdAt,updated_at AS updatedAt,payload FROM wechat_outbox';
@@ -183,11 +185,11 @@ export async function createStore(dataDir) {
     getTask(id) { return mapTask(query('SELECT * FROM tasks WHERE id=?', [id])[0]); },
     listTasks() { return query('SELECT * FROM tasks ORDER BY created_at DESC,id DESC LIMIT 500').map(mapTask); },
     updateTask(id, patch) {
-      const fields = { status:'status', progress:'progress', summary:'summary', error:'error', sessionId:'session_id',workerResult:'worker_result',attachments:'attachments' };
+      const fields = { status:'status', progress:'progress', summary:'summary', error:'error', sessionId:'session_id',workerResult:'worker_result',attachments:'attachments',wechatDeliveries:'delivery_plan' };
       if (patch.status && !TASK_STATUSES.has(patch.status)) throw new Error('任务状态无效。');
       const entries = Object.entries(patch).filter(([key]) => fields[key]);
       transaction(() => {
-        db.run(`UPDATE tasks SET ${[...entries.map(([key]) => `${fields[key]}=?`),'updated_at=?'].join(',')} WHERE id=?`, [...entries.map(([key,v])=>['workerResult','attachments'].includes(key)?JSON.stringify(v):v), new Date().toISOString(), id]);
+        db.run(`UPDATE tasks SET ${[...entries.map(([key]) => `${fields[key]}=?`),'updated_at=?'].join(',')} WHERE id=?`, [...entries.map(([key,v])=>['workerResult','attachments','wechatDeliveries'].includes(key)?JSON.stringify(v):v), new Date().toISOString(), id]);
       });
       return api.getTask(id);
     },

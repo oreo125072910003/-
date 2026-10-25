@@ -68,7 +68,7 @@ try{
   const expected=path.join(releaseRoot,'小助手-win32-x64');
   if(!inside(releaseRoot,expected)||path.basename(expected)!=='小助手-win32-x64')throw Error('Unexpected package overwrite target');
   const output=await packager({dir:stage,out:releaseRoot,name:'小助手',platform:'win32',arch:'x64',electronVersion:metadata.devDependencies.electron,
-    appVersion:metadata.version,buildVersion:metadata.version,appBundleId:'local.xiaozhushou.desktop',asar:{unpack:'**/send-attachment-ui.ps1'},prune:false,overwrite:true,
+    appVersion:metadata.version,buildVersion:metadata.version,appBundleId:'local.xiaozhushou.desktop',asar:{unpack:'**/*.{node,ps1}'},prune:false,overwrite:true,
     icon,electronZipDir:verifiedElectronCache(),extraResource:[embeddedContract],ignore:[/contract-resource/,/assistant\.ico$/],
     win32metadata:{CompanyName:'小助手项目',FileDescription:'小助手个人桌面助理',ProductName:'小助手'},
   });
