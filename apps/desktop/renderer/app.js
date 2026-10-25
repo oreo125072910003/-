@@ -471,13 +471,13 @@ async function saveWechatComputerAccess(enabled) {
 async function wechatAccessOperation(name,operation) {
   const conversation=selectedWechatConversation();if(!conversation?.allowed||state.wechatDshBusy)return;
   const account=state.wechatAccountKey,connection=state.wechat?.settings?.connectionId,key=conversation.key;
-  state.wechatDshOpen=true;state.wechatDshBusy=name;state.wechatDshError='';renderPage();
+  state.wechatDshOpen=true;state.wechatDshBusy=name;state.wechatDshError='';renderWechatPreservingFocus();
   try {
     const result=await operation({kind:conversation.kind,target:conversation.id});
     if(account!==state.wechatAccountKey||connection!==state.wechat?.settings?.connectionId||selectedWechatConversation()?.key!==key)return;
     state.wechatDshAccess=result;state.wechatDshDraft=null;
   }catch(error){if(account===state.wechatAccountKey&&selectedWechatConversation()?.key===key)state.wechatDshError=error.message||'无法读取会话授权。';}
-  finally{state.wechatDshBusy='';renderPage();}
+  finally{state.wechatDshBusy='';if(state.page==='wechat')renderWechatPreservingFocus();}
 }
 async function saveWechatDshAccess(clear=false) {
   const grants=clear?{skills:[],tools:[]}:currentWechatGrants();
@@ -800,20 +800,30 @@ function editMailAccount(id) {
 }
 function renderWechatPreservingFocus() {
   const focused = document.activeElement;
-  const field = focused?.matches('input, textarea') ? { id: focused.id, name: focused.name, start: focused.selectionStart, end: focused.selectionEnd } : null;
+  const field = focused?.matches('input, textarea') ? { id: focused.id, name: focused.name, grantKind: focused.dataset.wechatDshKind, value: focused.value, start: focused.selectionStart, end: focused.selectionEnd } : null;
   const oldThread = document.querySelector('.message-thread');
   const threadScroll = oldThread?.scrollTop;
   const wasNearEnd = oldThread ? oldThread.scrollHeight - oldThread.clientHeight - oldThread.scrollTop < 40 : true;
   const listScroll = document.querySelector('.conversation-list')?.scrollTop;
+  const accessScroll = document.querySelector('.wechat-dsh-access')?.scrollTop;
+  const grantListScroll = [...document.querySelectorAll('.wechat-dsh-access .dsh-grant-list')].map(list => list.scrollTop);
+  const grantDetails = [...document.querySelectorAll('.wechat-dsh-access details')].map(details => details.open);
+  const accessContext = `${state.wechatAccountKey}:${state.selectedConversationKey}`;
   renderPage();
   const thread = document.querySelector('.message-thread');
   if (thread) thread.scrollTop = wasNearEnd ? thread.scrollHeight : threadScroll || 0;
   const list = document.querySelector('.conversation-list');
   if (list) list.scrollTop = listScroll || 0;
+  if (accessContext === `${state.wechatAccountKey}:${state.selectedConversationKey}`) {
+    document.querySelectorAll('.wechat-dsh-access details').forEach((details, index) => { if (index < grantDetails.length) details.open = grantDetails[index]; });
+    document.querySelectorAll('.wechat-dsh-access .dsh-grant-list').forEach((list, index) => { if (index < grantListScroll.length) list.scrollTop = grantListScroll[index]; });
+    const access = document.querySelector('.wechat-dsh-access');
+    if (access && accessScroll !== undefined) access.scrollTop = accessScroll;
+  }
   if (field) {
-    const next = field.id ? document.getElementById(field.id) : document.querySelector(`#wechat-settings-form [name="${field.name}"]`);
+    const next = field.id ? document.getElementById(field.id) : field.grantKind ? [...document.querySelectorAll('[data-wechat-dsh-kind]')].find(input => input.dataset.wechatDshKind === field.grantKind && input.value === field.value) : field.name ? document.querySelector(`#wechat-settings-form [name="${field.name}"]`) : null;
     next?.focus({ preventScroll: true });
-    try { if (field.start !== null) next?.setSelectionRange(field.start, field.end); } catch { /* URL fields do not expose text selection. */ }
+    try { if (Number.isInteger(field.start)) next?.setSelectionRange(field.start, field.end); } catch { /* URL fields do not expose text selection. */ }
   }
 }
 function selectWechatMessage(id) {
@@ -1148,7 +1158,7 @@ document.addEventListener('input', (event) => {
   }
 });
 document.addEventListener('change', (event) => {
-  if(event.target.matches('[data-wechat-dsh-kind]')){const selection=wechatDshSelection(),kind=event.target.dataset.wechatDshKind==='tools'?'tools':'skills',name=event.target.value;selection[kind]=event.target.checked?[...new Set([...selection[kind],name])]:selection[kind].filter(item=>item!==name);renderPage();}
+  if(event.target.matches('[data-wechat-dsh-kind]')){const selection=wechatDshSelection(),kind=event.target.dataset.wechatDshKind==='tools'?'tools':'skills',name=event.target.value;selection[kind]=event.target.checked?[...new Set([...selection[kind],name])]:selection[kind].filter(item=>item!==name);renderWechatPreservingFocus();}
   if (event.target.id === 'wechat-auto-reply' || event.target.id === 'wechat-auto-connect') { void saveWechatAutomation(event.target.id === 'wechat-auto-reply' ? 'autoReply' : 'autoConnect', event.target.checked); return; }
   if(event.target.id==='mail-account-filter'){state.mailAccountId=event.target.value;state.mailMessageId=null;renderPage();}
   if(event.target.id==='mail-compose-account'){state.mailCompose=readMailComposeForm(event.target.closest('form'));state.mailSavedDraft=null;renderMailPreservingFocus();}

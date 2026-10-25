@@ -16,6 +16,8 @@ function holdRead(){
 const task={id:'synthetic-task',title:'合成完整草稿验收',status:'succeeded',summary:full.slice(0,12000),createdAt:new Date().toISOString(),kind:'agent'};
 const mail={accounts:[{id:'synthetic-account',name:'合成邮箱',address:'owner@example.test',smtp:{host:'smtp.example.test'},imap:{host:'imap.example.test'},credentialsConfigured:true}],messages:[{id:'synthetic-mail',accountId:'synthetic-account',from:[{name:'合成发件人',address:'sender@example.test'}],replyTo:[{name:'回复窗口',address:'reply@example.test'}],to:[{address:'owner@example.test'}],subject:'合成邮件：完整草稿验收',text:'请核对完整答复。',date:new Date().toISOString(),bodyStatus:'available',attachments:[]}],drafts:[]};
 let access={source:'wechat',accountId:'111',accountVerified:true,connected:true,saved:{skills:[],tools:['old-unavailable','mcp_pcbridge_read_file']},effective:{skills:[],tools:[]},unavailable:{skills:[],tools:['old-unavailable','mcp_pcbridge_read_file']},computerAccess:{enabled:false,eligibleTools:['mcp_pcbridge_read_file']},catalog:{skills:[{name:'office-docx',description:'按明确选择处理合同文档。',modelInvocable:true}],tools:[{name:'mcp_contract_search',description:'查询合同资料、型号及金额。',grantable:true},{name:'mcp_pcbridge_read_file',description:'读取本机文件。',grantable:false,computerGrantable:true,grantReason:'需单独保存此私聊的电脑控制范围。'}]}};
+access.catalog.skills.push(...Array.from({length:35},(_,index)=>({name:`synthetic-skill-${index}`,description:'用于验证长能力目录滚动保持的合成条目。',modelInvocable:true})));
+access.catalog.tools.push(...Array.from({length:60},(_,index)=>({name:`synthetic_tool_${index}`,description:'用于验证多项勾选和后台刷新定位的合成工具。',grantable:true})));
 const wechat={settings:{boundAccountId:'111',connectionId:'synthetic-connection',allowedPrivate:['222'],allowedGroups:[],autoReply:false,connectionImported:true},profile:{nickname:'合成验收账号',wxid:'111',verified:true,loginState:'ready'},connection:{state:'ready',accountVerified:true,detail:'合成离线连接',readerConfiguration:{state:'pending',detail:'合成配置尚未同步。'}},sessions:[{id:'222',kind:'private',name:'合成好友',allowed:true}],allowedContacts:[{id:'222',kind:'private',name:'合成好友'}],messages:[{id:'synthetic-message',kind:'private',conversationId:'222',senderName:'合成好友',text:'起草参考消息',taskId:task.id,replyDraft:task.summary,receivedAt:new Date().toISOString()}],outbox:[]};
 wechat.settings.allowedPrivate.push('333');wechat.sessions.push({id:'333',kind:'private',name:'另一个合成好友',allowed:true});
 function updateEffectiveAccess(){
@@ -55,6 +57,17 @@ async function run(){
   }
   async function checkGrantCounts(saved,effective){
     await waitFor(`document.querySelector('.dsh-access-summary')?.textContent.includes('已保存：技能 0 项 · 工具 ${saved} 项')&&document.querySelector('.dsh-access-summary')?.textContent.includes('本轮有效：技能 0 项 · 工具 ${effective} 项')`);
+  }
+  async function checkAccessScrollAndFocus(){
+    const selector='[data-wechat-dsh-kind="tools"][value="synthetic_tool_20"]';
+    await evaluate(`{const panel=document.querySelector('.wechat-dsh-access'),lists=panel.querySelectorAll('.dsh-grant-list'),input=document.querySelector(${JSON.stringify(selector)});lists[0].scrollTop=125;lists[1].scrollTop+=input.getBoundingClientRect().top-lists[1].getBoundingClientRect().top-80;panel.scrollTop+=lists[1].getBoundingClientRect().top-panel.getBoundingClientRect().top-90;input.focus({preventScroll:true});}`);
+    const position=()=>evaluate(`{const panel=document.querySelector('.wechat-dsh-access'),input=document.querySelector(${JSON.stringify(selector)});({outer:panel.scrollTop,inner:[...panel.querySelectorAll('.dsh-grant-list')].map(list=>list.scrollTop),focused:document.activeElement===input,checked:input.checked})}`);
+    const before=await position();assert.ok(before.outer>0&&before.inner.every(value=>value>0));assert.equal(before.focused,true);
+    await click(selector);assert.deepEqual(await position(),{...before,checked:true});
+    await evaluate(`window.__qaGrantField=document.querySelector(${JSON.stringify(selector)})`);window.webContents.send('assistant:change');
+    await waitFor(`document.querySelector(${JSON.stringify(selector)})!==window.__qaGrantField`);
+    assert.deepEqual(await position(),{...before,checked:true});
+    await click(selector);assert.deepEqual(await position(),before);
   }
   try {
     await window.loadFile(path.join(root,'apps/desktop/renderer/index.html'));
@@ -100,6 +113,7 @@ async function run(){
     await click('[data-action="wechat-access"]');await waitFor('Boolean(document.querySelector("#wechat-dsh-grants-form"))');
     assert.equal(await evaluate('document.querySelector("#wechat-computer-access").checked'),false);
     assert.equal(calls.computer,0);
+    await checkAccessScrollAndFocus();
     await click('[data-wechat-dsh-kind="tools"][value="mcp_contract_search"]');
     await evaluate('document.querySelector("#wechat-dsh-grants-form").requestSubmit()');await waitFor('!document.querySelector("#wechat-dsh-grants-form button[type=submit]").disabled');
     assert.equal(calls.grants,1);await checkGrantCounts(3,1);await screenshot('wechat-conversation-access.png');
@@ -113,7 +127,7 @@ async function run(){
     assert.equal(await evaluate('document.querySelector(".wechat-dsh-access").textContent.includes("old-unavailable")'),false);
     await click('[data-wechat-dsh-kind="tools"][value="mcp_contract_search"]');await evaluate('document.querySelector("#wechat-dsh-grants-form").requestSubmit()');await waitFor('!document.querySelector("#wechat-dsh-grants-form button[type=submit]").disabled');await checkGrantCounts(1,1);
     assert.equal(calls.grants,3);assert.equal(calls.sends,0);assert.deepEqual(errors,[]);
-    const report={passed:true,hiddenWindow:true,syntheticOnly:true,realPreload:true,fullMailAndWechatTextPreserved:true,replyToSelected:true,unavailableGrantsDoNotBlockNewBusinessGrants:true,computerControlRequiresExplicitSave:true,pendingReadButtonsDisabled:true,repeatedReadsBlocked:true,backgroundRefreshPreservesTextAndSelection:true,conversationSwitchAndPageCloseKeepDrafts:true,failedReadKeepsEditsAndCanRetry:true,savedAndEffectiveGrantCountsAfterRevocation:true,...calls};
+    const report={passed:true,hiddenWindow:true,syntheticOnly:true,realPreload:true,fullMailAndWechatTextPreserved:true,replyToSelected:true,unavailableGrantsDoNotBlockNewBusinessGrants:true,computerControlRequiresExplicitSave:true,pendingReadButtonsDisabled:true,repeatedReadsBlocked:true,backgroundRefreshPreservesTextAndSelection:true,conversationSwitchAndPageCloseKeepDrafts:true,failedReadKeepsEditsAndCanRetry:true,savedAndEffectiveGrantCountsAfterRevocation:true,grantPanelAndNestedScrollPreserved:true,grantCheckboxFocusPreserved:true,...calls};
     fs.writeFileSync(path.join(output,'feedback-ui-results.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
   } finally {window.destroy();}
 }
