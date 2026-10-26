@@ -146,6 +146,8 @@ async function smokeTest(){
   const mediaNativeScript=app.isPackaged?path.join(process.resourcesPath,'app.asar.unpacked','packages','wechat-bridge','send-attachment-ui.ps1'):path.join(projectRoot,'packages','wechat-bridge','send-attachment-ui.ps1');
   if(!fs.existsSync(mediaNativeScript)||!fs.statSync(mediaNativeScript).isFile())throw Error('微信附件发送脚本未在本机文件系统中展开。');
   if(!fs.existsSync(path.join(path.dirname(mediaNativeScript),'wechat-visual-ui.ps1')))throw Error('微信界面兼容组件未在本机文件系统中展开。');
+  const wechatClientScript=app.isPackaged?path.join(process.resourcesPath,'app.asar.unpacked','apps','service','start-wechat-client.ps1'):path.join(projectRoot,'apps','service','start-wechat-client.ps1');
+  if(!fs.existsSync(wechatClientScript))throw Error('微信启动组件未在本机文件系统中展开。');
   fs.mkdirSync(artifactsDir,{recursive:true});
   const failures=[];window.webContents.on('console-message',details=>{if(details.level==='error')failures.push(details.message);});
   const source=path.join(smokeRoot,'示例资料.txt');fs.writeFileSync(source,'这是用于桌面验收的合成资料。\n数量：3\n状态：待核对\n');
@@ -240,13 +242,13 @@ async function smokeTest(){
   await service.close();
   const {createAssistantService}=await import(pathToFileURL(path.join(projectRoot,'apps/service/index.mjs')).href);
   const runtime=await import(pathToFileURL(path.join(projectRoot,'packages/runtime-harness/index.mjs')).href);
-  service=await createAssistantService({dataDir:dataRoot,runtime,secretStore:secretStore(),contractAvailable:!!contractExecutable(),builtinMcp:builtinMcp(),legacySources:legacySources()});
+  service=await createAssistantService({dataDir:dataRoot,runtime,secretStore:secretStore(),contractAvailable:!!contractExecutable(),builtinMcp:builtinMcp(),legacySources:legacySources(),...(smoke?{wechatClientPreparer:async()=>({ready:true})}:{})});
   const restored=service.getTask(task.id);
   if(restored.task.status!=='succeeded'||restored.artifacts.length!==2)throw Error('重新打开数据后任务或成果丢失。');
   const report={ok:true,version:app.getVersion(),dataDir:smokeRoot,taskId:task.id,status:detail.task.status,artifactCount:detail.artifacts.length,
     rendererNodeAccess:isolation.node,preloadAPI:isolation.api,windowsSecretProtection:true,reopenPreserved:true,rendererSubmitExercised:true,
     runtimeDetected:bootstrap.runtime.available,runtimeVersion:bootstrap.runtime.version,contractAvailable:!!contractExecutable(),wechatRendererFlow:true,wechatProfileNameShown:true,wechatSyntheticSends:smokeWechat.sends,extensionsRendererFlow:true,
-    ...wechatAutoUI,...wechatMediaUI,mediaNativeScriptAccessible:true,...extensionUiReport,...mailUiReport,consoleErrors:failures,capturedAt:new Date().toISOString()};
+    ...wechatAutoUI,...wechatMediaUI,mediaNativeScriptAccessible:true,wechatClientScriptAccessible:true,...extensionUiReport,...mailUiReport,consoleErrors:failures,capturedAt:new Date().toISOString()};
   fs.writeFileSync(path.join(artifactsDir,'desktop-smoke.json'),JSON.stringify(report,null,2)+'\n');
   console.log(JSON.stringify(report));await service.close();quitting=true;app.exit(failures.length?1:0);
 }
@@ -254,7 +256,7 @@ async function start(){
   Menu.setApplicationMenu(null);
   const runtime=await import(pathToFileURL(path.join(projectRoot,'packages/runtime-harness/index.mjs')).href);
   const {createAssistantService}=await import(pathToFileURL(path.join(projectRoot,'apps/service/index.mjs')).href);
-  service=await createAssistantService({dataDir:dataRoot,runtime,secretStore:secretStore(),contractAvailable:!!contractExecutable(),builtinMcp:builtinMcp(),legacySources:legacySources()});
+  service=await createAssistantService({dataDir:dataRoot,runtime,secretStore:secretStore(),contractAvailable:!!contractExecutable(),builtinMcp:builtinMcp(),legacySources:legacySources(),...(smoke?{wechatClientPreparer:async()=>({ready:true})}:{})});
   const importIndex=process.argv.indexOf('--connect-wechat-source');
   if(!smoke&&importIndex>=0){try{if(!(await service.getWechatState()).settings.connectionImported)await service.importWechatConnection(wechatSource(),{automatic:true});}catch{ /* The WeChat page retains its error; the desktop remains usable. */ }}
   await registerIPC();

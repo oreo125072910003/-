@@ -60,7 +60,16 @@ const descriptions = {
   WECHAT_ACCOUNT_CHANGED: '微信账号已经变化。请断开并重新导入连接，核对授权会话。',
   HOOK_ACCOUNT_MISMATCH: '消息读取账号与微信接口账号不一致，收发已暂停。', HOOK_MULTIPLE_ACCOUNT_DATABASES: '检测到多个微信账号数据库，无法确定发送账号。',
   HOOK_VERSION_MISMATCH: '当前微信版本不匹配；此连接只支持已经核对的 4.1.10.27。',
-  HOOK_LOGIN_REQUIRED: '微信尚未登录，请先登录现有微信客户端。', HOOK_INITIALIZATION_PENDING: '微信接口正在初始化，请稍后重新连接。',
+  HOOK_LOGIN_REQUIRED: '专用微信已打开，请在该窗口扫码或用手机确认登录；完成后会自动连接。', HOOK_INITIALIZATION_PENDING: '微信接口正在初始化，请稍后重新连接。',
+  WECHAT_OTHER_CLIENT_RUNNING: '另一版微信正在运行。请从系统托盘退出它，小助手会自动打开匹配的专用微信；无需重新导入连接。',
+  WECHAT_CLIENT_NOT_PREPARED: '专用微信的连接组件未通过检查，未改动现有微信；请修复本机连接组件。',
+  WECHAT_CLIENT_VERSION_MISMATCH: '专用微信版本已变化，请恢复匹配的连接组件后重试。',
+  WECHAT_CLIENT_SIGNATURE_INVALID: '专用微信未通过腾讯签名检查，未启动。',
+  WECHAT_CLIENT_TOKEN_MISMATCH: '专用微信的本机连接信息不一致，未更改原信息。',
+  WECHAT_CLIENT_IDENTITY_MISMATCH: '微信连接接口与专用客户端不一致，未继续连接。',
+  WECHAT_CLIENT_PORT_OCCUPIED: '微信连接接口被其他程序占用，未替换现有程序。',
+  WECHAT_CLIENT_HEALTH_TIMEOUT: '专用微信仍未完成初始化，小助手会继续等待连接。',
+  WECHAT_CLIENT_LAUNCH_UNAVAILABLE: '未能启动专用微信，请检查本机连接组件。',
   HOOK_NOT_LISTENING: '微信接口没有启动，请先启动本机现有微信运行环境。', READER_NOT_LISTENING: '消息读取服务没有启动，请先启动本机现有微信运行环境。',
   READER_STREAM_UNAVAILABLE: '消息读取服务暂不可用，正在等待恢复。', READER_STREAM_DISCONNECTED: '消息读取连接已断开，正在等待恢复。',
   API_HTTP_401: '微信连接凭据未通过校验，请断开并重新导入连接。', TEXT_DELIVERY_UNCONFIRMED: '微信尚未返回服务器送达回执。',
@@ -545,8 +554,10 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
         await bridge.start({ ...config, ...secret, fileReaderSources:[...new Set([...fileReaderSources,...(config.sourceDirectory?[config.sourceDirectory]:[])])], dataDir: path.join(dataDir, 'wechat'), nickname: store.getSettings().assistantName || '小助手' });
       }
       catch (error) {
-        recoveryBlocked = /ACCOUNT_CHANGED|ACCOUNT_MISMATCH|MULTIPLE_ACCOUNT|VERSION_MISMATCH|API_HTTP_40[13]|MESSAGE_HANDLER_FAILED/.test(String(error?.code ?? error?.message));
-        if (epoch === generation) { const failed = bridge; bridge = null; await failed?.stop().catch(() => {}); connection = { state: 'error', detail: explain(error), accountVerified: false, readerConnected: false }; onChange(); }
+        recoveryBlocked = /ACCOUNT_CHANGED|ACCOUNT_MISMATCH|MULTIPLE_ACCOUNT|VERSION_MISMATCH|API_HTTP_40[13]|MESSAGE_HANDLER_FAILED|WECHAT_CLIENT_(?:NOT_PREPARED|SIGNATURE_INVALID|TOKEN_MISMATCH|IDENTITY_MISMATCH)/.test(String(error?.code ?? error?.message));
+        const waitingState = error?.code === 'WECHAT_OTHER_CLIENT_RUNNING' ? 'waiting_client' : error?.code === 'HOOK_LOGIN_REQUIRED' || error?.message === 'HOOK_LOGIN_REQUIRED' ? 'waiting_login' : null;
+        if (epoch === generation) { const failed = bridge; bridge = null; await failed?.stop().catch(() => {}); connection = { state: waitingState || 'error', detail: explain(error), accountVerified: false, readerConnected: false }; onChange(); }
+        if (waitingState) return api.getState();
         throw Error(explain(error));
       }
       return api.getState();

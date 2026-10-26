@@ -21,6 +21,7 @@ function runtimeFixture(t, extra = {}) {
   let ready = false, starts = 0;
   const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null, unref() {} });
   const runtime = createWechatRuntime({ dataDir: root, startupMs: 250, pollMs: 5,
+    ensureClient: async () => ({ ready: true }),
     fetchImpl: async () => ({ ok: true, json: async () => ({ success: ready, backend: 'weflow-cli-nt', selfEvents: 'account-conversation-v1' }) }),
     portOpenImpl: async () => false,
     spawnImpl: (exe, args, options) => {
@@ -37,6 +38,23 @@ test('cold start launches only the existing reader once; concurrent callers and 
   const a = f.runtime.ensure(f.config), b = f.runtime.ensure(f.config);
   assert.equal(a, b); assert.equal((await a).started, true); assert.equal(f.starts(), 1);
   assert.equal((await f.runtime.ensure(f.config)).started, false); assert.equal(f.starts(), 1);
+});
+
+test('a healthy reader still checks the matching client, and login completion continues without starting another reader', async t => {
+  let loginRequired = true, checks = 0;
+  const f = runtimeFixture(t, { ensureClient: async () => { checks++; return { ready: true, loginRequired }; } });
+  f.setReady(true);
+  await assert.rejects(f.runtime.ensure(f.config), { code: 'HOOK_LOGIN_REQUIRED' });
+  assert.equal(f.starts(), 0);
+  loginRequired = false;
+  assert.equal((await f.runtime.ensure(f.config)).ready, true);
+  assert.equal(checks, 2); assert.equal(f.starts(), 0);
+});
+
+test('an incompatible running client stops before starting the reader or a replacement responder', async t => {
+  const f = runtimeFixture(t, { ensureClient: async () => { throw Object.assign(Error('WECHAT_OTHER_CLIENT_RUNNING'), { code: 'WECHAT_OTHER_CLIENT_RUNNING' }); } });
+  await assert.rejects(f.runtime.ensure(f.config), { code: 'WECHAT_OTHER_CLIENT_RUNNING' });
+  assert.equal(f.starts(), 0);
 });
 
 test('an occupied port or changed connection credentials never launches a replacement process', async t => {
@@ -74,6 +92,22 @@ test('initial reader failure retries automatically, then manual disconnect stays
   await assert.rejects(f.controller.connect(), /读取服务/);
   await until(async () => (await f.controller.getState()).connection.state === 'ready'); assert.equal(f.count(), 2);
   await f.controller.disconnect(); await sleep(80); assert.equal(f.count(), 2);
+});
+
+test('switching client and scanning login are waiting states, followed by automatic account verification', async t => {
+  for (const [code, state] of [['WECHAT_OTHER_CLIENT_RUNNING', 'waiting_client'], ['HOOK_LOGIN_REQUIRED', 'waiting_login']]) {
+    const f = await controllerFixture(t, async (count, callbacks) => {
+      if (count === 1) throw Object.assign(Error(code), { code });
+      callbacks.onState({ state: 'ready', selfId: '777', accountVerified: true, readerConnected: true });
+    });
+    const initial = await f.controller.connect();
+    assert.equal(initial.connection.state, state);
+    assert.equal(initial.connection.accountVerified, false);
+    await until(async () => (await f.controller.getState()).connection.state === 'ready');
+    assert.equal(f.count(), 2);
+    assert.equal((await f.controller.getState()).outbox.length, 0);
+    await f.controller.disconnect();
+  }
 });
 
 test('account/version mismatch requires owner action; recovery never replays stored inbox messages', async t => {

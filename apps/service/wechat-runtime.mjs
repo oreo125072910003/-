@@ -3,6 +3,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { ensureWechatClient } from './wechat-client.mjs';
 
 const fault = message => Object.assign(Error(message), { code: 'WECHAT_RUNTIME_UNAVAILABLE' });
 const read = filename => {
@@ -17,10 +18,10 @@ const portOpen = (url, signal) => new Promise(resolve => {
   socket.once('error', error => finish(error.code !== 'ECONNREFUSED'));
 });
 
-/** Start only the existing read service. Never launch a legacy responder, log in,
- * inject a client, alter credentials, or replace another listener. */
+/** Prepare the reviewed client and existing read service. Never launch a legacy
+ * responder, install/inject components, alter credentials or replace a listener. */
 export function createWechatRuntime({ dataDir, sources = [], fetchImpl = fetch, spawnImpl = spawn,
-  portOpenImpl = portOpen, startupMs = 20000, pollMs = 250 } = {}) {
+  portOpenImpl = portOpen, ensureClient = ensureWechatClient, startupMs = 20000, pollMs = 250 } = {}) {
   let pending, child;
   return {
     ensure(config, { signal } = {}) {
@@ -41,14 +42,21 @@ export function createWechatRuntime({ dataDir, sources = [], fetchImpl = fetch, 
           } catch { return false; }
         };
         const directory = config.sourceDirectory || (sources.length === 1 ? sources[0] : null);
+        let root, project;
+        // A healthy reader does not imply the sender/client is running. Always
+        // verify the exact client first, including after a later client exit.
+        if (directory) {
+          root = fs.realpathSync(directory); project = read(path.join(root, 'config/wechatagent.json'));
+          const io = read(path.join(root, 'state/wechat-io-config.json'));
+          if (project.runtime?.sender !== 'wechat-hook' || project.runtime?.weflowMode !== 'nt' ||
+              new URL(io.reader_base_url).origin !== url.origin || io.reader_token !== config.readerToken ||
+              Number(project.ports?.weflow) !== Number(url.port)) throw fault('已导入的微信环境与当前连接不一致，请重新导入。');
+          const client = await ensureClient({ ...config, sourceDirectory: root }, { dataDir, signal });
+          if (client?.loginRequired) throw Object.assign(Error('HOOK_LOGIN_REQUIRED'), { code: 'HOOK_LOGIN_REQUIRED' });
+        }
         if (await healthy()) return { ready: true, started: false, ...(directory ? { sourceDirectory: directory } : {}) };
         signal?.throwIfAborted();
         if (!directory) throw fault('未找到已配置的微信读取环境，请在微信页重新导入原连接。');
-        const root = fs.realpathSync(directory), project = read(path.join(root, 'config/wechatagent.json'));
-        const io = read(path.join(root, 'state/wechat-io-config.json'));
-        if (project.runtime?.sender !== 'wechat-hook' || project.runtime?.weflowMode !== 'nt' ||
-            new URL(io.reader_base_url).origin !== url.origin || io.reader_token !== config.readerToken ||
-            Number(project.ports?.weflow) !== Number(url.port)) throw fault('已导入的微信环境与当前连接不一致，请重新导入。');
         const executable = project.runtime?.python, entry = path.join(root, 'scripts/reader-api.py');
         if (typeof executable !== 'string' || !path.isAbsolute(executable) || !fs.statSync(executable).isFile() || !fs.statSync(entry).isFile()) throw fault('原微信环境的读取组件不完整，请修复原环境。');
         if (!child || child.exitCode !== null || child.signalCode !== null) {

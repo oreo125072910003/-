@@ -41,7 +41,7 @@ exports.createWechatSmoke=async function(directory){
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const base='http://127.0.0.1:'+server.address().port;
   fs.mkdirSync(path.join(source,'config'),{recursive:true});fs.mkdirSync(path.join(source,'state','hook'),{recursive:true});
-  fs.writeFileSync(path.join(source,'config','wechatagent.json'),JSON.stringify({runtime:{sender:'wechat-hook',weflowMode:'nt'},hook:{baseUrl:base,expectedVersion:'4.1.10.27'},wechat:{whitelist:{private:['101'],groups:[]}}}));
+  fs.writeFileSync(path.join(source,'config','wechatagent.json'),JSON.stringify({runtime:{sender:'wechat-hook',weflowMode:'nt'},ports:{weflow:server.address().port},hook:{baseUrl:base,expectedVersion:'4.1.10.27'},wechat:{whitelist:{private:['101'],groups:[]}}}));
   fs.writeFileSync(path.join(source,'state','wechat-io-config.json'),JSON.stringify({reader_base_url:base,reader_token:readerToken}));
   fs.writeFileSync(path.join(source,'state','hook','native-token.txt'),nativeToken);
   return{source,get sends(){return sends;},emit(){

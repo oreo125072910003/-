@@ -33,7 +33,7 @@ const hashFile = filename => createHash('sha256').update(fs.readFileSync(filenam
 const inside = (root, target) => { const relative = path.relative(root,target); return relative !== '..' && !relative.startsWith('..'+path.sep) && !path.isAbsolute(relative); };
 const markdownText = value => String(value).replace(/[\\`*_{}\[\]<>]/g,'\\$&').replace(/[\r\n]+/g,' ');
 
-export async function createAssistantService({ dataDir, runtime, secretStore, maxConcurrent = 2, requirePickedFiles = true, contractAvailable = false, wechatBridgeFactory, mailOptions = {}, builtinMcp = [], legacySources = [], literatureClient = createLiteratureClient() }) {
+export async function createAssistantService({ dataDir, runtime, secretStore, maxConcurrent = 2, requirePickedFiles = true, contractAvailable = false, wechatBridgeFactory, wechatClientPreparer, mailOptions = {}, builtinMcp = [], legacySources = [], literatureClient = createLiteratureClient() }) {
   if (!path.isAbsolute(dataDir)) throw new Error('数据目录必须是绝对路径。');
   const root = path.resolve(dataDir);
   const workspaces = path.join(root,'tasks');
@@ -574,7 +574,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     resolveWorkspace(id){return id?findTask(id).workspace:workspaces;},
     async close(){if(closed)return;stopping=true;await wechat.close();await mail.close();for(const id of queued.splice(0)){update(id,{status:'interrupted',progress:'退出前尚未执行',error:'任务未自动重放。'});}for(const controller of active.values())controller.abort();await browser.close();const deadline=Date.now()+15000;while(active.size&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,30));if(active.size)throw new Error('执行器尚未退出，数据存储保留打开，请重试退出。');await Promise.allSettled([...exportsActive.values()]);await coordinator.close();await migration.close();await extensions.close();store.close();closed=true;events.removeAllListeners();},
   };
-  const wechatRuntime = createWechatRuntime({dataDir:root,sources:legacySources.filter(source=>source.kind==='wechatagent').map(source=>source.path)});
+  const wechatRuntime = createWechatRuntime({dataDir:root,sources:legacySources.filter(source=>source.kind==='wechatagent').map(source=>source.path),...(wechatClientPreparer?{ensureClient:wechatClientPreparer}:{})});
   const wechat = createWechatController({store,dataDir:root,secretStore,bridgeFactory:wechatBridgeFactory,
     ...(!wechatBridgeFactory?{ensureRuntime:(...args)=>wechatRuntime.ensure(...args)}:{}),
     fileReaderSources:legacySources.filter(source=>source.kind==='wechatagent').map(source=>source.path),

@@ -440,7 +440,7 @@ function selectedWechatMessage() {
 }
 function wechatConnectionInfo() {
   const connection = state.wechat?.connection || {};
-  const labels = { offline: '微信未连接', connecting: '正在连接微信', ready: '微信收发已连接', error: '微信连接出错' };
+  const labels = { offline: '微信未连接', connecting: '正在连接微信', waiting_client: '等待退出另一版微信', waiting_login: '等待微信登录', ready: '微信收发已连接', error: '微信连接出错' };
   return { state: connection.state || 'offline', label: labels[connection.state] || '未连接', style: connection.state === 'ready' ? '' : connection.state === 'error' ? 'error' : 'offline',
     detail: connection.detail || (state.wechat?.settings?.connectionImported ? '现有连接配置已导入，请手动连接。' : '先导入这台电脑现有的 WeChatAgent 连接配置。') };
 }
@@ -462,7 +462,7 @@ function renderWechatProfile() {
   const verified = profile.verified === true && profile.loginState === 'ready' && connection.state === 'ready';
   const cached = profile.source === 'cached';
   const name = profile.nickname || (connection.state === 'connecting' ? '正在识别微信账号…' : '微信账号待识别');
-  const loginLabels = { ready: verified ? '已登录 · 账号已核验' : '账号待核验', offline: '微信未连接', connecting: '正在连接微信', error: '账号状态需检查' };
+  const loginLabels = { ready: verified ? '已登录 · 账号已核验' : '账号待核验', offline: '微信未连接', connecting: '正在连接微信', waiting_client: '等待切换微信', waiting_login: '请在专用微信确认登录', error: '账号状态需检查' };
   const label = loginLabels[profile.loginState] || (connection.state === 'ready' ? '正在读取账号信息' : loginLabels[connection.state] || '微信未连接');
   return `<div class="wechat-account-card"><span class="wechat-account-avatar" aria-hidden="true">${profile.nickname ? escape(Array.from(profile.nickname)[0]) : icon('chat')}</span><div class="wechat-account-identity"><small>${cached ? '上次识别的微信账号' : '当前微信账号'}</small><h2>${escape(name)}</h2><div class="wechat-account-fields"><span>微信号：<strong>${escape(profile.alias || '尚未读取')}</strong></span>${profile.wxid ? `<span>账号标识：<strong>${escape(profile.wxid)}</strong></span>` : ''}</div></div><div class="wechat-account-status">${pill(label, verified ? '' : profile.loginState === 'error' ? 'error' : 'offline')}<small>${cached ? '当前状态以重新连接后的核验为准' : verified ? '已核对这台电脑当前登录的微信' : '连接后读取当前微信的账号信息'}</small><button class="text-button" data-action="wechat-profile-refresh" ${state.wechatBusy || connection.state !== 'ready' ? 'disabled' : ''}>${icon('refresh')}${state.wechatBusy === 'profile' ? '正在识别…' : '重新识别账号'}</button></div></div>`;
 }
@@ -489,7 +489,7 @@ function renderWechat() {
   const connection = wechatConnectionInfo();
   const settings = state.wechat?.settings || {};
   const busy = Boolean(state.wechatBusy);
-  const connected = ['ready', 'connecting'].includes(connection.state);
+  const connected = ['ready', 'connecting', 'waiting_client', 'waiting_login'].includes(connection.state);
   const allowedCount = (settings.allowedPrivate?.length || 0) + (settings.allowedGroups?.length || 0);
   const detail = connection.detail.replace(/\s*[（(]WECHAT_[A-Z_]+[）)]/g, '');
   const automaticState = state.wechat?.autoReply?.state;
