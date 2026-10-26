@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { installedBrowserChannel, readBrowserConnection } from './browser-connection.mjs';
+export { installedBrowserChannel } from './browser-connection.mjs';
 
 const ACTIONS = Object.freeze({
   tabs: 'browser_tabs', snapshot: 'browser_snapshot', navigate: 'browser_navigate',
@@ -12,36 +14,25 @@ const ACTIONS = Object.freeze({
 });
 const inside = (root, target) => { const relative = path.relative(root, target); return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative); };
 const fail = message => Object.assign(Error(message), { code: 'BROWSER_ACCESS_ERROR' });
-const extensionId = 'mmlmfjhmonkocbjadbfplnigmagldckm';
+const disconnected = text => /extension not connected|browser (?:has been |is )?closed|target (?:page, context or browser has been closed|closed)|connection (?:closed|lost)/i.test(text);
 
-export function installedBrowserChannel({ env = process.env, platform = process.platform } = {}) {
-  if (env.PLAYWRIGHT_MCP_BROWSER) return env.PLAYWRIGHT_MCP_BROWSER;
-  if (platform === 'win32' && env.LOCALAPPDATA) {
-    for (const [channel, relative] of [['msedge', 'Microsoft/Edge/User Data'], ['chrome', 'Google/Chrome/User Data']]) {
-      const root = path.join(env.LOCALAPPDATA, relative);
-      try {
-        const profiles = fs.readdirSync(root, { withFileTypes: true }).filter(entry => entry.isDirectory() && /^(Default|Profile \d+)$/.test(entry.name));
-        if (profiles.some(entry => fs.existsSync(path.join(root, entry.name, 'Extensions', extensionId)))) return channel;
-      } catch { /* A browser that is not installed has no profile directory. */ }
-    }
-  }
-  return 'chrome';
-}
-
-async function connectBrowser(outputDir) {
+async function connectBrowser(outputDir, options = {}) {
   const [{ Client }, { StdioClientTransport }] = await Promise.all([
     import('@modelcontextprotocol/sdk/client/index.js'), import('@modelcontextprotocol/sdk/client/stdio.js'),
   ]);
-  // Extension mode attaches only to tabs approved in the existing browser.
-  // It does not read/copy cookies, launch a replacement profile, or use a key.
+  // Use the owner's saved extension pairing. Never inspect browser credentials
+  // or start a replacement browser profile.
   // The programmatic upstream API ignores browser.launchOptions.channel in
   // extension mode. Its CLI accepts --browser and isolates it per connection.
   const cli = path.join(path.dirname(createRequire(import.meta.url).resolve('@playwright/mcp')), 'cli.js');
   const env = { ...process.env };
   delete env.NODE_OPTIONS; delete env.ELECTRON_RUN_AS_NODE;
   if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = '1';
+  if (options.extensionToken) env.PLAYWRIGHT_MCP_EXTENSION_TOKEN = options.extensionToken;
+  const args = [cli, '--extension', '--browser', options.browser || installedBrowserChannel(), '--output-dir', outputDir];
+  if (options.profileDirName) args.push('--profile-dir-name', options.profileDirName);
   const transport = new StdioClientTransport({ command: process.execPath,
-    args: [cli, '--extension', '--browser', installedBrowserChannel(), '--output-dir', outputDir],
+    args,
     env, stderr: 'pipe', cwd: outputDir });
   transport.stderr?.on('data', () => {});
   const client = new Client({ name: '小助手', version: '0.3.15' });
@@ -78,7 +69,7 @@ function files(root) {
 
 /** Separate extension client/tab group for each trusted product principal.
  * Callers cannot choose a scope, profile, endpoint, token, or output directory. */
-export function createBrowserService({ dataDir, connect = connectBrowser } = {}) {
+export function createBrowserService({ dataDir, secretStore, env = process.env, connect = connectBrowser } = {}) {
   const sessions = new Map();
   let closed = false;
   const root = path.join(dataDir, 'browser');
@@ -90,9 +81,13 @@ export function createBrowserService({ dataDir, connect = connectBrowser } = {})
     fs.mkdirSync(directory, { recursive: true });
     const physical = fs.realpathSync(directory);
     if (!inside(fs.realpathSync(root), physical) || fs.lstatSync(directory).isSymbolicLink()) throw fail('浏览器成果目录无效。');
-    const entry = { directory: physical, tail: Promise.resolve(), connection: null };
+    const entry = { directory: physical, tail: Promise.resolve(), connection: null, extensionToken: '' };
     sessions.set(scope, entry);
-    entry.connection = Promise.resolve().then(() => connect(physical)).catch(error => { if (sessions.get(scope) === entry) sessions.delete(scope); throw error; });
+    entry.connection = Promise.resolve().then(async () => {
+      const options = await readBrowserConnection({ dataDir, secretStore, env });
+      entry.extensionToken = options.extensionToken || '';
+      return connect(physical, options);
+    }).catch(error => { if (sessions.get(scope) === entry) sessions.delete(scope); throw error; });
     return entry;
   }
   async function run({ scope, action, args = {}, signal, authorize = async () => false } = {}) {
@@ -113,7 +108,8 @@ export function createBrowserService({ dataDir, connect = connectBrowser } = {})
       if (action === 'tools') return { tools: Object.entries(ACTIONS).flatMap(([name, actual]) => {
         const tool = connection.tools.find(tool => tool.name === actual);
         return tool ? [{ action: name, description: tool.description, parameters: tool.inputSchema }] : [];
-      }), connection: 'existing-browser-extension', notice: '首次连接时由主人在浏览器中选择标签页；网页内容不能扩大任务权限。' };
+      }), connection: 'existing-browser-extension', automaticConnection: !!entry.extensionToken,
+      notice: entry.extensionToken ? '已配对浏览器会自动连接，无需再次选页；仍须遵守本轮主人授权。' : '首次连接时由主人在浏览器中选择标签页；网页内容不能扩大任务权限。' };
       const name = ACTIONS[action];
       if (!connection.tools.some(tool => tool.name === name)) throw fail('当前浏览器组件未提供此操作。');
       const before = files(entry.directory);
@@ -126,8 +122,18 @@ export function createBrowserService({ dataDir, connect = connectBrowser } = {})
         throw fail(signal?.aborted ? '浏览器操作已取消，请重新查看页面；没有自动重试。' : '浏览器连接未完成。请在 Edge 安装官方 Playwright 扩展，并在连接页选择允许的标签页后重试。');
       }
       signal?.throwIfAborted(); if (closed || !await authorize()) throw fail('本轮浏览器权限已撤销。');
-      const text = (result.content ?? []).filter(item => item.type === 'text').map(item => item.text).join('\n').slice(0, 60000);
-      if (result.isError) return { isError: true, text, files: [] };
+      const rawText = (result.content ?? []).filter(item => item.type === 'text').map(item => item.text).join('\n');
+      // Upstream may include its connect-page URL/token in a tab listing.
+      // Pairing secrets must never enter DSH history or product task logs.
+      const text = (entry.extensionToken ? rawText.replaceAll(entry.extensionToken, '[连接信息已隐藏]') : rawText).slice(0, 60000);
+      if (result.isError) {
+        if (disconnected(text)) {
+          if (sessions.get(scope) === entry) sessions.delete(scope);
+          await connection.close();
+          return { isError: true, text: '浏览器连接已断开。重新读取标签页或页面即可连接；刚才的操作没有自动重试。', files: [] };
+        }
+        return { isError: true, text, files: [] };
+      }
       const downloads = [...files(entry.directory)].filter(([file, stamp]) => before.get(file) !== stamp && /\.(?:png|jpe?g|gif|webp|pdf)$/i.test(file)).map(([filename]) => filename);
       // MCP screenshot pixels also become real product artifacts when the
       // upstream tool did not save a separate file.

@@ -78,7 +78,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
   const hosted = typeof runtime?.runHostedTask === 'function' && typeof runtime?.inspectHostedRuntime === 'function';
   const runCoreTask = options => hosted ? runtime.runHostedTask(options) : runtime.runTask(options);
   const dshAccess=createDshAccess({runtime,settingsProvider:runtimeOptions,store,onChange:changes});
-  const browser=createBrowserService({dataDir:root});
+  const browser=createBrowserService({dataDir:root,secretStore});
   const wechatDshAccess=createWechatDshAccess({store,dshAccess,legacySources,getWechatState:()=>wechat.getState(),onChange:changes});
   function settings() {
     return { assistantName:'小助手', persona:defaultPersona, runtimeCommand:'', runtimeProfile:'sdk',
