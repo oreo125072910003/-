@@ -34,6 +34,27 @@ test('product drawing renders Chinese vector art into a nonempty PNG and rejects
   for (const bad of ['<svg><script>1</script></svg>', '<svg><image href="file:///secret"/></svg>', '<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///secret">]><svg>&x;</svg>', '<svg><foreignObject/></svg>', '<svg><rect onload="alert(1)"/></svg>', '<svg><path fill="url(https://example.test)"/></svg>']) assert.throws(() => renderProductDrawing(bad));
 });
 
+test('batch attachment selection validates every artifact before registration and emits no private arguments in activity', async t => {
+  const activity = [], selected = [];
+  const f = await fixture(t, { onActivity: item => activity.push(item), onDelivery: item => selected.push(item) });
+  const first = await f.request('xiaozhushou_save_text', { name: '第一份.md', text: '合成资料甲' });
+  const second = await f.request('xiaozhushou_save_text', { name: '第二份.md', text: '合成资料乙' });
+  const ids = [first.result.artifact.id, second.result.artifact.id];
+  const bad = await f.request('xiaozhushou_attachment', { artifactIds: [...ids, 'artifact_' + randomUUID()], mediaType: 'file' });
+  assert.equal(bad.isError, true); assert.equal(selected.length, 0);
+  const requestId = randomUUID();
+  const good = await f.request('xiaozhushou_attachment', { artifactIds: ids, mediaType: 'file' }, { id: requestId });
+  assert.equal(good.isError, false); assert.deepEqual(selected[0].map(item => item.artifactId), ids);
+  assert.deepEqual(good.result.artifacts.map(item => item.id), ids);
+  const eventCount = activity.length;
+  await f.request('xiaozhushou_attachment', { artifactIds: ids, mediaType: 'file' }, { id: requestId });
+  assert.equal(selected.length, 1); assert.equal(activity.length, eventCount);
+  assert(activity.every(item => Object.keys(item).sort().join(',') === 'name,phase'));
+  assert(activity.some(item => item.phase === 'failed'));
+  const conflict = await f.request('xiaozhushou_attachment', { artifactId: ids[0], artifactIds: ids, mediaType: 'file' });
+  assert.equal(conflict.isError, true); assert.equal(selected.length, 1);
+});
+
 test('task tools create real editable Word and readable PDF with scoped immutable artifacts', async t => {
   const f = await fixture(t);
   const result = await f.request('xiaozhushou_document', { title: 'Feature recovery fixture', blocks: [{ type: 'heading', text: 'Contract materials' }, { type: 'paragraph', text: 'Synthetic material: quantity 12, amount 240.' }], formats: ['docx','pdf'] });
@@ -86,6 +107,20 @@ test('screenshot implementation is called only by its own task grant and returns
   let calls = 0; const png = renderProductDrawing(svg), f = await fixture(t, { screenshot: async filename => { calls++; fs.writeFileSync(filename, png); } });
   const result = await f.request('xiaozhushou_screenshot'); assert.equal(result.isError, false); assert.equal(calls, 1); assert.equal(result.result.artifact.type, 'image/png');
   f.revoke(); assert.equal((await f.request('xiaozhushou_screenshot')).isError, true); assert.equal(calls, 1);
+});
+
+test('browser operation uses the verified task scope and registers real downloads as task artifacts', async t => {
+  let request; let downloaded;
+  const f = await fixture(t, { conversation: { accountId: '777', kind: 'private', target: '222' }, browser: { async run(value) {
+    request = value; assert.equal(await value.authorize(), true);
+    return { isError: false, text: 'actual browser download', files: [downloaded] };
+  } } });
+  downloaded = path.join(f.root, 'generated.png'); fs.writeFileSync(downloaded, renderProductDrawing(svg));
+  const result = await f.request('xiaozhushou_browser', { action: 'click', args: { ref: 'e12' } });
+  assert.equal(result.isError, false, result.content); assert.equal(request.scope, 'wechat:777:private:222');
+  assert.equal(result.result.artifacts[0].type, 'image/png'); assert.equal(result.result.files, undefined);
+  assert.equal((await f.request('xiaozhushou_attachment', { artifactId: result.result.artifacts[0].id, mediaType: 'image' })).isError, false);
+  f.revoke(); assert.equal((await f.request('xiaozhushou_browser', { action: 'click', args: { ref: 'e12' } })).isError, true);
 });
 
 test('stickers are selected from the real current-chat list and mail creates drafts without a send operation', async t => {

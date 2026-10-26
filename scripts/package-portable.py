@@ -48,8 +48,10 @@ def main() -> None:
         stage.mkdir()
         shutil.copytree(application, stage / '程序文件')
         # Windows PowerShell 5.1 needs a BOM to decode Chinese paths reliably.
-        launcher = (root / 'scripts' / 'portable-launch.ps1').read_text(encoding='utf-8')
+        launcher = (root / 'scripts' / 'portable-launch.ps1').read_text(encoding='utf-8-sig')
         (stage / '程序文件' / '启动.ps1').write_text(launcher, encoding='utf-8-sig', newline='\r\n')
+        process_launcher = (root / 'scripts' / 'electron-process.ps1').read_text(encoding='utf-8-sig')
+        (stage / '程序文件' / 'electron-process.ps1').write_text(process_launcher, encoding='utf-8-sig', newline='\r\n')
         (stage / '启动小助手.cmd').write_text(
             '@echo off\r\nchcp 65001 >nul\r\npowershell -NoLogo -NoProfile -ExecutionPolicy Bypass '
             '-File "%~dp0程序文件\\启动.ps1" %*\r\n', encoding='utf-8', newline='')

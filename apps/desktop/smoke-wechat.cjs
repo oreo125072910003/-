@@ -14,7 +14,7 @@ exports.createWechatSmoke=async function(directory){
     const native=['/WeChatAgent/health','/SendTextMsg','/GetSelfProfile'].includes(url.pathname);
     const json=(value,status=200)=>{response.writeHead(status,{'content-type':'application/json'});response.end(JSON.stringify(value));};
     if(request.headers.authorization!=='Bearer '+(native?nativeToken:readerToken))return json({},401);
-    if(url.pathname==='/api/v1/reader/status')return json({backend:'weflow-cli-nt',ownWxid:'wxid_synthetic_desktop_self',accountDirectory:'wxid_synthetic_desktop_self'});
+    if(url.pathname==='/api/v1/reader/status')return json({success:true,backend:'weflow-cli-nt',selfEvents:'account-conversation-v1',ownWxid:'wxid_synthetic_desktop_self',accountDirectory:'wxid_synthetic_desktop_self'});
     if(url.pathname==='/WeChatAgent/health')return json({integration:'WeChatAgent-1',backend:'wechat-hook',version:'4.1.10.27',startupState:'ready',databaseAccounts:['wxid_synthetic_desktop_self'],nativeStickerSend:true});
     // The actual reviewed scripts/native-hook build has no GetSelfProfile route.
     // Exercise the exact-self contact fallback rather than an invented endpoint.

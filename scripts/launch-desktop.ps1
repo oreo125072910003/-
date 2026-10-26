@@ -11,7 +11,6 @@ if (-not $DataHome -and (Test-Path -LiteralPath $localConfiguration -PathType Le
 }
 if ($DataHome -and -not [IO.Path]::IsPathRooted($DataHome)) { throw 'DataHome must be an absolute path.' }
 if ($DataHome -and $DataHome.Contains('"')) { throw 'DataHome contains an invalid quote.' }
-$options = @{FilePath=$executable;WorkingDirectory=(Split-Path -Parent $executable);PassThru=$true}
-if ($DataHome) { $options.ArgumentList = @('--data-home',('"'+$DataHome+'"')) }
-$process = Start-Process @options
+. (Join-Path $PSScriptRoot 'electron-process.ps1')
+$process = Start-AssistantElectron -Executable $executable -DataHome $DataHome
 [pscustomobject]@{version=$metadata.version;pid=$process.Id;explicitDataHome=[bool]$DataHome} | ConvertTo-Json -Compress

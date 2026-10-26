@@ -19,6 +19,7 @@ def main() -> None:
     parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument('--body-file', type=Path, required=True)
     parser.add_argument('--asset', type=Path, action='append', required=True)
+    parser.add_argument('--prerelease', action='store_true', help='Mark this release as a preview instead of a stable release.')
     args = parser.parse_args()
     root = args.repo.resolve()
 
@@ -58,7 +59,7 @@ def main() -> None:
     if existing:
         raise RuntimeError('A release with this tag already exists; inspect it before replacing assets.')
     release = api('/releases', 'POST', {'tag_name': tag, 'target_commitish': commit, 'name': '小助手 ' + version + ' 完整版',
-                                       'body': args.body_file.read_text(encoding='utf-8'), 'draft': True, 'prerelease': True})
+                                       'body': args.body_file.read_text(encoding='utf-8'), 'draft': True, 'prerelease': args.prerelease})
     uploaded = []
     for asset in args.asset:
         asset = asset.resolve(strict=True)

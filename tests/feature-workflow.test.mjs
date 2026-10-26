@@ -35,9 +35,9 @@ test('feature recovery restores only original private computer selections; group
   assert.ok(!group.effective.tools.includes('xiaozhushou_mail'),'mail content not exposed to group defaults');
 });
 
-test('original-chat task generates a real document, persists a delivery plan, sends the immutable snapshot before its text, and resumes its original session',async t=>{
+test('original-chat task generates a real document, persists a delivery plan, sends its explanation before the immutable snapshot, and resumes its original session',async t=>{
   const f=await fixture(t);f.incoming();await until(async()=>f.sends.length===2&&(await f.service.getWechatState()).autoReply.active===0);
-  assert.deepEqual(f.sends.map(item=>item.type),['file','text']);assert.equal(f.sends[0].target,'101');assert.equal(f.sends[0].signal.aborted,false);
+  assert.deepEqual(f.sends.map(item=>item.type),['text','file']);assert.equal(f.sends[0].target,'101');assert.equal(f.sends[0].signal.aborted,false);
   const first=f.service.listTasks()[0];assert.equal(first.status,'succeeded');assert.equal(first.wechatDeliveries.length,1);assert.ok(f.service.getTask(first.id).artifacts.some(item=>item.name.endsWith('.docx')));
   assert.equal(first.title,'微信 · 生成文档并发给我');assert.equal(first.requestText,'生成文档并发给我');
   assert.equal(f.requests[0].settings.hostedExecutionPolicy,'trusted-computer-task-v1');assert.equal(f.requests[0].settings.hostedProductConnection!==undefined,true);
@@ -48,7 +48,7 @@ test('original-chat task generates a real document, persists a delivery plan, se
 });
 
 test('rejected media remains a rejected delivery, preserves the artifact, and sends an accurate notice instead of a completed-send claim',async t=>{
-  const f=await fixture(t,{rejected:true});f.incoming();await until(async()=>f.sends.length===2&&(await f.service.getWechatState()).autoReply.active===0);
-  const state=await f.service.getWechatState();assert.equal(state.outbox.filter(item=>item.mediaType==='file')[0].status,'rejected');assert.match(f.sends[1].text,/发送前的检查未通过/);assert.notEqual(f.sends[1].text,'资料文档已经准备好。');
+  const f=await fixture(t,{rejected:true});f.incoming();await until(async()=>f.sends.length===3&&(await f.service.getWechatState()).autoReply.active===0);
+  const state=await f.service.getWechatState();assert.equal(state.outbox.filter(item=>item.mediaType==='file')[0].status,'rejected');assert.match(f.sends[2].text,/还没确认送达/);assert.equal(f.sends[0].text,'资料文档已经准备好。');
   const task=f.service.listTasks()[0];assert.ok(fs.existsSync(f.service.resolveArtifact(task.wechatDeliveries[0].artifactId)));assert.equal(f.sends.filter(item=>item.type==='file').length,1);
 });

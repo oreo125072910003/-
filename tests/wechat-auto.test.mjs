@@ -11,21 +11,23 @@ async function until(check, timeout = 3000) {
   const deadline = Date.now() + timeout;
   while (!await check()) { if (Date.now() > deadline) throw Error('等待本机自动回复夹具超时'); await new Promise(resolve => setTimeout(resolve, 8)); }
 }
-async function fixture(t, { enabled = true, status = 'succeeded', reply = '这是完整的合成回复。', autoOptions = {}, reader = true, cancellation = true, createGate, clock = Date.now(), sendImpl } = {}) {
+async function fixture(t, { enabled = true, status = 'succeeded', reply = '这是完整的合成回复。', autoOptions = {}, reader = true, cancellation = true, createGate, clock = Date.now(), sendImpl, mediaImpl } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xzs-wechat-auto-')), source = path.join(root, 'old'), data = path.join(root, 'product');
   fs.mkdirSync(path.join(source, 'config'), { recursive: true }); fs.mkdirSync(path.join(source, 'state', 'hook'), { recursive: true });
   fs.writeFileSync(path.join(source, 'config', 'wechatagent.json'), JSON.stringify({ runtime: { sender: 'wechat-hook', weflowMode: 'nt' }, hook: { expectedVersion: '4.1.10.27', baseUrl: 'http://127.0.0.1:30001' }, wechat: { whitelist: { private: ['101', '102'], groups: ['201'] }, wake_mode: 'mention', wake_words: ['合成唤醒词'] } }));
   fs.writeFileSync(path.join(source, 'state', 'wechat-io-config.json'), JSON.stringify({ reader_base_url: 'http://127.0.0.1:5031', reader_token: 'synthetic-reader-token-for-auto-tests' }));
   fs.writeFileSync(path.join(source, 'state', 'hook', 'native-token.txt'), 'a'.repeat(64));
   const store = await createStore(path.join(data, 'db')), secrets = new Map();
-  const state = { clock, callbacks: null, creates: [], cancels: [], sends: [], replies: new Map(), status, reply, stopped: 0,
+  const state = { clock, callbacks: null, creates: [], cancels: [], sends: [], media: [], mediaSends: [], replies: new Map(), status, reply, stopped: 0,
     receipt: { receipt: 'wechat-server-id', delivered: 'database-confirmed', message_id: '9001' } };
   const controller = createWechatController({ store, dataDir: data, secretStore: { get: key => secrets.get(key), set: (key, value) => secrets.set(key, value), delete: key => secrets.delete(key) },
     autoOptions: { now: () => state.clock, pollMs: 5, ...autoOptions },
+    authorizeAttachment: () => true, readTaskDeliveries: async () => state.media,
     bridgeFactory: callbacks => { state.callbacks = callbacks; return {
       async start() { callbacks.onState({ state: 'ready', selfId: '777', accountVerified: true, readerConnected: true }); },
       async stop() { state.stopped++; },
       async sendText(value) { state.sends.push(value); if (state.sendError) throw state.sendError; return sendImpl ? sendImpl(value, state) : state.receipt; },
+      async sendAttachment(value) { state.mediaSends.push(value); return mediaImpl(value, state); },
       async getHistory({ kind, target }) { return { kind, target, name: '合成测试会话', messages: [{ message_id: 'history-one', external_id: 'history-one', text: '旧历史合成资料', sender_id: target, sender_name: '合成联系人', outgoing: false, time: Math.floor(state.clock / 1000) - 30, message_type: 'text' }] }; },
     }; },
     async createTask(input, options) {
@@ -75,6 +77,59 @@ test('new private message runs a DSH task with trusted target, sends full text, 
   assert.equal(publicAuto.includes('合成联系人'), false); assert.equal(publicAuto.includes('合成的普通提问'), false);
 });
 
+test('progress receipts have independent outbox keys and their own-message echoes do not cancel the final reply', async t => {
+  const f = await fixture(t, { status: 'running', autoOptions: { progressAfterMs: 20 } });
+  f.emit(); await until(() => f.state.creates.length === 1); f.state.clock += 25;
+  await until(async () => (await f.controller.getState()).outbox[0]?.status === 'delivered');
+  const progress = (await f.controller.getState()).outbox[0];
+  assert.match(progress.requestId, /_progress_0$/);
+  f.state.callbacks.onMessage(f.incoming({ sender_id: '777', outgoing: true, sourceLocalId: progress.receipt.messageId, time: Math.floor(f.state.clock / 1000), text: f.state.sends[0].text }));
+  f.complete(f.state.creates[0].id);
+  await until(async () => (await f.controller.getState()).autoReply.completed === 1);
+  const state = await f.controller.getState();
+  assert.equal(f.state.sends.length, 2); assert.equal(f.state.sends[1].text, f.state.reply);
+  assert.equal(new Set(state.outbox.map(item => item.requestId)).size, 2);
+  assert.equal(f.state.cancels.length, 0);
+});
+
+test('an own text event arriving before its receipt is matched by ID before deciding human takeover', async t => {
+  for (const matching of [true, false]) await t.test(String(matching), async child => {
+    const f = await fixture(child, { status: 'running', autoOptions: { progressAfterMs: 20 }, sendImpl: async (value, state) => {
+      if (state.sends.length === 1) state.callbacks.onMessage({ self_id: '777', sender_id: '777', kind: 'private', conversation_id: '101', outgoing: true,
+        text: value.text, sourceLocalId: matching ? '9001' : '9002', message_id: 'early-own', time: Math.floor(state.clock / 1000) });
+      return state.receipt;
+    } });
+    f.emit(); await until(() => f.state.creates.length === 1); f.state.clock += 25;
+    await until(() => f.state.sends.length === 1);
+    if (matching) {
+      f.complete(f.state.creates[0].id); await until(async () => (await f.controller.getState()).autoReply.completed === 1);
+      assert.equal(f.state.sends.length, 2); assert.equal(f.state.cancels.length, 0);
+    } else {
+      await until(() => f.state.cancels.length === 1); assert.equal(f.state.sends.length, 1);
+    }
+  });
+});
+
+test('file own-events match local and server receipts, including early echoes, so a multi-file reply keeps going', async t => {
+  const f = await fixture(t, { mediaImpl: async (value, state) => {
+    const number = state.mediaSends.length, local = String(10000 + number), server = String(20000 + number);
+    state.callbacks.onMessage({ self_id: '777', sender_id: '777', kind: 'private', conversation_id: '101', outgoing: true,
+      text: '', messageType: 'file', sourceLocalId: local, sourceServerId: server, message_id: 'early-file-' + number, time: Math.floor(state.clock / 1000) });
+    return { receipt: 'wechat-server-id', delivered: 'database-confirmed', message_id: server, local_message_id: local, media_type: 'wechat-file' };
+  } });
+  for (let index = 0; index < 3; index++) {
+    const filename = path.join(f.source, `合成文件${index + 1}.txt`); fs.writeFileSync(filename, '合成资料');
+    const attachment = await f.controller.stageAttachment({ path: filename, mediaType: 'file' });
+    f.state.media.push({ kind: 'attachment', attachmentId: attachment.id, name: attachment.name });
+  }
+  f.emit(); await until(async () => (await f.controller.getState()).autoReply.completed === 1);
+  assert.equal(f.state.mediaSends.length, 3); assert.equal(f.state.sends[0].text, f.state.reply);
+  assert.match(f.state.sends.at(-1).text, /3 份附件已确认送达/); assert.equal(f.state.cancels.length, 0);
+  const outbox = (await f.controller.getState()).outbox;
+  assert.equal(outbox.length, 5); assert(outbox.every(item => item.status === 'delivered'));
+  assert(outbox.filter(item => item.mediaType === 'file').every(item => item.receipt.localMessageId !== item.receipt.serverId));
+});
+
 test('missing reader or cancellation and oversized complete text fail before unsafe work', async t => {
   const missing = await fixture(t, { reader: false }); missing.emit();
   await until(async () => (await missing.controller.getState()).autoReply.lastError?.code === 'AUTO_READER_MISSING');
@@ -82,7 +137,7 @@ test('missing reader or cancellation and oversized complete text fail before uns
   const noCancellation = await fixture(t, { cancellation: false }); noCancellation.emit();
   await until(async () => (await noCancellation.controller.getState()).autoReply.lastError?.code === 'AUTO_CANCEL_MISSING');
   assert.equal(noCancellation.state.creates.length, 0); assert.equal(noCancellation.state.sends.length, 0);
-  const tooLong = await fixture(t, { reply: '中'.repeat(6000) }); tooLong.emit();
+  const tooLong = await fixture(t, { reply: '中'.repeat(350000) }); tooLong.emit();
   await until(async () => (await tooLong.controller.getState()).autoReply.lastError?.code === 'AUTO_REPLY_TOO_LONG');
   assert.equal(tooLong.state.sends.length, 0); assert.equal(tooLong.state.creates.length, 1);
 });

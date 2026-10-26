@@ -16,4 +16,4 @@ if(!install.startsWith(data+path.sep)||!fs.existsSync(path.join(install,'.xiaozh
 const backup=path.join(root,'dist','local-upgrade-backup-0.3.11');fs.mkdirSync(backup,{recursive:true});
 for(const item of fs.readdirSync(install,{withFileTypes:true}))if(item.isFile()||item.name==='locale')fs.cpSync(path.join(install,item.name),path.join(backup,item.name),{recursive:item.isDirectory(),force:false,errorOnExist:true});
 const updated=await prepareHostedPluginInstall({productDataRoot:data,workspacesRoot:health.workspacesRoot,installDirectory:install,port:Number(new URL(client.endpoint).port),provider:health.provider,model:health.model});
-console.log(JSON.stringify({prepared:true,revision:updated.revision,installDirectory:install,backup,dependenciesInstalled:updated.dependenciesInstalled,previousActiveTasks:health.activeTasks}));
+console.log(JSON.stringify({prepared:true,revision:updated.revision,installDirectory:install,backup,dependencySource:updated.dependencySource,previousActiveTasks:health.activeTasks}));

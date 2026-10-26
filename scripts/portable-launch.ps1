@@ -1,4 +1,4 @@
-param([string]$DataHome = $env:XIAOZHUSHOU_DATA_HOME)
+﻿param([string]$DataHome = $env:XIAOZHUSHOU_DATA_HOME)
 $ErrorActionPreference = 'Stop'
 try {
     $executable = Join-Path $PSScriptRoot '小助手.exe'
@@ -14,9 +14,8 @@ try {
         elseif ($existing.Count -gt 1) { throw '找到多个小助手数据目录。请使用原安装的启动入口，或设置 XIAOZHUSHOU_DATA_HOME 后再启动，避免打开错误的记录。' }
     }
     if ($DataHome -and (-not [IO.Path]::IsPathRooted($DataHome) -or $DataHome.Contains('"'))) { throw '数据目录必须是没有引号的绝对路径。' }
-    $options = @{ FilePath = $executable; WorkingDirectory = (Split-Path -Parent $executable) }
-    if ($DataHome) { $options.ArgumentList = @('--data-home', ('"' + $DataHome + '"')) }
-    Start-Process @options
+    . (Join-Path $PSScriptRoot 'electron-process.ps1')
+    $null = Start-AssistantElectron -Executable $executable -DataHome $DataHome
 } catch {
     Write-Host $_.Exception.Message
     Read-Host '按回车关闭'

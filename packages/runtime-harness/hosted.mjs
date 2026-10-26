@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { validateTaskImages } from '../contracts/image-input.mjs';
+import { knownModelFailure } from '../contracts/model-failure.mjs';
 
 const PROTOCOL = 'xiaozhushou-harness-host-v1';
 const SESSION = /^xzs-[a-f0-9]{32}$/;
@@ -64,8 +65,9 @@ function verifyTask(value, taskId) {
 export async function inspectHostedRuntime(settings = {}) {
   try {
     const config = await connection(settings), health = verifyHealth(await request(config, '/health', { maxBytes: 65536 }));
+    const modelError = knownModelFailure(health.lastModelError) ?? (health.lastModelError?.code === 'MODEL_TURN_FAILED' || health.lastModelError?.code === 'EMPTY_RESULT' ? { code: health.lastModelError.code, message: '最近一次模型请求失败，请在 Harness 中检查账户或模型状态后重试。' } : null);
     return { available: true, ready: health.modelVerified === true, source: 'existing-harness-host', version: health.pluginVersion??null,revision:health.revision??null, protocol: PROTOCOL, endpoint: config.endpoint, provider: health.provider, model: health.model, credentialsConfigured: true, credentialsVerified: false, credentialsSource: 'harness-existing-login', modelVerified: health.modelVerified === true,
-      detail: health.modelVerified ? '已连接现有 Harness，并完成过真实模型回复。' : '已连接现有 Harness，复用已有登录；尚未验证真实模型回复。', capabilities: { ...health.capabilities, compatible: true, modelVerified: health.modelVerified === true, protocol: PROTOCOL, toolPolicy: health.toolPolicy === 'product-owner-task-grants-v1' ? 'explicit-owner-task-grants' : 'conversation-only' } };
+      ...(modelError ? { error: modelError } : {}), detail: modelError?.message ?? (health.modelVerified ? '已连接现有 Harness，并完成过真实模型回复。' : '已连接现有 Harness，复用已有登录；尚未验证真实模型回复。'), capabilities: { ...health.capabilities, compatible: true, modelVerified: health.modelVerified === true, protocol: PROTOCOL, toolPolicy: health.toolPolicy === 'product-owner-task-grants-v1' ? 'explicit-owner-task-grants' : 'conversation-only' } };
   } catch (error) { return { available: false, ready: false, source: 'existing-harness-host', detail: error.message, error: { code: error.code || 'HOST_INSPECTION_FAILED', message: error.message }, capabilities: { compatible: false, modelVerified: false } }; }
 }
 export async function probeHostedRuntimeConnection(settings = {}) {
@@ -116,11 +118,13 @@ export async function runHostedTask({ prompt, workspace, sessionId, conversation
     let value = verifyTask(await request(config, '/tasks', { method: 'POST', body: { taskId, prompt, workspace, ...(settings.hostedProductConnection ? {productConnection:settings.hostedProductConnection} : {}), ...(taskImages.length ? { images: taskImages } : {}), ...(sessionId ? { sessionId } : {}), ...(conversation ? { conversation } : {}), ...(personaPrefix ? { personaPrefix } : {}), ...(executionPolicy?{executionPolicy}:{}), ...(executionPolicy==='trusted-computer-task-v1'?{computerScope:settings.hostedComputerScope}:{}), ...(grants ? { authority: 'product-owner', ownerGrants: grants } : {}) } }), taskId);
     lastSession = value.sessionId;
     const deadline = Date.now() + (settings.timeoutMs ?? 10 * 60 * 1000);
+    let nextHeartbeat = Date.now() + 15000;
     while (!final(value)) {
       if (cancelled || Date.now() >= deadline) { value = await stopAndConfirm(); break; }
       if (value.status !== lastStatus) { lastStatus = value.status; emit('status', value.status === 'running' ? '小助手正在思考…' : value.status === 'saving' ? '正在保存 Harness 会话…' : 'Harness 正在处理任务…'); }
       await delay(Math.min(500, Math.max(20, settings.hostedPollMs ?? 150)));
       value = verifyTask(await request(config, '/tasks/' + taskId), taskId);
+      if (Date.now() >= nextHeartbeat) { emit('heartbeat', 'DSH 仍在处理本轮任务。'); nextHeartbeat = Date.now() + 15000; }
     }
     const result = value.result;
     if (result.ok) { emit('text', result.finalText); emit('status', '回答已完成。'); }

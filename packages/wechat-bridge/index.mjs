@@ -373,7 +373,9 @@ export function createWechatBridge({
         const self=String(onebotId(adapter.ownWxid)),time=Number(payload.timestamp);
         if(!Number.isSafeInteger(time)||time<0)return null;
         return{self_id:self,kind,conversation_id:target,sender_id:self,outgoing:true,text:payload.type===1?payload.content.slice(0,16000):'',message_id:String(payload.rawid),time,
-          ...(/^[1-9]\d{0,31}$/.test(payload.sourceLocalId??'')?{sourceLocalId:payload.sourceLocalId}:{})};
+          messageType:payload.type===1?'text':payload.type===3?'image':payload.type===49?'file':payload.type===47?'sticker':'other',
+          ...(/^[1-9]\d{0,31}$/.test(payload.sourceLocalId??'')?{sourceLocalId:payload.sourceLocalId}:{}),
+          ...(/^[1-9]\d{0,31}$/.test(payload.sourceServerId??'')?{sourceServerId:payload.sourceServerId}:{})};
       }catch{return null;}
     }
     const event = adapter.incoming(payload);

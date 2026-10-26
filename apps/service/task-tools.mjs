@@ -7,6 +7,7 @@ import { DOMParser } from '@xmldom/xmldom';
 import { Resvg } from '@resvg/resvg-js';
 import { extractDocument, writeOfficeDocument } from '../../packages/documents/index.mjs';
 import { productTool } from '../../packages/contracts/product-tools.mjs';
+import { MAX_WECHAT_DELIVERIES } from '../../packages/contracts/wechat-delivery.mjs';
 
 const inside = (root, file) => { const relative = path.relative(root, file); return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative); };
 const text = (value, maximum = 1000) => { if (typeof value !== 'string' || !value.trim() || value.length > maximum || value.includes('\0')) throw Error('输入内容无效或超过长度限制。'); return value; };
@@ -110,7 +111,7 @@ export async function captureProductScreenshot(destination, options = {}) {
 
 /** One capability per live product task. No authority or address is taken from
  * model arguments; every operation rechecks the current product-side grant. */
-export async function createTaskToolAccess({ task, tools, signal, authorize, addArtifact, resolveArtifact, onDelivery, mail, wechat, conversation, readWechatDocument, screenshot = captureProductScreenshot, runCommand = runProductCommand } = {}) {
+export async function createTaskToolAccess({ task, tools, signal, authorize, addArtifact, resolveArtifact, onDelivery, onActivity = () => {}, mail, wechat, conversation, browser, readWechatDocument, screenshot = captureProductScreenshot, runCommand = runProductCommand } = {}) {
   const selected = new Set(tools.filter(name => productTool(name)));
   if (!selected.size) return { connection: undefined, async close() {} };
   const token = randomBytes(32).toString('base64url'), requests = new Map(), operations = new Set();
@@ -154,11 +155,18 @@ export async function createTaskToolAccess({ task, tools, signal, authorize, add
       }
       case 'xiaozhushou_attachment': {
         if (!['image','file'].includes(args.mediaType)) throw Error('请选择图片或文件交付方式。');
-        const item = resolveArtifact(text(args.artifactId, 100));
-        if (item.taskId !== task.id || !inside(workspace, fs.realpathSync(item.path)) || digest(fs.readFileSync(item.path)) !== item.sha256) throw Error('只能交付本轮真实生成并校验的成果。');
-        if (args.mediaType === 'image' && !/^image\/(?:png|jpeg|gif|webp)$/.test(item.type)) throw Error('此成果不是可发送的图片。');
-        await onDelivery({ kind: 'artifact', artifactId: item.id, mediaType: args.mediaType });
-        return { queued: true, artifact: publicArtifact(item), delivery: conversation ? '本轮成功后发送到原微信会话' : '已保存在本轮成果，供主人打开或发送' };
+        if (Object.hasOwn(args, 'artifactId') === Object.hasOwn(args, 'artifactIds')) throw Error('请用 artifactId 选择一份，或用 artifactIds 选择多份成果。');
+        const ids = Object.hasOwn(args, 'artifactIds') ? args.artifactIds : [args.artifactId];
+        if (!Array.isArray(ids) || ids.length < 1 || ids.length > MAX_WECHAT_DELIVERIES || new Set(ids).size !== ids.length) throw Error('一次最多选择 12 份不同的成果。');
+        const items = ids.map(id => {
+          const item = resolveArtifact(text(id, 100));
+          if (item.taskId !== task.id || !inside(workspace, fs.realpathSync(item.path)) || digest(fs.readFileSync(item.path)) !== item.sha256) throw Error('只能交付本轮真实生成并校验的成果。');
+          if (args.mediaType === 'image' && !/^image\/(?:png|jpeg|gif|webp)$/.test(item.type)) throw Error('此成果不是可发送的图片。');
+          return item;
+        });
+        const deliveries = items.map(item => ({ kind: 'artifact', artifactId: item.id, mediaType: args.mediaType }));
+        await onDelivery(deliveries.length === 1 ? deliveries[0] : deliveries);
+        return { queued: true, ...(items.length === 1 ? { artifact: publicArtifact(items[0]) } : { artifacts: items.map(publicArtifact) }), delivery: conversation ? '完成后先发文字说明，再按清单逐份发送到原微信会话；请继续输出最终正文' : '已保存在本轮成果，供主人打开或发送' };
       }
       case 'xiaozhushou_read_document': case 'xiaozhushou_read_local_file': {
         if(toolName==='xiaozhushou_read_document'&&typeof args.path==='string'&&args.path.startsWith('wechat://')){
@@ -180,6 +188,22 @@ export async function createTaskToolAccess({ task, tools, signal, authorize, add
         fs.writeFileSync(filename, text(args.text, 200000), { flag: 'wx', mode: 0o600 }); return { path: filename, created: true };
       }
       case 'xiaozhushou_run_local_shell': return runCommand(args.command, { cwd: workspace, signal: bounded, timeoutMs: args.timeoutMs ?? 30000 });
+      case 'xiaozhushou_browser': {
+        if (!browser?.run) throw Error('浏览器组件尚未连接。');
+        const scope = conversation ? `wechat:${conversation.accountId}:${conversation.kind}:${conversation.target}` : 'desktop-owner';
+        const result = await browser.run({ scope, action: args.action, args: args.args ?? {}, signal: bounded, authorize: async () => { await check(toolName); return true; } });
+        await check(toolName);
+        if (result.isError) throw Error(result.text || '浏览器操作未完成，请查看实际页面。');
+        const artifacts = [];
+        for (const source of result.files ?? []) {
+          const current = file(source, true);
+          if (!current.info.isFile() || current.info.size < 1 || current.info.size > 50 * 1024 * 1024) continue;
+          const bytes = fs.readFileSync(current.absolute), filename = destination(path.basename(current.absolute));
+          await check(toolName); fs.writeFileSync(filename, bytes, { flag: 'wx', mode: 0o600 });
+          artifacts.push(register(filename, /\.pdf$/i.test(filename) ? 'application/pdf' : exportedMime(filename, bytes)));
+        }
+        return { ...result, files: undefined, artifacts };
+      }
       case 'xiaozhushou_screenshot': {
         const filename = destination('电脑截图.png'); await screenshot(filename, { cwd: workspace, signal: bounded }); await check(toolName);
         return { artifact: register(filename, 'image/png') };
@@ -222,7 +246,12 @@ export async function createTaskToolAccess({ task, tools, signal, authorize, add
       const fingerprint = digest(bytes), previous = requests.get(body.id);
       if (previous && previous.digest !== fingerprint) throw Error('此调用编号已用于其他请求。');
       if (!previous && ++calls > 32) throw Error('本轮功能调用次数已达到上限。');
-      const operation = previous?.operation ?? execute(body.name, body.args).then(result => ({ content: JSON.stringify(result), isError: false }), error => ({ content: String(error.message || '功能执行失败。').slice(0, 1000), isError: true }));
+      const activity = phase => { try { onActivity({ name: body.name, phase }); } catch {} };
+      const operation = previous?.operation ?? (async () => {
+        await check(body.name); activity('started');
+        try { const result = await execute(body.name, body.args); activity('completed'); return result; }
+        catch (error) { activity('failed'); throw error; }
+      })().then(result => ({ content: JSON.stringify(result), isError: false }), error => ({ content: String(error.message || '功能执行失败。').slice(0, 1000), isError: true }));
       requests.set(body.id, { digest: fingerprint, operation }); operations.add(operation);
       try { const result = await operation; await check(body.name); reply(200, result); } finally { operations.delete(operation); }
     } catch (error) { reply(400, { content: String(error.message || '功能执行失败。').slice(0, 1000), isError: true }); }

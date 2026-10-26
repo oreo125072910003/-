@@ -8,6 +8,7 @@ import { validateTaskImages } from '../contracts/image-input.mjs';
 import { prepareNativeImageBlocks, supportsNativeImages, nativeImageTarget, offloadNativeImages } from './image-input.mjs';
 import { PRODUCT_TOOLS } from '../contracts/product-tools.mjs';
 import { validateProductConnection } from './product-access.mjs';
+import { knownModelFailure } from '../contracts/model-failure.mjs';
 
 export const HOST_PROTOCOL = 'xiaozhushou-harness-host-v1';
 const SESSION = /^xzs-[a-f0-9]{32}$/;
@@ -89,7 +90,7 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
   const token = (await readFile(tokenFile, 'utf8')).trim();
   if (!/^[A-Za-z0-9_-]{32,256}$/.test(token)) throw fault('HOST_TOKEN_INVALID', '产品桥接令牌无效。');
   const port = config.port === 0 ? 0 : numeric(config.port, 11234, 1024, 65535);
-  const provider = config.provider || 'deepseek', model = config.model || 'deepseek-flash';
+  const provider = config.provider || 'deepseek-account', model = config.model || 'deepseek-flash';
   const preset = config.agentPreset || 'xiaozhushou-desktop-text-v1';
   if (![provider, model, preset].every(value => typeof value === 'string' && /^[\w./:-]{1,160}$/.test(value))) throw fault('HOST_CONFIG_INVALID', 'Harness 模型或会话预设无效。');
   const turnTimeoutMs = numeric(config.turnTimeoutMs, 600000, 50, 3600000);
@@ -111,7 +112,7 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     sessions = saved.sessions;
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const tasks = new Map(), active = new Map(), handles = new Map(), finalizations = new Set();
-  let modelVerified = false, closed = false, stateQueue = Promise.resolve();
+  let modelVerified = false, lastModelError = null, closed = false, stateQueue = Promise.resolve();
   const persist = () => {
     const snapshot = JSON.stringify({ version: 1, sessions });
     const job = stateQueue.catch(() => {}).then(async () => {
@@ -189,7 +190,7 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
         try { await persist(); } catch (error) { sessions[task.sessionId] = previous; throw error; }
       }
       if (task.cancelReason) finish(task, task.cancelReason === 'CANCELLED' ? 'cancelled' : 'failed', cancelledResult(task));
-      else { if (status === 'completed') modelVerified = true; finish(task, status, result); }
+      else { if (status === 'completed') { modelVerified = true; lastModelError = null; } finish(task, status, result); }
     }).catch(error => finish(task, 'failed', { ok: false, finalText: '', sessionId: task.sessionId, artifacts: [], error: {
       code: task.imageCount ? /^IMAGE_[A-Z_]+$/.test(error?.code || '') ? error.code : 'IMAGE_SESSION_SAVE_FAILED' : 'SESSION_SAVE_FAILED',
       message: task.imageCount ? '本轮已结束，但图片卸载或保存未确认；此会话暂时不能继续，请开启新会话。' : '回复已产生，但 Harness 会话未能确认保存。',
@@ -248,7 +249,9 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     if (task.cancelReason) {
       terminalize(task, task.cancelReason === 'CANCELLED' ? 'cancelled' : 'failed', cancelledResult(task));
     } else if (reason !== 'completed' || !task.text?.trim()) {
-      terminalize(task, 'failed', { ok: false, finalText: '', sessionId: task.sessionId, artifacts: [], error: { code: reason === 'completed' ? 'EMPTY_RESULT' : 'MODEL_TURN_FAILED', message: reason === 'completed' ? 'Harness 没有返回可交付的文字回答。' : 'Harness 未确认本轮正常完成，请检查现有账号或模型状态。' } });
+      const error = knownModelFailure(event.data?.reason?.error) ?? { code: reason === 'completed' ? 'EMPTY_RESULT' : 'MODEL_TURN_FAILED', message: reason === 'completed' ? 'Harness 没有返回可交付的文字回答。' : 'Harness 未确认本轮正常完成，请检查现有账号或模型状态。' };
+      modelVerified = false; lastModelError = error;
+      terminalize(task, 'failed', { ok: false, finalText: '', sessionId: task.sessionId, artifacts: [], error });
     } else {
       terminalize(task, 'completed', { ok: true, finalText: task.text, sessionId: task.sessionId, artifacts: [], ...(task.usage ? { usage: task.usage } : {}) }, { save: true });
     }
@@ -373,7 +376,7 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
       if (url.search || url.hash) throw fault('INVALID_ROUTE', '请求路径无效。', 404);
       if (req.method === 'GET' && url.pathname === '/health') {
         const images = await supportsNativeImages(ctx, provider, model, { timeoutMs: Math.min(imagePrepareTimeoutMs, 5000) });
-        reply(200, { ok: true, protocol: HOST_PROTOCOL, project: 'xiaozhushou',pluginVersion:config.pluginVersion??null,revision:config.revision??null, provider, model, preset, productDataRoot: dataRoot, workspacesRoot, modelVerified, credentialsSource: 'harness-existing-login', activeTasks: active.size, toolPolicy: 'product-owner-task-grants-v1', capabilities: { text: true, resume: true, streaming: false, mcp: true, skills: true, ownerTaskGrants: true, workerTextOnly: true, trustedComputerTasks: true, desktopComputerTasks: true, sessionGroups: Boolean(workspaceRegistry()?.resolveByPath && workspaceRegistry()?.create), defaultToolAccess: 'none', images, artifacts: false, cancel: 'native-owned-session' } }); return;
+        reply(200, { ok: true, protocol: HOST_PROTOCOL, project: 'xiaozhushou',pluginVersion:config.pluginVersion??null,revision:config.revision??null, provider, model, preset, productDataRoot: dataRoot, workspacesRoot, modelVerified, lastModelError, credentialsSource: 'harness-existing-login', activeTasks: active.size, toolPolicy: 'product-owner-task-grants-v1', capabilities: { text: true, resume: true, streaming: false, mcp: true, skills: true, ownerTaskGrants: true, workerTextOnly: true, trustedComputerTasks: true, desktopComputerTasks: true, sessionGroups: Boolean(workspaceRegistry()?.resolveByPath && workspaceRegistry()?.create), defaultToolAccess: 'none', images, artifacts: false, cancel: 'native-owned-session' } }); return;
       }
       if (req.method === 'GET' && url.pathname === '/catalog') { reply(200, await catalog()); return; }
       if (req.method === 'POST' && url.pathname === '/tasks') { reply(202, await submit(await readJson(req, 5 * 1024 * 1024))); return; }

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createAssistantService } from '../apps/service/index.mjs';
+import { knownModelFailure } from '../packages/contracts/model-failure.mjs';
 
 const sessionA = 'xzs-' + 'a'.repeat(32);
 const sessionB = 'xzs-' + 'b'.repeat(32);
@@ -38,7 +39,7 @@ async function fixture(t, outcomes) {
   };
   const runtime = {
     inspectHostedRuntime: async () => ({ available: true, ready: true, modelVerified: true }),
-    readHostedCatalog: async () => ({ ok: true, skills: [], tools: [] }),
+    readHostedCatalog: async () => ({ ok: true, metadataOnly: true, skills: [], tools: [] }),
     runHostedTask: async options => {
       requests.push(options);
       assert.ok(requests.length <= outcomes.length, 'failed rounds must not create hidden retries');
@@ -120,4 +121,24 @@ test('a failed later Harness turn preserves the established WeChat session acros
   assert.equal(f.requests[2].workspace, f.requests[0].workspace);
   assert.equal(f.sends.length, 2);
   assert.equal(f.sends[1].text, '恢复后继续原来的会话。');
+});
+
+test('quota failure reports the actionable reason once and preserves the conversation for recovery', async t => {
+  const quota = knownModelFailure({ code: 'ACCOUNT_QUOTA' });
+  const f = await fixture(t, [
+    { ok: true, finalText: '已建立持续会话。', sessionId: sessionA },
+    { ok: false, finalText: '', sessionId: sessionA, error: quota },
+    { ok: true, finalText: '账户恢复后继续回答。', sessionId: sessionA },
+  ]);
+  assert.equal((await f.service.restoreProductFeatures()).wechat.restored, true);
+  f.emit(); await f.settled(1);
+  f.emit(); await f.settled(2);
+  assert.equal(f.sends.length, 2); assert.equal(f.sends[1].text, quota.message);
+  assert.doesNotMatch(f.sends[1].text, /我会接着处理|secret-account-material/);
+  assert.equal((await f.service.getWechatState()).autoReply.lastError.code, 'ACCOUNT_QUOTA');
+  await f.restart();
+  assert.equal(f.requests.length, 2); assert.equal(f.sends.length, 2, 'restart must not replay a quota failure or its notice');
+  f.emit(); await f.settled(3);
+  assert.equal(f.requests[2].sessionId, sessionA);
+  assert.equal(f.sends[2].text, '账户恢复后继续回答。');
 });

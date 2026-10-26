@@ -298,8 +298,8 @@ test('standalone installation copies the shared contract and revisioned image de
   const f = await fixture(t), installDirectory = path.join(f.root, 'plugins', 'host');
   const installed = await prepareHostedPluginInstall({ productDataRoot: f.root, workspacesRoot: f.workspaces, installDirectory });
   const server = await readFile(path.join(installDirectory, 'server.mjs'), 'utf8');
-  assert.ok(server.includes('./contract-image-input.mjs?revision=' + installed.revision));
-  assert.ok(server.includes('./image-input.mjs?revision=' + installed.revision));
+  assert.ok(server.includes('./contract-image-input-' + installed.revision + '.mjs'));
+  assert.ok(server.includes('./image-input-' + installed.revision + '.mjs'));
   assert.doesNotMatch(server, /\.\.\/contracts\//);
   const contract = await import(pathToFileURL(path.join(installDirectory, 'contract-image-input.mjs')).href);
   assert.equal(contract.validateTaskImages([image()]).length, 1);

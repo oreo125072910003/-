@@ -96,7 +96,7 @@ test('client and native host complete text only after matching terminal event an
   assert.match(result.sessionId, /^xzs-[a-f0-9]{32}$/); assert.equal(result.usage.outputTokens, 6);
   assert.equal(f.calls.filter(c => c.type === 'flush').length, 1);
   const call = f.calls.find(c => c.type === 'prompt');
-  assert.equal(call.message.source.kind, 'xiaozhushou-desktop-host'); assert.equal(call.input.agentOptions.provider, 'deepseek');
+  assert.equal(call.message.source.kind, 'xiaozhushou-desktop-host'); assert.equal(call.input.agentOptions.provider, 'deepseek-account');
   assert.equal(call.input.meta.cwd, f.workspace); assert.equal(events.find(e => e.type === 'text').message, result.finalText);
   assert.equal((await inspectHostedRuntime(f.settings)).ready, true);
   assert.ok((await readdir(path.join(f.root, 'harness-host'))).includes('sessions.json'));
@@ -292,6 +292,31 @@ test('missing final text, provider failure and failed durable save are never suc
   const unsaved = await fixture(t, { flushError: true });
   assert.equal((await runHostedTask({ prompt: '保存', workspace: unsaved.workspace, settings: unsaved.settings })).error.code, 'SESSION_SAVE_FAILED');
 });
+
+test('an account quota failure clears stale readiness, exposes a fixed reason and recovers after a successful turn', async t => {
+  let attempt = 0;
+  const f = await fixture(t, { behaviour(agent, emit) {
+    if (++attempt === 2) {
+      emit(agent, 'turn/end', { turn: agent.turn, reason: { kind: 'error', error: { code: 'ACCOUNT_QUOTA', status: 402, message: 'Insufficient Balance secret-account-material request-id' } } });
+    } else {
+      emit(agent, 'assistant/message', { turn: agent.turn, message: { content: [{ type: 'text', text: '真实成功的合成回答' }] } });
+      emit(agent, 'turn/end', { turn: agent.turn, reason: { kind: 'completed' } });
+    }
+  } });
+  const run = () => runHostedTask({ prompt: '核对本轮账户状态', workspace: f.workspace, settings: f.settings });
+  assert.equal((await run()).ok, true);
+  assert.equal((await inspectHostedRuntime(f.settings)).ready, true);
+  const failed = await run(), state = await inspectHostedRuntime(f.settings);
+  assert.equal(failed.ok, false); assert.equal(failed.error.code, 'ACCOUNT_QUOTA');
+  assert.match(failed.error.message, /余额.*402/);
+  assert.equal(state.available, true); assert.equal(state.ready, false); assert.equal(state.modelVerified, false);
+  assert.equal(state.error.code, 'ACCOUNT_QUOTA'); assert.match(state.detail, /处理账户余额/);
+  assert.doesNotMatch(JSON.stringify([failed, state]), /secret-account-material|request-id|Insufficient Balance/);
+  assert.equal(f.calls.filter(call => call.type === 'prompt').length, 2, 'quota failures must not start hidden model retries');
+  assert.equal((await run()).ok, true);
+  const recovered = await inspectHostedRuntime(f.settings);
+  assert.equal(recovered.ready, true); assert.equal(recovered.error, undefined);
+});
 test('catalog lists actual host skills and MCP metadata without pretending execution is enabled', async t => {
   const f = await fixture(t); const catalog = await readHostedCatalog(f.settings);
   assert.equal(catalog.skills[0].name, 'office-docx'); assert.equal(catalog.tools[0].name, 'mcp__contract_helper__library_search');
@@ -336,11 +361,20 @@ test('preparing plugin creates only product artifacts and preserves its token on
   const second = await prepareHostedPluginInstall({ productDataRoot: f.root, workspacesRoot: f.workspaces, installDirectory, port: 11345 });
   assert.equal(await readFile(second.tokenFile, 'utf8'), token); assert.equal(first.harnessProfileModified, false);
   const patch = parse(await readFile(path.join(installDirectory, 'cordis.patch.yml'), 'utf8'));
-  assert.equal(patch[0].insert[0].config.provider, 'deepseek'); assert.match(patch[0].insert[0].name, /^file:\/\//);
+  assert.equal(patch[0].insert[0].config.provider, 'deepseek-account');
+  assert.equal(patch[0].insert[0].name, './entry-' + first.revision + '.mjs');
+  assert.equal(await readFile(path.join(installDirectory, patch[0].insert[0].name), 'utf8'), await readFile(path.join(installDirectory, 'index.mjs'), 'utf8'));
+  assert.equal(first.dependencySource, 'harness-runtime');
+  const manifest = JSON.parse(await readFile(path.join(installDirectory, 'package.json'), 'utf8'));
+  assert.equal(manifest.dependencies?.['@deepseek-ai/dsh-llm'], undefined);
+  assert.equal(manifest.peerDependenciesMeta['@deepseek-ai/dsh-llm'].optional, true);
   assert.equal(patch[0].insert[1].config.id, 'xiaozhushou-desktop-text-v1');
-  for(const [filename,dependency]of [['index.mjs','server.mjs'],['server.mjs','text-policy.mjs'],['server.mjs','owner-access.mjs']]){
-    assert((await readFile(path.join(installDirectory,filename),'utf8')).includes('./'+dependency+'?revision='+first.revision),'live reload must version every local module dependency');
+  for(const [filename,dependency]of [['index.mjs','server.mjs'],['server.mjs','text-policy.mjs'],['server.mjs','owner-access.mjs'],['server.mjs','contract-model-failure.mjs']]){
+    const physicalName = dependency.slice(0, -4) + '-' + first.revision + '.mjs';
+    assert((await readFile(path.join(installDirectory,filename),'utf8')).includes('./'+physicalName),'live reload must use unique physical module paths');
+    assert.equal(await readFile(path.join(installDirectory, physicalName), 'utf8'), await readFile(path.join(installDirectory, dependency), 'utf8'));
   }
+  assert((await readFile(path.join(installDirectory, 'contract-model-failure.mjs'), 'utf8')).includes('ACCOUNT_QUOTA'));
   assert.equal(JSON.parse(await readFile(first.configFile, 'utf8')).endpoint, 'http://127.0.0.1:11345');
   await assert.rejects(prepareHostedPluginInstall({ productDataRoot: f.root, workspacesRoot: f.workspaces, installDirectory: path.join(os.tmpdir(), 'outside') }), /HOST_INSTALL_OUTSIDE_PRODUCT/);
 });

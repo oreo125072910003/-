@@ -1,6 +1,6 @@
 {
   "name": "xiaozhushou-harness-host",
-  "version": "0.3.7",
+  "version": "1.0.0",
   "description": "小助手独立桌面会话，复用已登录 Harness 的模型、Skill 和已授权插件工具",
   "private": true,
   "type": "module",
@@ -13,10 +13,13 @@
   },
   "files": [
     "index.mjs",
+    "entry-*.mjs",
+    "*-*.mjs",
     "server.mjs",
     "image-input.mjs",
     "contract-image-input.mjs",
     "contract-tool-policy.mjs",
+    "contract-model-failure.mjs",
     "text-policy.mjs",
     "owner-access.mjs",
     "product-access.mjs",
@@ -25,14 +28,15 @@
     "locale/*.json",
     "icon.svg"
   ],
-  "dependencies": {
-    "@deepseek-ai/dsh-llm": "0.2.0-rc.2"
-  },
   "peerDependencies": {
-    "@deepseek-ai/dsh": ">=0.2.0-rc.2 <0.3.0"
+    "@deepseek-ai/dsh": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.1-rc.3 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
       "optional": true
     }
   },

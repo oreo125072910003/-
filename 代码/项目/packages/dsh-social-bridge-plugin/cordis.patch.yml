@@ -2,7 +2,7 @@
     - id: dsh-social-bridge-plugin
       name: "file:///G:/wechat-deepseek/data/workspace/packages/dsh-social-bridge-plugin/native-context.mjs?wechatagent=587683f4ef2eee9c"
       config:
-        provider: "deepseek"
+        provider: "deepseek-account"
         model: "deepseek-flash"
         port: 11230
     - id: preset-wechat-social

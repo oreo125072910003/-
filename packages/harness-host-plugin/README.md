@@ -4,11 +4,11 @@
 
 ## 准备与安装
 
-主程序调用 `prepareHostedPluginInstall({productDataRoot, workspacesRoot, installDirectory, port:11234, provider:'deepseek', model:'deepseek-flash'})`。三个路径均为绝对路径，后两者必须经真实路径检查位于产品数据目录内。函数只生成产品文件，不更改 Harness profile。其返回的 `configFile` 可直接传给客户端的 `settings.hostedConfigFile`。
+主程序调用 `prepareHostedPluginInstall({productDataRoot, workspacesRoot, installDirectory, port:11234, provider:'deepseek-account', model:'deepseek-flash'})`。默认使用 DSH 已登录账号的 `deepseek-account` 提供方；裸名称 `deepseek` 不是当前 DSH 的已注册提供方。三个路径均为绝对路径，后两者必须经真实路径检查位于产品数据目录内。函数只生成产品文件，不更改 Harness profile。其返回的 `configFile` 可直接传给客户端的 `settings.hostedConfigFile`。
 
 源目录的空补丁不能直接安装。应安装生成的 `installDirectory`：首选 Harness 正式插件管理器的本地 bundle 安装功能；正式 CLI 为 `dsh plugin --profile desktop add file:<installDirectory> --ignore-scripts`。CLI 使用自己的 profile 锁、兼容性检查和原子 manifest 保存，成功后会自动选择新的 bundle。启用 HMR 的 Harness 观察 profile manifest 并重组运行配置；CLI 安装成功本身不能证明已热生效。以本插件 `/health` 可访问、身份正确为准；若宿主报告需要重启，则完整退出托盘后正常重开。替换已加载包可能仍需重启。
 
-本插件依赖 `@deepseek-ai/dsh-llm@0.2.0-rc.2`。生成补丁通过带 revision 的绝对文件 URL 加载 `installDirectory/index.mjs`，因此该目录自身必须能解析依赖。**先在生成的 `installDirectory` 中运行 `npm install --omit=dev --ignore-scripts --no-package-lock --no-audit --no-fund`，再执行上面的正式插件安装命令。** CLI 为 profile 安装依赖，不保证绝对 URL 指向的源目录也有依赖；只执行 CLI 可能显示已安装而宿主没有启动。包无构建脚本，不复制旧项目的 node_modules。插件管理器、CLI 或安装流程所报告的失败应保留，不用手工覆盖 profile 绕过。最后必须核对 `/health` 的 `pluginVersion`、`revision` 和所需能力，不能只看插件清单。
+本插件使用 DSH 提供的 `@deepseek-ai/dsh-llm`，两个 DSH 包均声明为可选 peer，最低支持 DSH `0.2.1-rc.3`。不在候选源目录安装另一份 DSH 公共包。生成补丁通过 `./entry-<revision>.mjs` 加载，正式安装后由 DSH 将它解析到已安装包内，使公共依赖进入 profile 的运行时解析；入口文件名和内部相对导入均带版本，以保留重载能力。返回的 `dependencySource` 为 `harness-runtime`。从旧版本升级时应通过正式插件管理器重新安装并完整重启，清理旧依赖由包管理器完成。插件管理器、CLI 或安装流程所报告的失败应保留，不用手工覆盖 profile 绕过。最后必须核对 `/health` 的 `pluginVersion`、`revision` 和所需能力，不能只看插件清单。
 
 ## HTTP 契约
 

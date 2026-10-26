@@ -70,11 +70,29 @@ test('cancel stops only active task and preserves queued task execution',async t
     count++;if(count===1){await new Promise((resolve,reject)=>{signal.addEventListener('abort',()=>reject(Error('aborted')),{once:true});});}
     return{ok:true,finalText:'第二个任务正常完成。'};
   }};
-  const{service}=await setup(t,{runtime});await service.saveSettings({runtimeApiKey:'test-key'});
+  const{service}=await setup(t,{runtime,maxConcurrent:1});await service.saveSettings({runtimeApiKey:'test-key'});
   const first=await service.createTask({prompt:'长任务'});const second=await service.createTask({prompt:'第二个任务'});
   const deadline=Date.now()+3000;while(count!==1){assert.ok(Date.now()<deadline);await new Promise(r=>setTimeout(r,10));}
   await service.cancelTask(first.id);assert.equal((await waitTask(service,first.id)).task.status,'cancelled');
   assert.equal((await waitTask(service,second.id)).task.status,'succeeded');
+});
+
+test('a slow task leaves a second execution slot for a quick reply and never exceeds two active tasks',async t=>{
+  let finishSlow,active=0,peak=0;
+  const runtime={...fakeRuntime,runTask:async({prompt,signal})=>{
+    active++;peak=Math.max(peak,active);
+    try{
+      if(prompt.startsWith('slow'))await new Promise((resolve,reject)=>{finishSlow=resolve;signal.addEventListener('abort',()=>reject(Error('aborted')),{once:true});});
+      return{ok:true,finalText:'独立任务已完成。'};
+    }finally{active--;}
+  }};
+  const{service}=await setup(t,{runtime});await service.saveSettings({runtimeApiKey:'test-key'});
+  const slow=await service.createTask({prompt:'slow task'});
+  const deadline=Date.now()+3000;while(!finishSlow){assert.ok(Date.now()<deadline);await new Promise(r=>setTimeout(r,10));}
+  const quick=await service.createTask({prompt:'quick task'});
+  assert.equal((await waitTask(service,quick.id)).task.status,'succeeded');
+  assert.equal(service.getTask(slow.id).task.status,'running');assert.equal(peak,2);
+  finishSlow();assert.equal((await waitTask(service,slow.id)).task.status,'succeeded');
 });
 
 test('unknown IDs and personal runtime home are rejected',async t=>{
@@ -82,6 +100,17 @@ test('unknown IDs and personal runtime home are rejected',async t=>{
   await assert.rejects(service.saveSettings({runtimeHome:path.join(os.homedir(),'.dsh')}),/数据目录内/);
   await assert.rejects(service.saveSettings({runtimeBaseUrl:'http://untrusted.example'}),/HTTPS/);
   await assert.rejects(service.saveSettings({runtimeCommand:'dsh && whoami'}),/完整 Harness 程序路径/);
+});
+
+test('DSH opened after the desktop is checked afresh before the first task',async t=>{
+  let online=false,calls=0;
+  const runtime={inspectHostedRuntime:async()=>({available:online,ready:online,detail:'synthetic host state',capabilities:{}}),
+    readHostedCatalog:async()=>({ok:true,metadataOnly:true,skills:[],tools:[]}),
+    runHostedTask:async()=>{calls++;return{ok:true,finalText:'启动后即可回答。'};}};
+  const{service}=await setup(t,{runtime});assert.equal((await service.getBootstrap()).runtime.available,false);
+  online=true;
+  const task=await service.createTask({prompt:'DSH 刚刚打开，请回答'});
+  assert.equal((await waitTask(service,task.id)).task.status,'succeeded');assert.equal(calls,1);
 });
 
 test('binary attachments never become imaginary AI text and no model request is made',async t=>{

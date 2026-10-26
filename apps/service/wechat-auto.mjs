@@ -1,4 +1,7 @@
 import { safeId } from '../../packages/contracts/index.mjs';
+import { MAX_WECHAT_DELIVERIES, splitWechatReply } from '../../packages/contracts/wechat-delivery.mjs';
+import { wechatProgressText } from './task-activity.mjs';
+import { knownModelFailure } from '../../packages/contracts/model-failure.mjs';
 
 const TERMINAL = new Set(['succeeded', 'partial', 'failed', 'cancelled', 'interrupted']);
 const SILENT = '[无需回复]';
@@ -33,17 +36,19 @@ export function isWechatDirectMention(message, wakeWords = []) {
  */
 export function createWechatAutoResponder({
   settings, ready, permitted, createTask, getTask, readTaskReply, readTaskDeliveries, sendMedia, cancelTask,
-  linkTask, send, hasManualReply = () => false, onChange = () => {},
-  now = Date.now, pollMs = 200, deadlineMs = 120000, maxConcurrent = 2,
+  linkTask, send, hasManualReply = () => false, onChange = () => {}, onDeliveryUpdate = () => {},
+  now = Date.now, pollMs = 200, deadlineMs = 600000, deliveryMs = deadlineMs, maxConcurrent = 2,
+  progressAfterMs = 12000, progressIntervalMs = 60000,
   maxQueued = 32, maxPerConversation = 8, maxCallsPerMinute = 20,
 } = {}) {
   if (![settings, ready, permitted, createTask, getTask, linkTask, send].every(value => typeof value === 'function')) throw Error('自动回复接口不完整。');
   maxConcurrent = Math.max(1, Math.min(3, maxConcurrent));
   maxQueued = Math.max(1, Math.min(64, maxQueued));
   maxPerConversation = Math.max(1, Math.min(16, maxPerConversation));
-  deadlineMs = Math.max(50, Math.min(180000, deadlineMs));
+  deadlineMs = Math.max(50, Math.min(3600000, deadlineMs));
+  deliveryMs = Math.max(50, Math.min(3600000, deliveryMs));
   pollMs = Math.max(5, Math.min(1000, pollMs));
-  const queue = [], active = new Map(), conversations = new Set(), seen = new Set(), calls = [];
+  const queue = [], active = new Map(), conversations = new Set(), seen = new Set(), calls = [], notices = new Set();
   let closed = false, connected = false, revision = 0, freshAfter = Infinity, sendTail = Promise.resolve();
   let status = { state: 'idle', detail: '等待授权会话的新消息。', latestMessageId: null, taskId: null, lastError: null, completed: 0, ignored: 0 };
   const notify = patch => { status = { ...status, ...patch }; try { onChange(); } catch {} };
@@ -73,19 +78,35 @@ export function createWechatAutoResponder({
     try { await cancelTask(job.taskId); } catch { /* The parent service retains actual stop/unknown state. */ }
   }
   function abort(job, code) { job.stopReason = code; job.controller.abort(); }
-  function sendInOrder(job, text, media, index) {
+  function sendInOrder(job, text, media, index, part = 'final') {
     const operation = sendTail.then(() => {
       // Generation may overlap; the native sender has one shared send slot.
       // Revalidate only when this reply reaches that slot, never retry a submit.
       assertCurrent(job);
-      notify({ state: 'sending', detail: '正在向原会话发送 DSH 已完成的完整回复。' });
-      const context={ signal: job.controller.signal, beforeSubmit: () => assertCurrent(job), ...(media?{index}:{}) };
+      if (part === 'progress' && (job.delivering || job.done)) return null;
+      notify({ state: 'sending', detail: part === 'progress' ? '正在向原会话报告本轮处理进度。' : media ? `正在发送第 ${index + 1} 份附件。` : '正在向原会话发送文字说明。' });
+      const context={ signal: job.controller.signal, beforeSubmit: () => assertCurrent(job), part, index };
       return media?sendMedia(job.message,media,context):send(job.message, text, context);
     });
     sendTail = operation.catch(() => {});
     return operation;
   }
+  async function progress(job, current) {
+    if (!job.direct || settings().autoProgress === false || job.progressFailed || job.delivering || job.done || now() < job.nextNotice) return;
+    job.nextNotice = now() + progressIntervalMs;
+    try {
+      const receipt = await sendInOrder(job, wechatProgressText(current, now() - job.startedAt), null, job.noticeIndex++, 'progress');
+      if (receipt?.status === 'delivered') {
+        job.notices++;
+        if (!job.delivering && !job.done) notify({ state: 'generating', detail: current?.activity?.label || '仍在处理任务，完成后会交付文字说明和文件。' });
+      }
+      else job.progressFailed = true;
+    } catch { job.progressFailed = true; }
+  }
+  function stopQueueNotice(job) { clearTimeout(job.queueTimer); }
   async function run(job) {
+    let report;
+    const saveReport = async () => { report.updatedAt = new Date(now()).toISOString(); await onDeliveryUpdate(job.taskId, structuredClone(report)); };
     try {
       assertCurrent(job);
       if (typeof readTaskReply !== 'function') throw failure('AUTO_READER_MISSING');
@@ -116,10 +137,11 @@ export function createWechatAutoResponder({
         if (!current || current.id !== job.taskId) throw failure('AUTO_TASK_INVALID');
         if (TERMINAL.has(current.status)) {
           job.terminal = true;
-          if (current.status !== 'succeeded') throw failure('AUTO_TASK_FAILED');
+          if (current.status !== 'succeeded') throw Object.assign(failure('AUTO_TASK_FAILED'), { modelFailure: knownModelFailure({ message: current.error }) });
           break;
         }
         if (current.status === 'waiting_dependency') throw failure('AUTO_ENGINE_WAITING');
+        await progress(job, current);
         await pause(job);
       }
       assertCurrent(job);
@@ -127,35 +149,79 @@ export function createWechatAutoResponder({
       assertCurrent(job);
       if (typeof raw !== 'string' || !raw.trim() || raw.includes('\0')) throw failure('AUTO_REPLY_INVALID');
       const text = raw.trim();
+      job.generatedAt = now();
       if (text === SILENT) {
         if (!ordinaryGroup) throw failure('AUTO_REPLY_INVALID');
         notify({ state: 'idle', detail: '本条群消息无需接话，已保持安静。' });
         return;
       }
-      if (text.length > 16000 || Buffer.byteLength(text, 'utf8') > 16000) throw failure('AUTO_REPLY_TOO_LONG');
-      const media=typeof readTaskDeliveries==='function'?await readTaskDeliveries(job.taskId,job.message):[];
-      assertCurrent(job);
-      if(!Array.isArray(media)||media.length>4||media.length&&typeof sendMedia!=='function')throw failure('AUTO_REPLY_INVALID');
-      for(const [index,item] of media.entries()){
-        const delivered=await sendInOrder(job,null,item,index);
-        if(delivered?.status!=='delivered'){
-          await sendInOrder(job,delivered?.status==='rejected'?'文件已经生成，但微信发送前的检查未通过。成果已保存在小助手任务记录，可打开后发送。':'文件已生成，微信暂未返回可核对的送达结果。请先核对聊天记录，避免重复发送。');
-          notify({state:'unconfirmed',detail:'本轮媒体尚未确认送达，已保留成果并停止后续发送。'});return;
-        }
+      let chunks;
+      try { chunks = splitWechatReply(text); } catch { throw failure('AUTO_REPLY_TOO_LONG'); }
+      // Give delivery its own budget: a long generation must not use up the
+      // time needed for the explanation and all file receipts.
+      job.delivering = true; job.deadline = now() + deliveryMs;
+      report = { state: 'sending', text: { status: 'pending', parts: chunks.length, delivered: 0 }, attachments: [], updatedAt: new Date(now()).toISOString() };
+      await saveReport();
+      for (const [index, chunk] of chunks.entries()) {
+        const result = await sendInOrder(job, chunk, null, index, index ? 'reply-part' : 'final');
+        report.text.status = result?.status ?? 'unconfirmed';
+        if (result?.status === 'delivered') report.text.delivered++;
+        await saveReport();
+        if (result?.status !== 'delivered') break;
       }
-      notify({ state: 'sending', detail: '回复已完成，正在等待本次发送。' });
-      const delivery = await sendInOrder(job, text);
-      notify({ state: delivery?.status === 'delivered' ? 'idle' : 'unconfirmed',
-        detail: delivery?.status === 'delivered' ? '自动回复已取得微信服务器回执。' : '本条发送结果待核对，未自动重发。',
-        completed: status.completed + (delivery?.status === 'delivered' ? 1 : 0) });
+      let media = [];
+      try { media = typeof readTaskDeliveries==='function'?await readTaskDeliveries(job.taskId,job.message):[]; }
+      catch { report.preparationError = '文件整理未完成，成果仍保存在任务记录中。'; }
+      assertCurrent(job);
+      if(!Array.isArray(media)||media.length>MAX_WECHAT_DELIVERIES||media.length&&typeof sendMedia!=='function')throw failure('AUTO_REPLY_INVALID');
+      report.attachments = media.map((item, index) => ({ name: item.name || (item.kind === 'sticker' ? '表情' : `附件 ${index + 1}`), status: item.error ? 'rejected' : 'pending' }));
+      await saveReport();
+      for(const [index,item] of media.entries()){
+        assertCurrent(job);
+        if (item.error) continue;
+        notify({state:'sending',detail:`正在发送第 ${index + 1}/${media.length} 份附件。`});
+        let delivered;
+        report.attachments[index].status = 'sending'; await saveReport();
+        try { delivered=await sendInOrder(job,null,item,index); }
+        catch { assertCurrent(job); delivered={status:'unconfirmed'}; }
+        report.attachments[index].status = delivered?.status ?? 'unconfirmed';
+        await saveReport();
+      }
+      const complete = report.text.delivered === chunks.length && report.attachments.every(item => item.status === 'delivered') && !report.preparationError;
+      report.state = complete ? 'delivered' : 'partial'; await saveReport();
+      const missing = report.attachments.filter(item => item.status !== 'delivered');
+      if (media.length > 1 || missing.length || report.preparationError || (media.length > 0 || chunks.length > 1) && report.text.delivered !== chunks.length) {
+        const count = report.attachments.filter(item => item.status === 'delivered').length;
+        const note = [count ? `${count} 份附件已确认送达。` : '',
+          missing.length ? `这些附件还没确认送达：${missing.map(item => item.name).join('、')}。文件都保留在任务记录中，请先核对微信，避免重复发送。` : '',
+          report.preparationError || '', report.text.delivered !== chunks.length ? '文字说明未全部取得回执，完整说明保存在任务记录中。' : ''].filter(Boolean).join('\n');
+        if (note) await sendInOrder(job, note, null, 0, 'delivery-notice');
+      }
+      notify({ state: complete ? 'idle' : 'unconfirmed',
+        detail: complete ? '文字说明和全部附件均已取得微信服务器回执。' : '部分交付待核对，完整说明和文件已保留，未自动重发。',
+        lastTiming: { queuedMs: job.startedAt - job.enqueuedAt, generationMs: job.generatedAt - job.startedAt,
+          deliveryMs: now() - job.generatedAt, totalMs: now() - job.enqueuedAt },
+        completed: status.completed + (complete ? 1 : 0) });
     } catch (error) {
       const code = Object.hasOwn(MESSAGES, error?.code) ? error.code : 'AUTO_FAILED';
-      if(settings().autoFailureNotice===true&&['AUTO_TASK_FAILED','AUTO_REPLY_INVALID','AUTO_FAILED'].includes(code)){
-        try{await sendInOrder(job,'这次没能完成处理，结果已记在小助手的任务记录中。你可以继续发消息，我会接着处理。');}catch{}
+      if (report?.state === 'sending') {
+        report.state = 'partial'; report.interrupted = true;
+        if (report.text.status === 'pending') report.text.status = 'not_sent';
+        for (const item of report.attachments) {
+          if (item.status === 'sending') item.status = 'unconfirmed';
+          else if (item.status === 'pending') item.status = 'not_sent';
+        }
+        try { await saveReport(); } catch {}
+      }
+      if((settings().autoFailureNotice===true || job.notices > 0)&&['AUTO_TASK_FAILED','AUTO_REPLY_INVALID','AUTO_FAILED','AUTO_TIMEOUT','AUTO_ENGINE_WAITING'].includes(code)){
+        await cancelOwned(job);
+        if (code === 'AUTO_TIMEOUT') job.deadline = now() + 30000;
+        try{await sendInOrder(job,error.modelFailure?.message ?? (code === 'AUTO_TIMEOUT' ? '这次处理超过了时间预算，已请求停止。已有成果保留在任务记录中；这次还没有完整做完。' : '这次没能完成处理，结果已记在小助手的任务记录中。请在任务记录中查看原因，处理后再试。'),null,0,'failure');}catch{}
       }
       notify({ state: ['AUTO_DISABLED', 'AUTO_DISCONNECTED', 'AUTO_REVOKED', 'AUTO_MANUAL_REPLY'].includes(code) ? 'paused' : 'error',
-        detail: MESSAGES[code], lastError: { code, message: MESSAGES[code] } });
+        detail: error.modelFailure?.message ?? MESSAGES[code], lastError: error.modelFailure ?? { code, message: MESSAGES[code] } });
     } finally {
+      job.done = true; stopQueueNotice(job);
       await cancelOwned(job);
     }
   }
@@ -165,6 +231,7 @@ export function createWechatAutoResponder({
       const index = queue.findIndex(job => !conversations.has(job.key));
       if (index < 0) break;
       const [job] = queue.splice(index, 1);
+      stopQueueNotice(job); job.startedAt = now(); job.deadline = now() + deadlineMs;
       conversations.add(job.key);
       const operation = run(job).finally(() => { active.delete(job.message.id); conversations.delete(job.key); pump(); });
       active.set(job.message.id, { job, operation });
@@ -184,6 +251,7 @@ export function createWechatAutoResponder({
       // handshake's own second cannot be distinguished from a new live message.
       // Admit that second instead of setting a future cutoff; IDs still dedupe.
       freshAfter = isReady ? Math.floor(now() / 1000) * 1000 : Infinity;
+      for (const job of queue) stopQueueNotice(job);
       queue.length = 0;
       for (const { job } of active.values()) abort(job, 'AUTO_DISCONNECTED');
       notify({ state: isReady ? 'idle' : 'paused', detail: isReady ? '仅等待本次连接之后的新消息。' : MESSAGES.AUTO_DISCONNECTED });
@@ -205,20 +273,27 @@ export function createWechatAutoResponder({
       if (queue.length >= maxQueued || queue.filter(job => job.key === key).length + Number(conversations.has(key)) >= maxPerConversation) {
         notify({ state: 'error', detail: MESSAGES.AUTO_QUEUE_FULL, lastError: { code: 'AUTO_QUEUE_FULL', message: MESSAGES.AUTO_QUEUE_FULL } }); return false;
       }
-      queue.push({ message, key, direct, revision, deadline: now() + deadlineMs, controller: new AbortController() });
+      const job = { message, key, direct, revision, enqueuedAt: now(), deadline: now() + deadlineMs, startedAt: now(), nextNotice: now() + progressAfterMs,
+        noticeIndex: 0, notices: 0, controller: new AbortController() };
+      job.queueTimer = setTimeout(() => {
+        if (!queue.includes(job)) return;
+        const operation = progress(job).finally(() => notices.delete(operation)); notices.add(operation);
+      }, progressAfterMs);
+      job.queueTimer.unref?.(); queue.push(job);
       pump(); return true;
     },
     manualReply({ kind, target, time }) {
       if (time !== undefined && (!Number.isSafeInteger(time) || time * 1000 < freshAfter || time * 1000 > now() + 30000)) return;
       const matches = job => job.message.kind === kind && job.message.conversationId === target;
-      for (let index = queue.length - 1; index >= 0; index--) if (matches(queue[index])) queue.splice(index, 1);
+      for (let index = queue.length - 1; index >= 0; index--) if (matches(queue[index])) { const [job] = queue.splice(index, 1); job.done = true; stopQueueNotice(job); }
       for (const { job } of active.values()) if (matches(job)) { job.manual = true; abort(job, 'AUTO_MANUAL_REPLY'); }
     },
     async close() {
       if (closed) return;
-      closed = true; revision++; queue.length = 0;
+      closed = true; revision++; for (const job of queue) stopQueueNotice(job); queue.length = 0;
       for (const { job } of active.values()) abort(job, 'AUTO_DISCONNECTED');
       await Promise.allSettled([...active.values()].map(item => item.operation));
+      await Promise.allSettled([...notices]);
     },
   };
   return api;

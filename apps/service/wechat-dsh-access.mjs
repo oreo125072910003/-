@@ -120,7 +120,8 @@ export function createWechatDshAccess({store,dshAccess,legacySources=[],getWecha
         if(base==='send_image')return ['xiaozhushou_attachment','xiaozhushou_export_file'];
         return LEGACY_COMPUTER_TOOLS[base]?[LEGACY_COMPUTER_TOOLS[base]]:[];
       }).filter(name=>available.has(name)):[];
-      const tools=[...new Set([...selected.tools,...basic,...replacements])];
+      const browserTools=kind==='private'&&previous.computerAccess?.enabled===true&&available.has('xiaozhushou_browser')?['xiaozhushou_browser']:[];
+      const tools=[...new Set([...selected.tools,...basic,...replacements,...browserTools])];
       if(tools.length>500)throw fail('原选择较多，功能修复未覆盖保存，请在能力中心检查。');
       const computerTools=tools.filter(name=>available.has(name)&&computerGrantableTool(name)&&name.startsWith('xiaozhushou_'));
       const computerEnabled=kind==='private'&&(previous.computerAccess?.enabled===true||replacements.some(computerGrantableTool));

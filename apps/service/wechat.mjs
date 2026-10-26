@@ -119,10 +119,37 @@ function readSelectedFile(root, relative, maximum = 131072) {
   } finally { fs.closeSync(descriptor); }
 }
 
-export function createWechatController({ store, dataDir, secretStore, bridgeFactory, createTask, getTask, readTaskReply, readTaskDeliveries, cancelTask, authorizeAttachment, fileReaderSources=[], autoOptions = {}, onChange = () => {} }) {
+export function createWechatController({ store, dataDir, secretStore, bridgeFactory, createTask, getTask, readTaskReply, readTaskDeliveries, onDeliveryUpdate, cancelTask, authorizeAttachment, fileReaderSources=[], ensureRuntime, recoveryMs = 5000, autoOptions = {}, onChange = () => {} }) {
   let bridge = null, generation = 0, closing = false, pendingConnect = null, pendingDisconnect = null, closingOperation = null;
+  let recoveryEnabled = false, recoveryBlocked = false, connectController;
   let connection = { state: 'offline', detail: '微信尚未连接。请先导入本机现有微信连接。', accountVerified: false, readerConnected: false };
   const sends = new Set();
+  const pendingOwnEvents = [];
+  const ownRows = value => store.listWechatOutbox().filter(row => row.accountId === String(value.self_id) && row.kind === value.kind && row.target === String(value.conversation_id) && String(row.requestId ?? '').startsWith('auto_'));
+  const matchesOwnReceipt = (row, value) => row.status === 'delivered' && (
+    /^[1-9]\d{0,31}$/.test(value.sourceLocalId ?? '') && String(row.receipt?.localMessageId ?? (row.mediaType === 'text' ? row.receipt?.messageId : '')) === value.sourceLocalId ||
+    /^[1-9]\d{0,31}$/.test(value.sourceServerId ?? '') && String(row.receipt?.serverId ?? '') === value.sourceServerId
+  );
+  function handleOwnEvent(value) {
+    const rows = ownRows(value);
+    if (rows.some(row => matchesOwnReceipt(row, value))) return;
+    const pending = rows.filter(row => row.status === 'sending' && (row.mediaType === 'text' ? row.text === value.text : row.mediaType === value.messageType));
+    if (pending.length && pendingOwnEvents.length < 64 && /^[1-9]\d{0,31}$/.test(value.sourceLocalId ?? '')) {
+      // Reader events can arrive before the sender returns its receipt. Wait
+      // for that exact attempt, then compare IDs; equal text alone is no proof.
+      pendingOwnEvents.push({ value, generation, candidates: pending.map(row => row.id) }); return;
+    }
+    autoReply.manualReply({kind:value.kind,target:String(value.conversation_id),time:messageTime(value.time)});
+  }
+  function settleOwnEvents() {
+    for (let index = pendingOwnEvents.length - 1; index >= 0; index--) {
+      const pending = pendingOwnEvents[index];
+      if (pending.generation !== generation) { pendingOwnEvents.splice(index, 1); continue; }
+      if (pending.candidates.some(id => store.getWechatDelivery(id)?.status === 'sending')) continue;
+      pendingOwnEvents.splice(index, 1);
+      if (!ownRows(pending.value).some(row => matchesOwnReceipt(row, pending.value))) autoReply.manualReply({kind:pending.value.kind,target:String(pending.value.conversation_id),time:messageTime(pending.value.time)});
+    }
+  }
   function outgoingRoot(create = false) {
     const product = fs.realpathSync(dataDir);
     let directory = product;
@@ -189,10 +216,7 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
         if (!allowed({kind:value.kind,conversationId})) return;
         // A trusted own-message event suppresses pending replies. Known automatic
         // outbox echoes do not count as a second human reply.
-        const autoEcho = store.listWechatOutbox().some(row => row.accountId === accountId && row.kind === value.kind && row.target === conversationId &&
-          String(row.requestId ?? '').startsWith('auto_') && row.status==='delivered' &&
-          /^[1-9]\d{0,31}$/.test(value.sourceLocalId??'') && String(row.receipt?.messageId)===value.sourceLocalId);
-        if (!autoEcho) autoReply.manualReply({kind:value.kind,target:conversationId,time:messageTime(value.time)});
+        handleOwnEvent(value);
         return;
       }
       message = { id: 'wechat_' + randomUUID(), accountId, kind: value.kind, conversationId, senderId,
@@ -210,6 +234,7 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
   }
   function stateChanged(state, epoch) {
     if (epoch !== generation || closing) return;
+    if (/ACCOUNT_CHANGED|ACCOUNT_MISMATCH|MULTIPLE_ACCOUNT|VERSION_MISMATCH|MESSAGE_HANDLER_FAILED/.test(String(state?.detail))) recoveryBlocked = true;
     const selfId = state?.selfId ? String(state.selfId) : '';
     const becomingReady=state?.state==='ready'&&connection.state!=='ready';
     if (state?.state === 'ready') {
@@ -268,13 +293,14 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
           (!attachment||result.media_type==='wechat-'+mediaType&&/^[1-9]\d{0,31}$/.test(String(result.message_id??'')));
         store.updateWechatDelivery(record.delivery.id,{status:confirmed?'delivered':'unconfirmed',error:confirmed?'':'接口未提供可核对的送达回执。请查看微信，未自动重发。',
           ...(confirmed?{receipt:{type:result.receipt,delivered:result.delivered,messageId:String(result.message_id??''),mediaType,
-            ...(/^[1-9]\d{0,31}$/.test(result.server_message_id??'')?{serverId:result.server_message_id}:{})}}:{})});
+            localMessageId:String(result.local_message_id??(mediaType==='text'?result.message_id??'':'')),
+            serverId:String(result.server_message_id??(attachment?result.message_id??'':''))}}:{})});
       }catch(error){
         const code=String(error?.code??error?.message??''),rejected=error?.attempted===false&&(attachment?attachmentRejectedCodes:textRejectedCodes).has(error?.code);
         const detail=attachment?(descriptions[code]?explain(code):rejected?'附件发送前的校验未通过。':'微信附件发送未取得可核对的服务器回执。'):explain(error);
         store.updateWechatDelivery(record.delivery.id,{status:rejected?'rejected':'unconfirmed',error:detail+(rejected?' 确认未发送；处理后请重新发起发送。':' 送达状态不明，请先查看微信；未自动重发。')});
       }
-      finally{onChange();}
+      finally{settleOwnEvents();onChange();}
       return store.getWechatDelivery(record.delivery.id);
     })();
     sends.add(promise);try{return await promise;}finally{sends.delete(promise);}
@@ -283,7 +309,7 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
     ...autoOptions,settings:current,
     ready:()=>!closing&&!!bridge&&connection.state==='ready'&&connection.accountVerified&&connection.readerConnected&&connection.selfEventsVerified!==false,
     permitted:message=>message.accountId===current().boundAccountId&&message.accountId===connection.selfId&&allowed(message),
-    createTask,getTask,readTaskReply,readTaskDeliveries,cancelTask,linkTask:(messageId,taskId)=>store.linkWechatTask(messageId,taskId),
+    createTask,getTask,readTaskReply,readTaskDeliveries,onDeliveryUpdate,cancelTask,linkTask:(messageId,taskId)=>store.linkWechatTask(messageId,taskId),
     sendMedia:(message,item,sendContext)=>{
       const {config}=readyTarget(message.kind,message.conversationId);
       if(message.accountId!==config.boundAccountId)throw Error('微信账号已变化。');
@@ -297,8 +323,15 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
     },
     hasManualReply:message=>store.listWechatOutbox().some(row=>row.accountId===message.accountId&&row.kind===message.kind&&row.target===message.conversationId&&
       !String(row.requestId??'').startsWith('auto_')&&(row.messageId===message.id||Date.parse(row.createdAt)>=Date.parse(message.receivedAt))),
-    send:(message,text,sendContext)=>dispatch({kind:message.kind,target:message.conversationId,text,messageId:message.id,
-      dedupeKey:hash(['wechat-auto-v1',message.accountId,message.kind,message.conversationId,message.inboundKey]),requestId:'auto_'+message.inboundKey.slice(0,32),automatic:true,sendContext}),
+    send:(message,text,sendContext)=>{
+      const part = sendContext.part ?? 'final', index = sendContext.index ?? 0;
+      const key = ['wechat-auto-v1',message.accountId,message.kind,message.conversationId,message.inboundKey];
+      // Each progress update, text part and delivery notice has its own durable
+      // identity. Preserve the existing key for the first final-reply part.
+      if (part !== 'final') key.push(part, index);
+      return dispatch({kind:message.kind,target:message.conversationId,text,messageId:message.id,
+        dedupeKey:hash(key),requestId:'auto_'+message.inboundKey.slice(0,24)+'_'+part+'_'+index,automatic:true,sendContext});
+    },
     onChange,
   });
   const api = {
@@ -377,7 +410,7 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
       if (!/^[a-f0-9]{64}$/.test(nativeToken) || typeof io.reader_token !== 'string' || !/^[\x21-\x7e]{16,256}$/.test(io.reader_token)) throw Error('微信连接凭据缺失或格式不正确。');
       const config = { mode: 'local', readerBaseUrl: endpoint(io.reader_base_url, '消息读取地址'), hookBaseUrl: endpoint(project.hook?.baseUrl, '微信接口地址'),
         expectedVersion: project.hook.expectedVersion, allowedPrivate: ids(project.wechat?.whitelist?.private ?? [], '私聊授权'), allowedGroups: ids(project.wechat?.whitelist?.groups ?? [], '群聊授权'),
-        connectionId: randomUUID(), boundAccountId: '',stickerSettings:project.wechat?.stickers,autoReply:false,autoConnect:false,
+        sourceDirectory: root, connectionId: randomUUID(), boundAccountId: '',stickerSettings:project.wechat?.stickers,autoReply:false,autoConnect:false,
         ...replyTriggers({wakeMode:project.wechat?.wake_mode,wakeWords:project.wechat?.wake_words,chatModes:project.wechat?.chatModes}) };
       const previous = await secretStore.get(secretName);
       await secretStore.set(secretName, JSON.stringify({ connectionId: config.connectionId, readerToken: io.reader_token, nativeToken }));
@@ -484,9 +517,17 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
       if (pendingDisconnect) await pendingDisconnect;
       if (closing) throw Error('小助手正在退出。');
       if (pendingConnect) return pendingConnect;
-      if (bridge) return api.getState();
+      recoveryEnabled = true; recoveryBlocked = false;
       const operation=(async()=>{
+      if (bridge && connection.state === 'ready') return api.getState();
+      // A running bridge reconnects its stream itself. Its reader may have
+      // exited independently; restore that dependency without replacing a turn.
+      if (bridge) {
+        if (ensureRuntime) await ensureRuntime({ ...current(), ...await credentials() }, { signal: connectController?.signal });
+        return api.getState();
+      }
       const epoch = ++generation;
+      connectController = new AbortController();
       const config = current(), secret = await credentials();
       if (epoch !== generation || closing) return api.getState();
       if (!secret) throw Error('请先导入本机现有微信连接。');
@@ -495,8 +536,16 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
       bridge = factory({ onMessage: message => receive(message, epoch), onState: state => stateChanged(state, epoch),
         onError: error => { if (epoch === generation && !closing) { connection = { ...connection, state: 'error', accountVerified: false, detail: explain(error) };autoReply.connectionChanged(false); onChange(); } } });
       connection = { state: 'connecting', detail: '正在核对微信版本、账号和消息读取连接。', accountVerified: false, readerConnected: false }; onChange();
-      try { await bridge.start({ ...config, ...secret, fileReaderSources, dataDir: path.join(dataDir, 'wechat'), nickname: store.getSettings().assistantName || '小助手' }); }
+      try {
+        if (ensureRuntime) {
+          const prepared = await ensureRuntime({ ...config, ...secret }, { signal: connectController.signal });
+          if (epoch !== generation || closing) return api.getState();
+          if (prepared?.sourceDirectory && !config.sourceDirectory) { config.sourceDirectory = prepared.sourceDirectory; save(config); }
+        }
+        await bridge.start({ ...config, ...secret, fileReaderSources:[...new Set([...fileReaderSources,...(config.sourceDirectory?[config.sourceDirectory]:[])])], dataDir: path.join(dataDir, 'wechat'), nickname: store.getSettings().assistantName || '小助手' });
+      }
       catch (error) {
+        recoveryBlocked = /ACCOUNT_CHANGED|ACCOUNT_MISMATCH|MULTIPLE_ACCOUNT|VERSION_MISMATCH|API_HTTP_40[13]|MESSAGE_HANDLER_FAILED/.test(String(error?.code ?? error?.message));
         if (epoch === generation) { const failed = bridge; bridge = null; await failed?.stop().catch(() => {}); connection = { state: 'error', detail: explain(error), accountVerified: false, readerConnected: false }; onChange(); }
         throw Error(explain(error));
       }
@@ -507,6 +556,7 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
     },
     async disconnect() {
       if(pendingDisconnect)return pendingDisconnect;
+      recoveryEnabled = false; connectController?.abort();
       generation++; const owned = bridge; bridge = null;
       autoReply.connectionChanged(false);
       const starting=pendingConnect;
@@ -532,7 +582,15 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
       if (Buffer.byteLength(content, 'utf8') > 16000) throw Error('回复内容超过微信接口的 16000 字节限制，请缩短后发送。');
       return dispatch({kind:message.kind,target:message.conversationId,text:content,messageId:message.id,dedupeKey:hash([message.accountId,message.id,content])});
     },
-    async close() { if(closingOperation)return closingOperation;closing=true;const operation=(async()=>{await api.disconnect();await autoReply.close();await Promise.allSettled([...sends]);})();closingOperation=operation;try{return await operation;}catch(error){closingOperation=null;throw error;} }
+    async close() { if(closingOperation)return closingOperation;closing=true;clearInterval(recoveryTimer);const operation=(async()=>{await api.disconnect();await autoReply.close();await Promise.allSettled([...sends]);})();closingOperation=operation;try{return await operation;}catch(error){closingOperation=null;throw error;} }
   };
+  const recoveryTimer = setInterval(() => {
+    if (closing || !recoveryEnabled || recoveryBlocked || pendingConnect || pendingDisconnect || connection.state === 'ready') return;
+    // Account, authorization and local-storage errors always need an explicit
+    // owner action. Only connection/dependency recovery is automatic.
+    if (/账号已|账号已经|账号数据库|凭据|版本不匹配|消息保存失败|人工接管/.test(connection.detail)) return;
+    void api.connect().catch(() => {});
+  }, recoveryMs);
+  recoveryTimer.unref?.();
   return api;
 }

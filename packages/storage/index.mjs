@@ -141,7 +141,7 @@ export async function createStore(dataDir) {
   if (schema !== '4') { db.close();releaseOwner();throw new Error('数据版本高于当前程序，请使用匹配版本打开。'); }
   try{if(!query('PRAGMA table_info(tasks)').some(column=>column.name==='skill_ids'))transaction(()=>db.run("ALTER TABLE tasks ADD COLUMN skill_ids TEXT NOT NULL DEFAULT '[]'"));}
   catch(error){db.close();releaseOwner();throw error;}
-  try{for(const [name,definition]of [['workflow_id',"TEXT NOT NULL DEFAULT 'single'"],['worker_result',"TEXT NOT NULL DEFAULT 'null'"],['delivery_plan',"TEXT NOT NULL DEFAULT '[]'"]])if(!query('PRAGMA table_info(tasks)').some(column=>column.name===name))transaction(()=>db.run(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`));}
+  try{for(const [name,definition]of [['workflow_id',"TEXT NOT NULL DEFAULT 'single'"],['worker_result',"TEXT NOT NULL DEFAULT 'null'"],['delivery_plan',"TEXT NOT NULL DEFAULT '[]'"],['work_status',"TEXT NOT NULL DEFAULT '{}'"],['delivery_result',"TEXT NOT NULL DEFAULT 'null'"]])if(!query('PRAGMA table_info(tasks)').some(column=>column.name===name))transaction(()=>db.run(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`));}
   catch(error){db.close();releaseOwner();throw error;}
   function mapTask(row) {
     if (!row) return null;
@@ -150,7 +150,8 @@ export async function createStore(dataDir) {
     return { id: row.id, title, prompt: row.prompt, ...(original?{requestText:original.text||'图片与资料'}:{}), kind: row.kind, status: row.status,
       progress: row.progress, summary: row.summary, error: row.error, createdAt: row.created_at,
       updatedAt: row.updated_at, workspace: row.workspace, attachments: JSON.parse(row.attachments),
-      attachmentNames: JSON.parse(row.attachments).map(a => a.name), sessionId: row.session_id, conversationId:row.conversation_id??null, skillIds:JSON.parse(row.skill_ids||'[]'),workflowId:row.workflow_id||'single',workerResult:JSON.parse(row.worker_result||'null'),wechatDeliveries:JSON.parse(row.delivery_plan||'[]') };
+      attachmentNames: JSON.parse(row.attachments).map(a => a.name), sessionId: row.session_id, conversationId:row.conversation_id??null, skillIds:JSON.parse(row.skill_ids||'[]'),workflowId:row.workflow_id||'single',workerResult:JSON.parse(row.worker_result||'null'),wechatDeliveries:JSON.parse(row.delivery_plan||'[]'),
+      ...JSON.parse(row.work_status||'{}'),wechatDelivery:JSON.parse(row.delivery_result||'null') };
   }
   const wechatMessageSelect='SELECT id,account_id AS accountId,kind,conversation_id AS conversationId,conversation_name AS conversationName,sender_id AS senderId,sender_name AS senderName,text,external_id AS externalId,received_at AS receivedAt,task_id AS taskId,payload FROM wechat_messages';
   const wechatDeliverySelect='SELECT id,message_id AS messageId,account_id AS accountId,kind,target,text,delivery_id AS deliveryId,status,error,created_at AS createdAt,updated_at AS updatedAt,payload FROM wechat_outbox';
@@ -189,11 +190,16 @@ export async function createStore(dataDir) {
     getTask(id) { return mapTask(query('SELECT * FROM tasks WHERE id=?', [id])[0]); },
     listTasks() { return query('SELECT * FROM tasks ORDER BY created_at DESC,id DESC LIMIT 500').map(mapTask); },
     updateTask(id, patch) {
-      const fields = { status:'status', progress:'progress', summary:'summary', error:'error', sessionId:'session_id',workerResult:'worker_result',attachments:'attachments',wechatDeliveries:'delivery_plan' };
+      const fields = { status:'status', progress:'progress', summary:'summary', error:'error', sessionId:'session_id',workerResult:'worker_result',attachments:'attachments',wechatDeliveries:'delivery_plan',wechatDelivery:'delivery_result',workStatus:'work_status' };
+      const workKeys=['startedAt','lastHeartbeatAt','activity'];
+      if(workKeys.some(key=>Object.hasOwn(patch,key))){
+        const previous=query('SELECT work_status FROM tasks WHERE id=?',[id])[0];
+        patch={...patch,workStatus:{...JSON.parse(previous?.work_status||'{}'),...Object.fromEntries(workKeys.filter(key=>Object.hasOwn(patch,key)).map(key=>[key,patch[key]]))}};
+      }
       if (patch.status && !TASK_STATUSES.has(patch.status)) throw new Error('任务状态无效。');
       const entries = Object.entries(patch).filter(([key]) => fields[key]);
       transaction(() => {
-        db.run(`UPDATE tasks SET ${[...entries.map(([key]) => `${fields[key]}=?`),'updated_at=?'].join(',')} WHERE id=?`, [...entries.map(([key,v])=>['workerResult','attachments','wechatDeliveries'].includes(key)?JSON.stringify(v):v), new Date().toISOString(), id]);
+        db.run(`UPDATE tasks SET ${[...entries.map(([key]) => `${fields[key]}=?`),'updated_at=?'].join(',')} WHERE id=?`, [...entries.map(([key,v])=>['workerResult','attachments','wechatDeliveries','wechatDelivery','workStatus'].includes(key)?JSON.stringify(v):v), new Date().toISOString(), id]);
       });
       return api.getTask(id);
     },
@@ -261,6 +267,12 @@ export async function createStore(dataDir) {
         api.addEvent(item.id,'recovery','检测到上次未完成的任务，已标记中断，未自动重放。');
       }
       transaction(()=>db.run("UPDATE wechat_outbox SET status='unconfirmed',error='上次发送过程被中断，无法确认是否送达；未自动重发。',updated_at=? WHERE status='sending'",[new Date().toISOString()]));
+      for (const task of api.listTasks()) if (task.wechatDelivery?.state === 'sending') {
+        const report=task.wechatDelivery;report.state='partial';report.interrupted=true;
+        if(report.text.status==='pending')report.text.status='unconfirmed';
+        for(const item of report.attachments){if(item.status==='sending')item.status='unconfirmed';else if(item.status==='pending')item.status='not_sent';}
+        api.updateTask(task.id,{wechatDelivery:report});
+      }
       transaction(()=>db.run("UPDATE mail_drafts SET status='unconfirmed',error='上次发送被中断，无法确认 SMTP 是否接收；未自动重发。',updated_at=? WHERE status='sending'",[new Date().toISOString()]));
       return unfinished.length;
     },

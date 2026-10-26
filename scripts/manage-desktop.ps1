@@ -4,6 +4,7 @@
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'electron-process.ps1')
 $localConfiguration = Join-Path $projectRoot 'config\desktop-install.local.json'
 if (-not $DataHome -and (Test-Path -LiteralPath $localConfiguration -PathType Leaf)) {
     $DataHome = (Get-Content -LiteralPath $localConfiguration -Raw -Encoding UTF8 | ConvertFrom-Json).dataHome
@@ -30,7 +31,7 @@ function Get-DesktopOwner {
 function Stop-Desktop {
     $owner = Get-DesktopOwner
     if (-not $owner) { return }
-    $stopRequest = Start-Process -FilePath $owner.Path -ArgumentList @('--data-home',('"'+$DataHome+'"'),'--quit') -WorkingDirectory (Split-Path -Parent $owner.Path) -WindowStyle Hidden -PassThru
+    $stopRequest = Start-AssistantElectron -Executable $owner.Path -DataHome $DataHome -Quit
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     while (Get-DesktopOwner) {
         if ([DateTime]::UtcNow -ge $deadline) { throw 'The product has not confirmed exit. Data was preserved; no forced termination was used.' }

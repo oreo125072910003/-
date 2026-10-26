@@ -17,7 +17,11 @@ import {prepareWechatTaskFiles,snapshotWechatFile} from './wechat-file-input.mjs
 import {executionGuidance} from './execution-guidance.mjs';
 import { createWechatDshAccess } from './wechat-dsh-access.mjs';
 import { createTaskToolAccess } from './task-tools.mjs';
+import { createBrowserService } from './browser.mjs';
 import { PRODUCT_TOOLS } from '../../packages/contracts/product-tools.mjs';
+import { MAX_WECHAT_DELIVERIES } from '../../packages/contracts/wechat-delivery.mjs';
+import { taskActivityLabel } from './task-activity.mjs';
+import { createWechatRuntime } from './wechat-runtime.mjs';
 
 const TEXT_EXTENSIONS = new Set(['.txt','.md','.json','.csv','.tsv','.tex','.yaml','.yml','.log','.py','.js','.mjs','.css','.html','.cs']);
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
@@ -29,7 +33,7 @@ const hashFile = filename => createHash('sha256').update(fs.readFileSync(filenam
 const inside = (root, target) => { const relative = path.relative(root,target); return relative !== '..' && !relative.startsWith('..'+path.sep) && !path.isAbsolute(relative); };
 const markdownText = value => String(value).replace(/[\\`*_{}\[\]<>]/g,'\\$&').replace(/[\r\n]+/g,' ');
 
-export async function createAssistantService({ dataDir, runtime, secretStore, maxConcurrent = 1, requirePickedFiles = true, contractAvailable = false, wechatBridgeFactory, mailOptions = {}, builtinMcp = [], legacySources = [], literatureClient = createLiteratureClient() }) {
+export async function createAssistantService({ dataDir, runtime, secretStore, maxConcurrent = 2, requirePickedFiles = true, contractAvailable = false, wechatBridgeFactory, mailOptions = {}, builtinMcp = [], legacySources = [], literatureClient = createLiteratureClient() }) {
   if (!path.isAbsolute(dataDir)) throw new Error('数据目录必须是绝对路径。');
   const root = path.resolve(dataDir);
   const workspaces = path.join(root,'tasks');
@@ -74,6 +78,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
   const hosted = typeof runtime?.runHostedTask === 'function' && typeof runtime?.inspectHostedRuntime === 'function';
   const runCoreTask = options => hosted ? runtime.runHostedTask(options) : runtime.runTask(options);
   const dshAccess=createDshAccess({runtime,settingsProvider:runtimeOptions,store,onChange:changes});
+  const browser=createBrowserService({dataDir:root});
   const wechatDshAccess=createWechatDshAccess({store,dshAccess,legacySources,getWechatState:()=>wechat.getState(),onChange:changes});
   function settings() {
     return { assistantName:'小助手', persona:defaultPersona, runtimeCommand:'', runtimeProfile:'sdk',
@@ -100,9 +105,9 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       env:{ ...(key ? { DEEPSEEK_API_KEY:key } : {}), ...(current.runtimeBaseUrl ? {DEEPSEEK_BASE_URL:current.runtimeBaseUrl} : {}) }
     };
   }
-  async function inspect() {
+  async function inspect({refresh=false}={}) {
     try {
-      if(!inspection || Date.now()-inspectedAt>15000){inspection = await (hosted?runtime.inspectHostedRuntime:runtime.inspectRuntime)(await runtimeOptions());inspectedAt=Date.now();}
+      if(refresh || !inspection || Date.now()-inspectedAt>15000){inspection = await (hosted?runtime.inspectHostedRuntime:runtime.inspectRuntime)(await runtimeOptions());inspectedAt=Date.now();}
       if(hosted)return{...inspection,core:'dsh',identity:'小助手 DSH',runtimeMode:'hosted',detail:inspection.detail+(inspection.available&&inspection.capabilities?.sessionGroups!==true?' 当前 Harness 插件仍为旧版；完整退出并重开 Harness 后，新聊天会按工作空间分类。':'')};
       const key = !!(await secretStore?.get('deepseek-api-key'));
       return { ...inspection, credentialsConfigured:key || !!inspection.credentialsConfigured,
@@ -206,7 +211,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     signal.throwIfAborted();
     let imagesSupported=false;
     if(hosted){
-      const state=await inspect();
+      const state=await inspect({refresh:true});
       if(!state.available){update(task.id,{status:'waiting_dependency',progress:'等待连接现有 Harness',error:'请启动现有 Harness 并启用小助手连接插件。复用原有登录，无需另填 API Key。'+state.detail});event(task.id,'waiting','小助手 DSH 宿主尚未连接，未发起模型请求。');return;}
       imagesSupported=state.capabilities?.images===true;
     }else if(!options.env.DEEPSEEK_API_KEY) {
@@ -255,8 +260,19 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       authorize:async name=>!stopping&&(await runtimeOptions(task.id)).hostedOwnerGrants?.tools.includes(name),
       addArtifact:(filename,name,mime)=>addArtifact(task,filename,name,mime),
       resolveArtifact:id=>{const item=store.getArtifact(safeId(id));if(!item||item.taskId!==task.id)throw Error('成果不属于本轮任务。');api.resolveArtifact(id);return item;},
-      onDelivery:async delivery=>{const current=findTask(task.id),deliveries=current.wechatDeliveries??[];if(deliveries.some(item=>JSON.stringify(item)===JSON.stringify(delivery)))return;if(deliveries.length>=4)throw Error('一次回复最多交付四份附件或表情。');update(task.id,{wechatDeliveries:[...deliveries,delivery]});},
-      mail,wechat,conversation,
+      onDelivery:async value=>{
+        const deliveries=[...(findTask(task.id).wechatDeliveries??[])];
+        for(const delivery of Array.isArray(value)?value:[value])if(!deliveries.some(item=>JSON.stringify(item)===JSON.stringify(delivery)))deliveries.push(delivery);
+        if(deliveries.length>MAX_WECHAT_DELIVERIES)throw Error('一次回复最多交付 12 份附件或表情，请分批处理。');
+        update(task.id,{wechatDeliveries:deliveries});
+      },
+      onActivity:({name,phase})=>{
+        if(signal.aborted||stopping)return;
+        const label=taskActivityLabel(name,phase);
+        update(task.id,{progress:label,activity:{label,name,phase,updatedAt:stamp()}});
+        event(task.id,'activity',label);
+      },
+      mail,wechat,conversation,browser,
       readWechatDocument:async(uri)=>{
         signal.throwIfAborted();if(!conversation)throw Error('此功能仅限本轮原微信会话。');
         if(uri==='wechat://files'){
@@ -280,7 +296,14 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     try { result=await runCoreTask({prompt:fullPrompt,workspace:conversation?.workspace??task.workspace,signal,...(images.length?{images}:{}),
       ...(conversation?{sessionId:conversation.sessionId??undefined,conversation:{channel:'wechat',displayName:conversation.title}}:{}),
       settings:{...options,...(toolAccess?.connection?{hostedProductConnection:toolAccess.connection}:{}),persona:`你的名字是${current.assistantName}。${current.persona}`,personaPrefix:`你的名字是${current.assistantName}。${current.persona}`},
-      onEvent:entry=>{if(signal.aborted)return;event(task.id,entry.type||'status',entry.message||'正在执行');}}); }
+      onEvent:entry=>{
+        if(signal.aborted)return;
+        if(entry.type==='heartbeat'){
+          update(task.id,{lastHeartbeatAt:stamp()});return;
+        }
+        if(entry.type==='status'&&!findTask(task.id).activity)update(task.id,{progress:entry.message||'正在处理你的任务'});
+        event(task.id,entry.type||'status',entry.message||'正在执行');
+      }}); }
     finally { await toolAccess?.close(); }
     inspection=null;
     // The native host also reports { requested: false, confirmed: false } on
@@ -319,7 +342,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     const controller=new AbortController();active.set(id,controller);
     const task=findTask(id);
     try {
-      update(id,{status:'running',progress:task.kind==='organize'?'正在整理资料':'正在准备 Harness',error:''});
+      update(id,{status:'running',startedAt:stamp(),progress:task.kind==='organize'?'正在整理资料':'正在准备 Harness',error:''});
       await (task.kind==='organize'?organize(task,controller.signal):task.kind==='literature'?literature(task,controller.signal):agent(task,controller.signal));
     } catch(error) {
       if(error.stopUnconfirmed){update(id,{status:'interrupted',progress:'停止状态待核对',error:publicError(error)});event(id,'error',publicError(error));}
@@ -329,7 +352,12 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
   }
   async function pump() {
     if(stopping)return;
-    while(active.size<maxConcurrent&&queued.length){const id=queued.shift();if(findTask(id).status==='queued')void execute(id);}
+    while(active.size<maxConcurrent&&queued.length){
+      const busy = new Set([...active.keys()].map(id=>findTask(id).conversationId).filter(Boolean));
+      const index = queued.findIndex(id=>!findTask(id).conversationId || !busy.has(findTask(id).conversationId));
+      if(index<0)break;
+      const [id]=queued.splice(index,1);if(findTask(id).status==='queued')void execute(id);
+    }
   }
   const api={
     dataDir:root,
@@ -544,11 +572,14 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     },
     resolveArtifact(id){const artifact=store.getArtifact(safeId(id));if(!artifact)throw new Error('成果不存在。');const task=findTask(artifact.taskId);if(!fs.existsSync(artifact.path)||fs.lstatSync(artifact.path).isSymbolicLink()||!inside(fs.realpathSync(task.workspace),fs.realpathSync(artifact.path)))throw new Error('成果已被移动或不在本任务范围内。');if(hashFile(artifact.path)!==artifact.sha256)throw new Error('成果内容已经被外部修改，请通过任务目录查看；不能当作原始交付文件打开。');return artifact.path;},
     resolveWorkspace(id){return id?findTask(id).workspace:workspaces;},
-    async close(){if(closed)return;stopping=true;await wechat.close();await mail.close();for(const id of queued.splice(0)){update(id,{status:'interrupted',progress:'退出前尚未执行',error:'任务未自动重放。'});}for(const controller of active.values())controller.abort();const deadline=Date.now()+15000;while(active.size&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,30));if(active.size)throw new Error('执行器尚未退出，数据存储保留打开，请重试退出。');await Promise.allSettled([...exportsActive.values()]);await coordinator.close();await migration.close();await extensions.close();store.close();closed=true;events.removeAllListeners();},
+    async close(){if(closed)return;stopping=true;await wechat.close();await mail.close();for(const id of queued.splice(0)){update(id,{status:'interrupted',progress:'退出前尚未执行',error:'任务未自动重放。'});}for(const controller of active.values())controller.abort();await browser.close();const deadline=Date.now()+15000;while(active.size&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,30));if(active.size)throw new Error('执行器尚未退出，数据存储保留打开，请重试退出。');await Promise.allSettled([...exportsActive.values()]);await coordinator.close();await migration.close();await extensions.close();store.close();closed=true;events.removeAllListeners();},
   };
+  const wechatRuntime = createWechatRuntime({dataDir:root,sources:legacySources.filter(source=>source.kind==='wechatagent').map(source=>source.path)});
   const wechat = createWechatController({store,dataDir:root,secretStore,bridgeFactory:wechatBridgeFactory,
+    ...(!wechatBridgeFactory?{ensureRuntime:(...args)=>wechatRuntime.ensure(...args)}:{}),
     fileReaderSources:legacySources.filter(source=>source.kind==='wechatagent').map(source=>source.path),
     authorizeAttachment:filename=>wechatAttachmentGrants.delete(path.resolve(filename)),
+    onDeliveryUpdate:(taskId,wechatDelivery)=>update(taskId,{wechatDelivery}),
     readTaskDeliveries:async(taskId,message)=>{
       const task=findTask(taskId),bound=store.getWechatMessage(message.id),identity=task.conversationId?store.getConversation(task.conversationId):null;
       if(task.status!=='succeeded'||bound?.taskId!==taskId||!identity||identity.accountId!==message.accountId||identity.kind!==message.kind||identity.target!==message.conversationId)throw Error('本轮交付与原微信消息不一致。');
@@ -557,9 +588,13 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
         if(item.kind==='sticker'){deliveries.push(item);continue;}
         if(item.kind!=='artifact')throw Error('本轮交付类型无效。');
         const artifact=store.getArtifact(safeId(item.artifactId));if(!artifact||artifact.taskId!==task.id)throw Error('交付成果不属于本轮任务。');
-        const filename=api.resolveArtifact(artifact.id);wechatAttachmentGrants.add(path.resolve(filename));
-        try{const selected=await wechat.stageAttachment({path:filename,mediaType:item.mediaType});deliveries.push({kind:'attachment',attachmentId:selected.id,mediaType:item.mediaType});}
-        finally{wechatAttachmentGrants.delete(path.resolve(filename));}
+        let filename;
+        try{
+          filename=api.resolveArtifact(artifact.id);wechatAttachmentGrants.add(path.resolve(filename));
+          const selected=await wechat.stageAttachment({path:filename,mediaType:item.mediaType});
+          deliveries.push({kind:'attachment',attachmentId:selected.id,mediaType:item.mediaType,name:selected.name});
+        }catch{deliveries.push({kind:'attachment',name:artifact.name,error:'文件快照准备失败，原始成果已保留。'});}
+        finally{if(filename)wechatAttachmentGrants.delete(path.resolve(filename));}
       }
       return deliveries;
     },
