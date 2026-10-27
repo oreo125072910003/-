@@ -2,10 +2,11 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 // Credentials travel over stdin and the private result channel, never argv or job logs.
-export function runReaderSetup({ root, python, request, onProgress = () => {} }) {
+export function runReaderSetup({ root, python, request, onProgress = () => {}, signal }) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(signal.reason); return; }
     const child = spawn(python, ['-B', path.join(root, 'scripts', 'reader_setup.py')], {
-      cwd: root, windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: root, windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'], signal,
       env: { ...process.env, PYTHONUTF8: '1', PYTHONUNBUFFERED: '1' },
     });
     let pending = '', result, diagnostic = '', finished = false;
@@ -31,7 +32,7 @@ export function runReaderSetup({ root, python, request, onProgress = () => {} })
     });
     child.stderr.on('data', chunk => { diagnostic = (diagnostic + chunk).slice(-8000); });
     child.stdin.on('error', () => {});
-    child.once('error', () => finish(new Error('READER_RUNTIME_MISSING')));
+    child.once('error', () => finish(signal?.aborted ? signal.reason : new Error('READER_RUNTIME_MISSING')));
     child.once('close', () => {
       if (result) finish(null, result);
       else finish(new Error(/ModuleNotFoundError|ImportError|DLL load failed/.test(diagnostic) ? 'READER_DEPENDENCY_MISSING' : 'READER_SETUP_FAILED'));

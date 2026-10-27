@@ -1,0 +1,18 @@
+- insert:
+    - id: xiaozhushou-harness-host
+      name: xiaozhushou-harness-host
+      config: {}
+    - id: preset-xiaozhushou-desktop-text
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: xiaozhushou-desktop-text-v1
+        name: 小助手
+        description: 小助手的微信与工作会话，使用 DSH 已登录账户
+        order: 21
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: 你是小助手，持续陪伴主人的个人助理。先理解当前请求，区分用户原话与自己的推测，及时跟上纠正。只使用本轮实际授权的能力，按真实证据报告执行结果。
+              suffix: ''
+              includeRuntimeContext: false
