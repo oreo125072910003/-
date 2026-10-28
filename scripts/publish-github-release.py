@@ -21,10 +21,22 @@ def main() -> None:
     parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument('--body-file', type=Path, required=True)
     parser.add_argument('--asset', type=Path, action='append', required=True)
+    parser.add_argument('--asset-name', action='append', default=[], metavar='LOCAL_NAME=REMOTE_NAME', help='Use an ASCII download filename when a local filename contains Unicode.')
     parser.add_argument('--prerelease', action='store_true', help='Mark this release as a preview instead of a stable release.')
     parser.add_argument('--resume', action='store_true', help='Resume only a matching draft; retain every verified uploaded asset.')
     args = parser.parse_args()
     root = args.repo.resolve()
+    aliases = {}
+    for mapping in args.asset_name:
+        local_name, separator, remote_name = mapping.partition('=')
+        if not separator or not local_name or local_name in aliases or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,199}', remote_name):
+            raise RuntimeError('Each asset alias requires a unique local filename and a plain ASCII remote filename.')
+        aliases[local_name] = remote_name
+    upload_names = [aliases.get(asset.name, asset.name) for asset in args.asset]
+    if len(set(upload_names)) != len(upload_names) or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,199}', name) for name in upload_names):
+        raise RuntimeError('Download filenames must be unique ASCII names; provide --asset-name for Unicode local names.')
+    if set(aliases) - {asset.name for asset in args.asset}:
+        raise RuntimeError('An asset alias does not match any supplied asset.')
 
     def git(*arguments: str) -> str:
         return subprocess.check_output(['git', '-c', 'safe.directory=' + root.as_posix(), *arguments], cwd=root, text=True).strip()
@@ -68,17 +80,18 @@ def main() -> None:
                                            'body': args.body_file.read_text(encoding='utf-8'), 'draft': True, 'prerelease': args.prerelease})
     uploaded = []
     for asset in args.asset:
+        upload_name = aliases.get(asset.name, asset.name)
         asset = asset.resolve(strict=True)
         if not asset.is_file():
             raise RuntimeError('Upload asset must be a regular file.')
         with asset.open('rb') as stream:
             checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
-        url = urllib.parse.urlsplit(release['upload_url'].split('{')[0] + '?name=' + urllib.parse.quote(asset.name))
+        url = urllib.parse.urlsplit(release['upload_url'].split('{')[0] + '?name=' + urllib.parse.quote(upload_name))
         if url.scheme != 'https' or url.hostname != 'uploads.github.com':
             raise RuntimeError('Unexpected GitHub asset upload endpoint.')
         result = None
         for attempt in range(3):
-            matches = [item for item in api('/releases/' + str(release['id']) + '/assets') if item['name'] == asset.name]
+            matches = [item for item in api('/releases/' + str(release['id']) + '/assets') if item['name'] == upload_name]
             if len(matches) > 1:
                 raise RuntimeError('More than one asset has this name.')
             if matches:
@@ -123,11 +136,11 @@ def main() -> None:
         if result is None:
             # A timeout can follow successful receipt. Read before declaring failure.
             result = next((item for item in api('/releases/' + str(release['id']) + '/assets')
-                           if item['name'] == asset.name and item['state'] == 'uploaded' and item['size'] == asset.stat().st_size
+                           if item['name'] == upload_name and item['state'] == 'uploaded' and item['size'] == asset.stat().st_size
                            and item.get('digest') == 'sha256:' + checksum), None)
         if result is None:
             raise RuntimeError('Upload did not complete; the draft can be resumed without replacing verified assets.')
-        if result.get('state') != 'uploaded' or result.get('size') != asset.stat().st_size:
+        if result.get('name') != upload_name or result.get('state') != 'uploaded' or result.get('size') != asset.stat().st_size:
             raise RuntimeError('Uploaded asset state or length differs.')
         if result.get('digest') != 'sha256:' + checksum:
             raise RuntimeError('GitHub asset SHA256 differs.')

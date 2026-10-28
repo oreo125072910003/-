@@ -12,6 +12,8 @@ python scripts/verify-installer.py
 
 产物在 `dist/releases/<产品版本>/小助手-Setup-<产品版本>.exe`，SHA256 和编译工具来源记录在同目录 `installer.json`。安装器必须使用稳定的三段产品版本，拒绝包含本机运行路径配置的应用包。
 
+GitHub 下载名使用 `xiaozhushou-Setup-<产品版本>.exe`，本地中文名保持不变。发布脚本通过 `--asset-name 小助手-Setup-<版本>.exe=xiaozhushou-Setup-<版本>.exe` 明确映射，SHA256 清单使用远端下载名；不依赖 GitHub 对特殊字符的重命名。
+
 编译使用 [官方 NSIS 3.13 ZIP](https://sourceforge.net/projects/nsis/files/NSIS%203/3.13/)，下载工具在 `scripts/ensure-nsis.py` 固定版本与 SHA256，并逐文件核验提取后的编译器和包含文件。只解压到忽略的 `dist/installer-tools`，不会全局安装编译器。需要 Windows x64、Node.js、项目依赖、Python 和首次下载时的网络；不增加产品运行依赖。
 
 安装器以当前 Windows 用户运行，默认安装到 `LocalAppData/Programs/XiaoZhuShou`，创建当前用户的桌面和开始菜单快捷方式及卸载注册。DSH 仍需按原产品要求安装并登录；安装器不复制或更换 DSH。
