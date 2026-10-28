@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { bundleWechatComponents } from './bundle-wechat-components.mjs';
+import { buildDesktopHelper } from '../packages/desktop-control/build.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const source = path.join(root, 'packages/dsh-plugin');
@@ -17,7 +18,7 @@ const stage = path.join(temporary, 'package'); fs.mkdirSync(stage);
 const payload = [
   'apps/service','apps/desktop/renderer','apps/desktop/secret-store.cjs',
   'packages/contracts','packages/storage','packages/runtime-harness','packages/wechat-bridge',
-  'packages/extensions','packages/workers','packages/documents','packages/mail-plugin','packages/harness-host-plugin',
+  'packages/extensions','packages/workers','packages/documents','packages/mail-plugin','packages/harness-host-plugin','packages/desktop-control',
   '代码/项目/package.json','代码/项目/scripts/hook-onebot.mjs','代码/项目/scripts/text-delivery-store.mjs',
   '代码/项目/scripts/wechat-account-check.mjs','代码/项目/scripts/reader-account-state.mjs','代码/项目/scripts/reader-setup.mjs',
   '代码/项目/components/qq-bridge/src/core/wechat-events.js','代码/项目/components/qq-bridge/src/core/sticker-policy.js',
@@ -35,6 +36,7 @@ function copy(from, to) {
   } });
 }
 try {
+  buildDesktopHelper();
   for (const item of fs.readdirSync(source)) copy(path.join(source, item), path.join(stage, item));
   copy(path.join(root, 'packages/harness-host-plugin/icon.svg'), path.join(stage, 'icon.svg'));
   for (const relative of payload) copy(path.join(root, relative), path.join(stage, 'payload', relative));

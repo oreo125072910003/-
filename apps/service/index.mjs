@@ -11,6 +11,8 @@ import { extractDocument, writeOfficeDocument } from '../../packages/documents/i
 import { createLegacyMigration } from '../../packages/extensions/legacy.mjs';
 import { createLiteratureClient, writeLiteratureExports } from '../../packages/documents/literature.mjs';
 import { createMailController } from '../../packages/mail-plugin/index.mjs';
+import { createMailMonitor } from './mail-monitor.mjs';
+import { createSelfImprovement } from './self-improvement.mjs';
 import { createDshAccess } from './dsh-access.mjs';
 import { prepareWechatTaskImages } from './wechat-image-input.mjs';
 import {prepareWechatTaskFiles,snapshotWechatFile} from './wechat-file-input.mjs';
@@ -52,6 +54,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
   const changes = () => events.emit('change');
   const ownerContext=Object.freeze({source:'desktop',role:'owner'});
   const externalContext=Object.freeze({source:'external',role:'correspondent'});
+  const improvementScope = taskId => ({taskId,source:taskSources.get(taskId),message:taskWechatMessages.has(taskId)?store.getWechatMessage(taskWechatMessages.get(taskId)):undefined});
   const availableCapabilities=()=>['agent.text','files.organize','artifact.read','document.read','document.write','documents.write','workers.text','literature.search','mail.read','mail.draft'];
   const extensions=await createExtensionManager({dataDir:path.join(root,'extensions'),authorize:async context=>context===ownerContext,
     secretResolver:(reference,{pluginId})=>secretStore?.get('plugin:'+pluginId+':'+reference),availableCapabilities}).catch(error=>{store.close();throw error;});
@@ -95,6 +98,8 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     if(hosted){
       const source=taskSources.get(taskId),messageId=taskWechatMessages.get(taskId);
       const access=source==='desktop'?{grants:await dshAccess.grantsForTask({source}),...(current.dshDesktopComputerAccess===true?{executionPolicy:'trusted-desktop-computer-task-v1'}:{})}:messageId?await wechatDshAccess.accessForMessage(store.getWechatMessage(messageId)):{grants:{skills:[],tools:[]}};
+      access.grants.tools=access.grants.tools.filter(name=>name!=='xiaozhushou_improve');
+      if(taskId&&selfImprovement.scopeAllowed(improvementScope(taskId)))access.grants.tools.push('xiaozhushou_improve');
       return {hostedConfigFile:path.join(root,'harness-host','client.json'),...(taskId?{hostedOwnerGrants:access.grants,...(access.executionPolicy?{hostedExecutionPolicy:access.executionPolicy,hostedComputerScope:access.computerScope}:{})}:{})};
     }
     const key = await secretStore?.get('deepseek-api-key');
@@ -213,6 +218,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     if(hosted){
       const state=await inspect({refresh:true});
       if(!state.available){update(task.id,{status:'waiting_dependency',progress:'等待连接现有 Harness',error:'请启动现有 Harness 并启用小助手连接插件。复用原有登录，无需另填 API Key。'+state.detail});event(task.id,'waiting','小助手 DSH 宿主尚未连接，未发起模型请求。');return;}
+      if(state.capabilities?.selfImprovement!==true)options.hostedOwnerGrants.tools=options.hostedOwnerGrants.tools.filter(name=>name!=='xiaozhushou_improve');
       imagesSupported=state.capabilities?.images===true;
     }else if(!options.env.DEEPSEEK_API_KEY) {
       const state=await inspect();
@@ -231,7 +237,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
         writeResult(task,'微信文件读取记录.json',JSON.stringify(records,null,2)+'\n','application/json');
       }
       if(task.attachments.some(item=>item.source==='wechat-image')){
-        const records=findTask(task.id).attachments.filter(item=>item.source==='wechat-image').map(item=>({name:item.name,source:item.source,imageId:item.imageId,replyToMessageId:item.replyToMessageId,status:item.status,...(item.sha256?{sha256:item.sha256,bytesProvided:item.size}:{}),...(item.errorCode?{errorCode:item.errorCode}:{})}));
+        const records=findTask(task.id).attachments.filter(item=>item.source==='wechat-image').map(item=>({name:item.name,source:item.source,imageId:item.imageId,replyToMessageId:item.replyToMessageId,status:item.status,...(item.sha256?{sha256:item.sha256,bytesProvided:item.size}:{}),...(item.quality?{quality:item.quality}:{}),...(item.detailCoverage?{detailCoverage:item.detailCoverage}:{}),...(item.detailViews?{detailViews:item.detailViews}:{}),...(item.errorCode?{errorCode:item.errorCode}:{})}));
         writeResult(task,'微信图片读取记录.json',JSON.stringify(records,null,2)+'\n','application/json');
       }
     }
@@ -252,7 +258,8 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       event(task.id,'completed',status==='succeeded'?'预定义协作步骤已返回成果；模型审查意见仍需结合原始资料核对。':'协作未全部完成，已保存实际产生的成果与步骤记录。');return;
     }
     event(task.id,'status','已请求 Harness 执行本任务，模型答复将保存为成果。');
-    const fullPrompt=task.prompt+executionGuidance({tools:options.hostedOwnerGrants?.tools,executionPolicy:options.hostedExecutionPolicy,channel:task.conversationId?'wechat':'desktop'})+(skillContexts.length?'\n\n'+skillContexts.map(skill=>skill.text).join('\n\n'):'')+(snippets.length?'\n\n'+snippets.join('\n\n'):'');
+    const improvementContext=await selfImprovement.context(improvementScope(task.id),{proposalsAvailable:options.hostedOwnerGrants?.tools?.includes('xiaozhushou_improve')===true});
+    const fullPrompt=task.prompt+executionGuidance({tools:options.hostedOwnerGrants?.tools,executionPolicy:options.hostedExecutionPolicy,channel:task.conversationId?'wechat':'desktop'})+improvementContext+(skillContexts.length?'\n\n'+skillContexts.map(skill=>skill.text).join('\n\n'):'')+(snippets.length?'\n\n'+snippets.join('\n\n'):'');
     if(Buffer.byteLength(fullPrompt)>256*1024)throw Error('本次任务与技能资料超过引擎输入上限，请减少资料后重试。');
     const conversation=task.conversationId?store.getConversation(task.conversationId):null;
     if(task.conversationId&&!conversation)throw Error('微信会话记录缺失，未建立新的临时会话。');
@@ -273,6 +280,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
         event(task.id,'activity',label);
       },
       mail,wechat,conversation,browser,
+      improvement:selfImprovement.scopeAllowed(improvementScope(task.id))?{getState:()=>selfImprovement.getState(),propose:args=>selfImprovement.propose(args,improvementScope(task.id))}:undefined,
       readWechatDocument:async(uri)=>{
         signal.throwIfAborted();if(!conversation)throw Error('此功能仅限本轮原微信会话。');
         if(uri==='wechat://files'){
@@ -348,7 +356,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       if(error.stopUnconfirmed){update(id,{status:'interrupted',progress:'停止状态待核对',error:publicError(error)});event(id,'error',publicError(error));}
       else if(controller.signal.aborted){update(id,{status:'cancelled',progress:'已取消',error:''});event(id,'cancelled','任务已取消，原有记录保留。');}
       else {update(id,{status:'failed',progress:'任务未完成',error:publicError(error)});event(id,'error',publicError(error));}
-    } finally { active.delete(id);taskSources.delete(id);taskWechatMessages.delete(id);void pump(); }
+    } finally { if(!stopping)selfImprovement.observe(findTask(id),improvementScope(id));active.delete(id);taskSources.delete(id);taskWechatMessages.delete(id);void pump(); }
   }
   async function pump() {
     if(stopping)return;
@@ -369,7 +377,9 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     async getBootstrap(){const state=await inspect();const caps=capabilities();return{appVersion:APP_VERSION,identity:{name:settings().assistantName,core:'dsh',persona:settings().persona},runtime:state,summary:store.counts(),capabilities:caps};},
     listTasks(){return store.listTasks();},
     getWorkflowsState(){return{workers:coordinator.listWorkers(),workflows:coordinator.listWorkflows()};},
-    getExtensionsState(){return{mcp:extensions.listMcp(),skills:extensions.listSkills(),bundledSkills:extensions.listBundledSkills(),availableCapabilities:availableCapabilities(),builtinMcp:builtinMcp.map(({id,name,version})=>({id,name,version})),migration:migration.getState()};},
+    getExtensionsState(){return{mcp:extensions.listMcp(),skills:extensions.listSkills(),bundledSkills:extensions.listBundledSkills(),availableCapabilities:availableCapabilities(),builtinMcp:builtinMcp.map(({id,name,version})=>({id,name,version})),migration:migration.getState(),selfImprovement:selfImprovement.getState()};},
+    configureSelfImprovement(value){return selfImprovement.configure(value);},
+    proposeSelfImprovement(value){return selfImprovement.propose(value,{source:'desktop'});},
     importLegacyExtensions(){return extensionChange(()=>migration.importAll());},
     refreshDshCatalog(){return extensionChange(()=>migration.refreshCatalog());},
     getDshAccessState(){return dshAccess.getState();},
@@ -383,7 +393,7 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     async restoreProductFeatures(){
       const state=await dshAccess.getState();if(!state.connected)throw Error('请先连接 DSH，再修复功能。');
       const available=new Set(state.catalog.tools.filter(tool=>tool.grantable).map(tool=>tool.name));
-      const basic=PRODUCT_TOOLS.filter(tool=>!tool.computer&&tool.name!=='xiaozhushou_sticker'&&available.has(tool.name)).map(tool=>tool.name);
+      const basic=PRODUCT_TOOLS.filter(tool=>!tool.computer&&!tool.ownerOnly&&tool.name!=='xiaozhushou_sticker'&&available.has(tool.name)).map(tool=>tool.name);
       const saved={skills:state.saved.skills,tools:[...new Set([...state.saved.tools,...basic])]};
       if(saved.tools.length>500)throw Error('原选择较多，请在能力中心检查；现有选择已经保留。');
       store.saveSettings({dshOwnerGrants:saved});
@@ -465,7 +475,15 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     getWechatStickers(value){return wechat.getStickers(value);},
     sendWechatMessage(value){return wechat.sendMessage(value);},
     sendWechatSticker(value){return wechat.sendSticker(value);},
-    getMailState(){return mail.getState();},
+    getMailState(){return {...mail.getState(),notifications:mailMonitor.getState()};},
+    async saveMailNotifications(value){
+      if(!value||typeof value.enabled!=='boolean')throw Error('请选择是否启用新邮件通知。');
+      if(!value.enabled){store.saveSettings({mailNotifications:{...store.getSettings().mailNotifications,enabled:false}});changes();return api.getMailState();}
+      const current=wechat.getState(),config=current.settings??{};
+      if(current.connection?.state!=='ready'||!current.connection.accountVerified||current.connection.selfId!==config.boundAccountId||!config.allowedPrivate?.includes(value.target))throw Error('请先连接并核对接收通知的微信私聊。');
+      if(!mail.getState().accounts.length)throw Error('请先添加一个邮箱账号。');
+      store.saveSettings({mailNotifications:{enabled:true,accountId:config.boundAccountId,target:value.target,enabledAt:stamp()}});changes();void mailMonitor.tick();return api.getMailState();
+    },
     importMailAccounts(value){return mail.importAccounts(value);},
     syncMail(value){return mail.sync(value);},
     getMailMessage(value){return mail.getMessage(value);},
@@ -572,10 +590,11 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
     },
     resolveArtifact(id){const artifact=store.getArtifact(safeId(id));if(!artifact)throw new Error('成果不存在。');const task=findTask(artifact.taskId);if(!fs.existsSync(artifact.path)||fs.lstatSync(artifact.path).isSymbolicLink()||!inside(fs.realpathSync(task.workspace),fs.realpathSync(artifact.path)))throw new Error('成果已被移动或不在本任务范围内。');if(hashFile(artifact.path)!==artifact.sha256)throw new Error('成果内容已经被外部修改，请通过任务目录查看；不能当作原始交付文件打开。');return artifact.path;},
     resolveWorkspace(id){return id?findTask(id).workspace:workspaces;},
-    async close(){if(closed)return;stopping=true;await wechat.close();await mail.close();for(const id of queued.splice(0)){update(id,{status:'interrupted',progress:'退出前尚未执行',error:'任务未自动重放。'});}for(const controller of active.values())controller.abort();await browser.close();const deadline=Date.now()+15000;while(active.size&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,30));if(active.size)throw new Error('执行器尚未退出，数据存储保留打开，请重试退出。');await Promise.allSettled([...exportsActive.values()]);await coordinator.close();await migration.close();await extensions.close();store.close();closed=true;events.removeAllListeners();},
+    async close(){if(closed)return;stopping=true;await mailMonitor.close();await selfImprovement.close();await wechat.close();await mail.close();for(const id of queued.splice(0)){update(id,{status:'interrupted',progress:'退出前尚未执行',error:'任务未自动重放。'});}for(const controller of active.values())controller.abort();await browser.close();const deadline=Date.now()+15000;while(active.size&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,30));if(active.size)throw new Error('执行器尚未退出，数据存储保留打开，请重试退出。');await Promise.allSettled([...exportsActive.values()]);await coordinator.close();await migration.close();await extensions.close();store.close();closed=true;events.removeAllListeners();},
   };
   const wechatRuntime = createWechatRuntime({dataDir:root,sources:legacySources.filter(source=>source.kind==='wechatagent').map(source=>source.path),...(wechatClientPreparer?{ensureClient:wechatClientPreparer}:{})});
   const wechat = createWechatController({store,dataDir:root,secretStore,bridgeFactory:wechatBridgeFactory,
+    interceptMessage:message=>selfImprovement.handleMessage(message),
     ...(!wechatBridgeFactory?{ensureRuntime:(...args)=>wechatRuntime.ensure(...args)}:{}),
     fileReaderSources:legacySources.filter(source=>source.kind==='wechatagent').map(source=>source.path),
     authorizeAttachment:filename=>wechatAttachmentGrants.delete(path.resolve(filename)),
@@ -604,6 +623,8 @@ export async function createAssistantService({ dataDir, runtime, secretStore, ma
       const artifact=store.getArtifacts(id).find(item=>item.name==='小助手答复.md');if(!artifact)throw Error('完整回复文件缺失。');
       return fs.readFileSync(api.resolveArtifact(artifact.id),'utf8').replace(/^# [^\n]*\r?\n\r?\n/,'').trim();
     },onChange:changes});
+  const selfImprovement=createSelfImprovement({store,dataDir:root,extensions,ownerContext,wechat:{getState:()=>wechat.getApprovalState(),sendNotification:value=>wechat.sendNotification(value)},onChange:changes});
   const mail=createMailController({store,dataDir:root,secretStore,onChange:changes,...mailOptions});
+  const mailMonitor=createMailMonitor({store,mail,wechat,onChange:changes});mailMonitor.start();
   return api;
 }

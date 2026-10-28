@@ -74,6 +74,9 @@ export async function createExtensionManager({ dataDir, authorize = async () => 
     })(); starting.set(id, pending); try { return await pending; } finally { if (starting.get(id) === pending) starting.delete(id); }
   }
   const manager = {
+    async inspectMcp(input, context) { await guard(context, { action: 'mcp.inspect' }); return normalizeConfig(input); },
+    async inspectMcpRollback(id, context) { const entry = getMcp(id); await guard(context, { action: 'mcp.inspect', id }); const previous = entry.history?.[0]; if (!previous) fail('NO_ROLLBACK', '没有可回退的插件版本。'); await verifyPinned(previous); return clone(previous); },
+    async inspectSkillRollback(id, context) { const entry = getSkill(id); await guard(context, { action: 'skill.inspect', id }); const previous = entry.history?.[0]; if (!previous) fail('NO_ROLLBACK', '没有可回退的技能版本。'); const inspected = inspectSkillDirectory(path.resolve(skillRoot, previous.directory)); if (inspected.digest !== previous.digest) fail('SKILL_CHANGED', '旧版技能文件已经变化。'); return { version: previous.version, digest: inspected.digest, content: inspected.body }; },
     listMcp() { return Object.values(registry.mcp).map(publicMcp); },
     async installMcp(input, context) { await guard(context, { action: 'mcp.install', id: extensionId(input?.id) }); const config = normalizeConfig(input); if (Object.hasOwn(registry.mcp, config.id)) fail('PLUGIN_EXISTS', '插件已安装，请使用升级。'); if (Object.keys(registry.mcp).length >= 64) fail('REGISTRY_LIMIT', '已安装插件数量达到限制。'); registry.mcp[config.id] = { config, enabled: false, installedAt: new Date().toISOString(), history: [] }; persist(); return publicMcp(registry.mcp[config.id]); },
     async enableMcp(id, context) { const entry = getMcp(id); await guard(context, { action: 'mcp.enable', id }); for (const permission of entry.config.permissions) await guard(context, { action: 'permission.use', id, permission }); entry.enabled = true; persist(); return publicMcp(entry); },
@@ -95,6 +98,28 @@ export async function createExtensionManager({ dataDir, authorize = async () => 
       registry.skills[id] = entry; persist(); return publicSkill(entry);
     },
     listSkills() { return Object.values(registry.skills).map(publicSkill); },
+    async upgradeSkill(id, directory, options = {}, context) {
+      const previous = getSkill(id); await guard(context, { action: 'skill.upgrade', id });
+      const inspected = inspectSkillDirectory(directory);
+      if (inspected.id !== id) fail('INVALID_SKILL', '更新技能的名称必须保持一致。');
+      if (inspected.diagnostics.some(item => item.severity === 'error')) fail('SKILL_NOT_PORTABLE', '技能有尚未解决的移植问题。');
+      const version = text(options.version ?? inspected.version, '技能版本', 80);
+      if (version === 'unversioned') fail('UNPINNED_VERSION', '请为更新技能填写固定版本。');
+      const destinationName = `${id}-${randomUUID()}`, destination = path.join(skillRoot, destinationName); fs.mkdirSync(destination);
+      copySkillFiles(directory, path.join(destination, id), inspected);
+      const { body, ...metadata } = inspected;
+      registry.skills[id] = { ...metadata, version, source: text(options.source ?? directory, '技能来源', 4096), enabled: false, installedAt: new Date().toISOString(), directory: `${destinationName}/${id}`,
+        history: [{ ...clone(previous), history: undefined }, ...(previous.history ?? [])].slice(0, 3) };
+      persist(); return publicSkill(registry.skills[id]);
+    },
+    async rollbackSkill(id, context) {
+      const current = getSkill(id); await guard(context, { action: 'skill.rollback', id });
+      const previous = current.history?.[0]; if (!previous) fail('NO_ROLLBACK', '没有可回退的技能版本。');
+      const inspected = inspectSkillDirectory(path.resolve(skillRoot, previous.directory));
+      if (inspected.digest !== previous.digest) fail('SKILL_CHANGED', '旧版技能文件已经变化，不能回退。');
+      registry.skills[id] = { ...clone(previous), enabled: false, history: [{ ...clone(current), history: undefined }, ...current.history.slice(1)].slice(0, 3) };
+      persist(); return publicSkill(registry.skills[id]);
+    },
     listBundledSkills() { return fs.readdirSync(BUNDLED_SKILL_DIRECTORY, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => { const { body, ...metadata } = inspectSkillDirectory(path.join(BUNDLED_SKILL_DIRECTORY, entry.name)); return { ...metadata, bundled: true, installed: Object.hasOwn(registry.skills, metadata.id) }; }); },
     async importBundledSkill(id, context) { id = extensionId(id); return manager.importSkill(path.join(BUNDLED_SKILL_DIRECTORY, id), { source: 'xiaozhushou-bundled' }, context); },
     async enableSkill(id, context) { const entry = getSkill(id); await guard(context, { action: 'skill.enable', id }); if (entry.diagnostics.some(item => item.severity === 'error')) fail('SKILL_NOT_PORTABLE', '技能有尚未解决的移植问题，请先修复源文件。'); for (const permission of entry.permissions) await guard(context, { action: 'permission.use', id, permission }); const missing = skillAvailability({ ...entry, enabled: true }, availableCapabilities()).missingCapabilities; if (missing.length) fail('MISSING_CAPABILITIES', '技能缺少可用工具：' + missing.join('、')); entry.enabled = true; persist(); return publicSkill(entry); },

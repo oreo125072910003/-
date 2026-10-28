@@ -133,9 +133,11 @@ export function createMailController({ store, dataDir, secretStore, onChange = (
       notify(); return { imported: prepared.length, accounts: prepared.map(item => publicAccount(item.account, false)) };
     },
 
-    sync({ accountId, limit = 50 } = {}) {
+    sync({ accountId, limit = 50, afterUid, uidValidity: expectedValidity } = {}) {
       usable(); const account = accountById(accountId);
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw Error('每次收信数量须为 1 至 100。');
+      if(afterUid!==undefined&&(!Number.isSafeInteger(afterUid)||afterUid<0||typeof expectedValidity!=='string'||!/^\d+$/.test(expectedValidity)))throw Error('增量收信游标无效。');
+      if(afterUid!==undefined&&active.has(`sync:${account.id}`))return active.get(`sync:${account.id}`).catch(()=>{}).then(()=>api.sync({accountId,limit,afterUid,uidValidity:expectedValidity}));
       return track(`sync:${account.id}`, async () => {
         const secret = await credentials(account), auth = runtimeAuth(account, secret, 'imap');
         if (closing) throw Error('邮件插件正在关闭。');
@@ -151,8 +153,10 @@ export function createMailController({ store, dataDir, secretStore, onChange = (
             const exists = Number(client.mailbox?.exists ?? 0), uidValidity = String(client.mailbox?.uidValidity ?? '');
             if (!Number.isSafeInteger(exists) || exists < 0 || !/^\d+$/.test(uidValidity)) throw Error('MAIL_INVALID_MAILBOX');
             const rows = [];
-            if (exists) for await (const row of client.fetch(`${Math.max(1, exists - limit + 1)}:${exists}`, { uid: true, size: true, flags: true, envelope: true, internalDate: true })) {
-              if (rows.length >= limit) throw Error('MAIL_INVALID_BATCH');
+            const incremental=afterUid!==undefined&&expectedValidity===uidValidity;
+            if (exists) for await (const row of client.fetch(incremental?`${afterUid+1}:*`:`${Math.max(1, exists - limit + 1)}:${exists}`, { uid: true, size: true, flags: true, envelope: true, internalDate: true },incremental?{uid:true}:undefined)) {
+              if(incremental&&row.uid<=afterUid)continue;
+              if (rows.length >= limit) break;
               rows.push(row);
             }
             const messages = []; let sourceBytes = 0;
@@ -185,7 +189,7 @@ export function createMailController({ store, dataDir, secretStore, onChange = (
             if (closing || cancelled.has(client)) throw Error('MAIL_CLOSED');
             const updated = { ...account, lastSyncAt: stamp(), uidValidity, status: 'ready', error: '' };
             store.commitMailSync(updated, messages);
-            return { accountId: account.id, received: messages.length, pagination: 'latest-only', limit, readOnly: true, messages };
+            return { accountId: account.id, received: messages.length, pagination: incremental?'uid-incremental':'latest-only', uidValidity, limit, readOnly: true, messages };
           })(), client);
           notify(); return result;
         } catch (error) {

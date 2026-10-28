@@ -4,10 +4,10 @@ const methods = ['getBootstrap','listTasks','getTask','getTaskReplyText','create
   'pickAttachments','openArtifact','openWorkspace','openContract',
   'getWechatState','importWechatConnection','saveWechatSettings','connectWechat','disconnectWechat','draftWechatReply','sendWechatReply','searchWechatContacts','refreshWechatProfile',
   'getWechatSessions','getWechatHistory','resolveWechatImage','getWechatStickers','sendWechatMessage','sendWechatSticker','pickWechatAttachments','sendWechatAttachment','importLegacyExtensions','refreshDshCatalog',
-  'getMailState','importMailAccounts','importMailAccountsFile','syncMail','getMailMessage','createMailDraft','sendMailDraft','resolveMailAttachment','saveMailAttachment','draftMailReply',
+  'getMailState','saveMailNotifications','importMailAccounts','importMailAccountsFile','syncMail','getMailMessage','createMailDraft','sendMailDraft','resolveMailAttachment','saveMailAttachment','draftMailReply',
   'getDshAccessState','refreshDshAccessCatalog','saveDshOwnerGrants','setDesktopComputerAccess','restoreProductFeatures',
   'getWechatDshAccess','saveWechatDshGrants','importWechatDshGrants','saveWechatComputerAccess',
-  'getExtensionsState','importMcpManifest','installBuiltinMcp','enableMcp','disableMcp','testMcp','setMcpTools',
+  'getExtensionsState','configureSelfImprovement','proposeSelfImprovement','importMcpManifest','installBuiltinMcp','enableMcp','disableMcp','testMcp','setMcpTools',
   'importSkill','importBundledSkill','enableSkill','disableSkill'];
 const api = Object.fromEntries(methods.map(name => [name,(...args) => ipcRenderer.invoke(`assistant:${name}`,...args)]));
 api.onChange = callback => {

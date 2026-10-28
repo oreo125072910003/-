@@ -108,7 +108,7 @@ export function createWechatDshAccess({store,dshAccess,legacySources=[],getWecha
     const identity=await verified(),catalog=await dshAccess.getCatalog();
     if(!catalog.ok)throw fail('DSH 功能目录尚未就绪。');
     const available=new Set(catalog.tools.map(tool=>tool.name)),value=registry(),current=config();
-    const basic=PRODUCT_TOOLS.filter(tool=>!tool.computer&&tool.name!=='xiaozhushou_mail'&&available.has(tool.name)).map(tool=>tool.name);
+    const basic=PRODUCT_TOOLS.filter(tool=>!tool.computer&&!tool.ownerOnly&&tool.name!=='xiaozhushou_mail'&&available.has(tool.name)).map(tool=>tool.name);
     let restored=0,computerChats=0;
     for(const [kind,target]of [...(current.allowedPrivate??[]).map(target=>['private',target]),...(current.allowedGroups??[]).map(target=>['group',target])]){
       const entry=`${identity.accountId}:${key(kind,target)}`,previous=value.chats[entry]??{grants:EMPTY()},selected=savedFor(identity.accountId,kind,target);

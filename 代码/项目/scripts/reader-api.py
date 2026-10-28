@@ -67,6 +67,12 @@ def read_json(file):
     return json.loads(pathlib.Path(file).read_text(encoding='utf-8-sig'))
 
 
+def current_image_cache(cached, local_type):
+    # Old 1280px previews must not survive the readability fix. A thumbnail is
+    # retried on later reads because WeChat may have downloaded the full copy.
+    return local_type == 47 or (cached.get('normalizationVersion') == 'readable-v3' and cached.get('sourceVariant') == 'full')
+
+
 def image_worker_failure(stderr):
     code, details = 'IMAGE_RESOLUTION_FAILED', []
     try:
@@ -615,7 +621,9 @@ class Reader:
             raise PermissionError('Image is unavailable or not authorized')
         cache = self.image_dir / (image_id + '.json')
         if cache.is_file():
-            return read_json(cache)
+            cached = read_json(cache)
+            if current_image_cache(cached, descriptor.get('localType')):
+                return cached
         def run():
             try:
                 if time.monotonic() >= deadline:
@@ -1067,6 +1075,7 @@ def serve(reader, port, token):
                         'lastError': reader.last_error, 'subscribers': len(reader.clients), 'pushed': reader.pushed,
                         'ownWxid': reader.own_wxid, 'accountDirectory': reader.account.name,
                         'imagesRegistered': len(reader.image_index), 'lastImageError': reader.image_error,
+                        'imageNormalization': 'readable-v3',
                         'productSubscriptionVersion': 1, 'selfEvents': 'account-conversation-v1',
                         'groupIdentity': 'account-chatroom-v1', 'lastGroupMetadataError': getattr(reader, 'group_metadata_error', '')})
                 elif url.path == '/api/v1/product/subscription':

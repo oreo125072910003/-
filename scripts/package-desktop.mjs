@@ -7,6 +7,7 @@ import { deflateSync } from 'node:zlib';
 import { spawnSync } from 'node:child_process';
 import { packager } from '@electron/packager';
 import { inspectRuntime } from '../packages/runtime-harness/index.mjs';
+import { buildDesktopHelper } from '../packages/desktop-control/build.mjs';
 
 const root=fileURLToPath(new URL('../',import.meta.url));
 const metadata=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
@@ -41,10 +42,15 @@ function createIcon(filename){
 }
 try{
   if(process.platform!=='win32')throw Error('当前发布脚本针对 Windows，请在 Windows 构建。');
+  const targetDirectory=path.join(releaseRoot,'小助手-win32-x64');
+  const processCheck=spawnSync(path.join(process.env.SystemRoot||'C:/Windows','System32/WindowsPowerShell/v1.0/powershell.exe'),['-NoProfile','-NonInteractive','-Command',"@(Get-Process -Name '小助手' -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($env:XIAOZHUSHOU_PACKAGE_TARGET,[StringComparison]::OrdinalIgnoreCase) }).Count"],{encoding:'utf8',windowsHide:true,env:{...process.env,XIAOZHUSHOU_PACKAGE_TARGET:targetDirectory+path.sep}});
+  if(processCheck.status!==0||!/^\d+$/.test(processCheck.stdout.trim()))throw Error('无法核对发布目录是否仍在运行，未覆盖安装包。');
+  if(Number(processCheck.stdout.trim())>0)throw Error('目标版本仍在运行，请先正常退出小助手，再重新打包。');
+  buildDesktopHelper();
   const ps=process.env.WINDIR?path.join(process.env.WINDIR,'System32','WindowsPowerShell','v1.0','powershell.exe'):'powershell.exe';
   const built=spawnSync(ps,['-NoProfile','-ExecutionPolicy','Bypass','-File',path.join(root,'代码','合同助手','mcp','build.ps1'),'-OutputFolder','out/desktop-release'],{cwd:root,encoding:'utf8',windowsHide:true});
   if(built.status!==0)throw Error('合同程序构建失败：'+(built.stderr||built.stdout).slice(-3000));
-  for(const relative of ['apps/desktop','apps/service','packages/contracts','packages/storage','packages/runtime-harness','packages/wechat-bridge','packages/extensions','packages/workers','packages/documents','packages/mail-plugin','packages/harness-host-plugin',
+  for(const relative of ['apps/desktop','apps/service','packages/contracts','packages/storage','packages/runtime-harness','packages/wechat-bridge','packages/extensions','packages/workers','packages/documents','packages/mail-plugin','packages/harness-host-plugin','packages/desktop-control',
     '代码/项目/package.json','代码/项目/scripts/hook-onebot.mjs','代码/项目/scripts/text-delivery-store.mjs','代码/项目/scripts/wechat-account-check.mjs','代码/项目/scripts/reader-account-state.mjs',
     '代码/项目/components/qq-bridge/src/core/wechat-events.js','代码/项目/components/qq-bridge/src/core/sticker-policy.js','代码/项目/components/qq-bridge/src/core/proactive-policy.js',
     '代码/项目/components/qq-bridge/src/onebot/normalize.js','代码/项目/public/console/conversation-settings.mjs','代码/项目/packages/dsh-social-bridge-plugin/conversation-policy.mjs','代码/项目/packages/extension-runtime/catalog.mjs'])copy(relative);
@@ -70,7 +76,7 @@ try{
   const expected=path.join(releaseRoot,'小助手-win32-x64');
   if(!inside(releaseRoot,expected)||path.basename(expected)!=='小助手-win32-x64')throw Error('Unexpected package overwrite target');
   const output=await packager({dir:stage,out:releaseRoot,name:'小助手',platform:'win32',arch:'x64',electronVersion:metadata.devDependencies.electron,
-    appVersion:metadata.version,buildVersion:metadata.version,appBundleId:'local.xiaozhushou.desktop',asar:{unpack:'**/*.{node,ps1,py}'},prune:false,overwrite:true,
+    appVersion:metadata.version,buildVersion:metadata.version,appBundleId:'local.xiaozhushou.desktop',asar:{unpack:'**/*.{node,ps1,py,exe}'},prune:false,overwrite:true,
     icon,electronZipDir:verifiedElectronCache(),extraResource:[embeddedContract],ignore:[/contract-resource/,/assistant\.ico$/],
     win32metadata:{CompanyName:'小助手项目',FileDescription:'小助手个人桌面助理',ProductName:'小助手'},
   });

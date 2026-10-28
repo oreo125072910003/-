@@ -1,13 +1,52 @@
 {
   "name": "xiaozhushou-harness-host",
-  "version": "1.1.0",
+  "version": "1.1.3",
   "description": "小助手：在 DSH 内管理专用微信、持续会话、任务、邮箱与技能",
   "type": "module",
   "main": "plugin.mjs",
-  "exports": { ".": "./plugin.mjs", "./client": "./client.js", "./package.json": "./package.json", "./icon": "./icon.svg" },
+  "exports": {
+    ".": "./plugin.mjs",
+    "./client": "./client.js",
+    "./conversation-compaction.mjs": "./payload/packages/harness-host-plugin/conversation-compaction.mjs",
+    "./package.json": "./package.json",
+    "./icon": "./icon.svg"
+  },
   "icon": "icon.svg",
-  "files": ["*.mjs", "*.js", "*.css", "*.ps1", "*.yml", "*.svg", "README.md", "payload", "contract-resource", "companions"],
-  "peerDependencies": { "@deepseek-ai/dsh": ">=0.2.1-rc.3 <0.3.0", "@deepseek-ai/dsh-llm": ">=0.2.1-rc.3 <0.3.0" },
-  "peerDependenciesMeta": { "@deepseek-ai/dsh": { "optional": true }, "@deepseek-ai/dsh-llm": { "optional": true } },
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" }, "client": { "platform": "web", "inject": [] } }
+  "files": [
+    "*.mjs",
+    "*.js",
+    "*.css",
+    "*.ps1",
+    "*.yml",
+    "*.svg",
+    "README.md",
+    "payload",
+    "contract-resource",
+    "companions"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-compaction-basic": ">=0.2.1-rc.3 <0.3.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-compaction-basic": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  }
 }

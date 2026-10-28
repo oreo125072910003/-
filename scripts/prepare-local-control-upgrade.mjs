@@ -1,0 +1,15 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {prepareHostedPluginInstall} from '../packages/harness-host-plugin/prepare-install.mjs';
+const root=fileURLToPath(new URL('../',import.meta.url));
+const {dataHome}=JSON.parse(fs.readFileSync(path.join(root,'config/desktop-install.local.json'),'utf8'));
+const data=fs.realpathSync(dataHome),clientFile=path.join(data,'harness-host/client.json'),client=JSON.parse(fs.readFileSync(clientFile,'utf8'));
+if(!/^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}$/.test(client.endpoint))throw Error('Unexpected local endpoint');
+const token=fs.readFileSync(client.tokenFile,'utf8').trim(),health=await(await fetch(client.endpoint+'/health',{headers:{authorization:'Bearer '+token},signal:AbortSignal.timeout(10000)})).json();
+if(health.protocol!=='xiaozhushou-harness-host-v1'||health.activeTasks!==0)throw Error('DSH 正在处理任务，未更新连接组件。');
+const install=fs.realpathSync(client.installDirectory),relative=path.relative(data,install);
+if(relative.startsWith('..')||path.isAbsolute(relative)||!fs.existsSync(path.join(install,'.xiaozhushou-host-plugin')))throw Error('Not a product-owned installation');
+const backup=path.join(data,'host-plugin-backups','desktop-control-'+Date.now());fs.mkdirSync(backup,{recursive:true});fs.cpSync(install,path.join(backup,'plugin'),{recursive:true});fs.copyFileSync(clientFile,path.join(backup,'client.json'));
+const updated=await prepareHostedPluginInstall({productDataRoot:data,workspacesRoot:health.workspacesRoot,installDirectory:install,port:Number(new URL(client.endpoint).port),provider:health.provider,model:health.model});
+console.log(JSON.stringify({prepared:true,revision:updated.revision,installDirectory:install,backup}));

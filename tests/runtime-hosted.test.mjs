@@ -75,6 +75,34 @@ test('host health and protocol probe reuse host login without model request', as
   assert.equal((await probeHostedRuntimeConnection(f.settings)).modelCalled, false);
   assert.equal(f.calls.length, 0);
 });
+test('health reports bounded product preset activation failures without submitting a request', async t => {
+  const f = await fixture(t);
+  f.ctx.agentPresets.list = async () => [
+    { id: 'unrelated', broken: 'unrelated diagnostic' },
+    { id: 'xiaozhushou-desktop-text-v1', broken: 'native preset failed '.repeat(200) },
+  ];
+  const health = await f.raw('/health');
+  assert.equal(health.status, 200);
+  assert.equal(health.body.presetProblem.length, 2000);
+  assert.match(health.body.presetProblem, /^native preset failed /);
+  assert.equal(f.calls.length, 0);
+});
+
+test('native setup failures retain local stage diagnostics while redacting task text and credentials', async t => {
+  const f = await fixture(t), prompt = 'private synthetic message', persona = 'private synthetic persona';
+  const secret = 'sk-' + 'x'.repeat(30);
+  f.ctx.agentPresets.mount = async () => { throw new Error(`native preset rejected ${prompt} ${persona} Bearer ${f.token} api_key=${secret}`); };
+  const result = await runHostedTask({ prompt, workspace: f.workspace, settings: { ...f.settings, personaPrefix: persona } });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, 'HOST_SESSION_FAILED');
+  const diagnostic = await readFile(path.join(f.root, 'harness-host/diagnostics', result.runtime.taskId + '.json'), 'utf8');
+  const saved = JSON.parse(diagnostic);
+  assert.equal(saved.stage, 'preset-mount');
+  assert.match(saved.diagnostic, /native preset rejected/);
+  for (const privateText of [prompt, persona, f.token, secret]) assert.equal(diagnostic.includes(privateText), false);
+  assert.equal(f.calls.some(call => call.type === 'prompt'), false);
+});
+
 test('desktop computer request stops before submission when the live host needs a reload', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'xzs-old-host-'));
   const tokenFile=path.join(root,'token.txt');await writeFile(tokenFile,'synthetic-test-token-with-40-characters-123456');
@@ -369,6 +397,13 @@ test('preparing plugin creates only product artifacts and preserves its token on
   assert.equal(manifest.dependencies?.['@deepseek-ai/dsh-llm'], undefined);
   assert.equal(manifest.peerDependenciesMeta['@deepseek-ai/dsh-llm'].optional, true);
   assert.equal(patch[0].insert[1].config.id, 'xiaozhushou-desktop-text-v1');
+  const contextGroup = patch[0].insert[1].config.plugins.find(row => row.id === 'conversation-context');
+  assert.equal(contextGroup.isolate.compaction, true);
+  const engine = contextGroup.config[0];
+  assert.equal(engine.config.auto, false);
+  assert.equal(engine.name, 'xiaozhushou-harness-host/conversation-compaction-' + first.revision + '.mjs');
+  assert.equal(manifest.exports['./conversation-compaction-*.mjs'], './conversation-compaction-*.mjs');
+  assert.match(await readFile(path.join(installDirectory, engine.name.split('/')[1]), 'utf8'), /export \{ BasicCompactionEngine as default \} from '@deepseek-ai\/dsh-compaction-basic'/);
   for(const [filename,dependency]of [['index.mjs','server.mjs'],['server.mjs','text-policy.mjs'],['server.mjs','owner-access.mjs'],['server.mjs','contract-model-failure.mjs']]){
     const physicalName = dependency.slice(0, -4) + '-' + first.revision + '.mjs';
     assert((await readFile(path.join(installDirectory,filename),'utf8')).includes('./'+physicalName),'live reload must use unique physical module paths');

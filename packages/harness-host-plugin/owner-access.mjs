@@ -29,7 +29,7 @@ export function normalizeOwnerGrants(body) {
 }
 
 /** Grants are trusted product settings, never extracted from the model prompt or incoming messages. */
-export async function bindOwnerAccess(agentCtx, hostCtx, agent, { grants, active, signal, personaPrefix, executionPolicy, productConnection }) {
+export async function bindOwnerAccess(agentCtx, hostCtx, agent, { grants, active, signal, personaPrefix, executionPolicy, productConnection, prepareImages }) {
   const toolAllowed=name=>grantableTool(name)||(executionPolicy==='trusted-computer-task-v1'||executionPolicy==='trusted-desktop-computer-task-v1'&&name.startsWith('xiaozhushou_'))&&computerGrantableTool(name);
   const tools = hostCtx.get?.('tools') ?? hostCtx.tools, skills = hostCtx.get?.('skills');
   const schemas = tools?.schemas?.(agent) ?? [];
@@ -79,7 +79,7 @@ export async function bindOwnerAccess(agentCtx, hostCtx, agent, { grants, active
   }
   const selected = new Set(grants.skills);
   let disposeProduct;
-  try { disposeProduct = registerProductTools(agentCtx, { names: grants.tools, connection: productConnection, policy, signal }); }
+  try { disposeProduct = registerProductTools(agentCtx, { names: grants.tools, connection: productConnection, policy, signal, prepareImages }); }
   catch (error) { ended=true; dispose?.(); disposePersona?.(); if(agentCtx[OWNER_ACCESS]===policy)delete agentCtx[OWNER_ACCESS]; throw error; }
   const instructions = names.size ? '本轮主人明确授权的原 Harness 能力：\n' +
     (grants.tools.length ? '工具：' + grants.tools.join('、') + '\n' : '') +

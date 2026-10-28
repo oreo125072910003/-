@@ -556,10 +556,50 @@ test('WeChat image previews require matching conversation binding and verified c
   f.backend.image = { imageId, conversationKey: 'wechat:private:101', mime: 'image/png', b64: bytes.toString('base64'), sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
   await f.bridge.start(f.config); await until(() => f.bridge.getStatus().state === 'ready');
   assert.equal((await f.bridge.resolveImage({ kind: 'private', target: '101', id: imageId })).bytes, bytes.length);
+  Object.assign(f.backend.image, { width: 868, height: 4827, sourceWidth: 1080, sourceHeight: 6000, sourceVariant: 'full', ignoredText: 'must not reach prompt' });
+  const readable = await f.bridge.resolveImage({ kind: 'private', target: '101', id: imageId });
+  assert.deepEqual(readable.quality, { width: 868, height: 4827, sourceWidth: 1080, sourceHeight: 6000, sourceVariant: 'full' });
+  assert.equal(Object.hasOwn(readable, 'ignoredText'), false);
+  const detailBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
+  f.backend.image.details = [{ mime: 'image/png', b64: detailBytes.toString('base64'), bytes: detailBytes.length, sha256: crypto.createHash('sha256').update(detailBytes).digest('hex'), region: [0, 0, 1080, 2100] }];
+  const detailed = await f.bridge.resolveImage({ kind: 'private', target: '101', id: imageId });
+  assert.equal(detailed.detailImages.length, 1); assert.equal(detailed.detailImages[0].bytes, detailBytes.length);
+  f.backend.image.details[0].region = [0, 0, 1081, 2100];
+  const damaged = await f.bridge.resolveImage({ kind: 'private', target: '101', id: imageId });
+  assert.equal(damaged.id, imageId); assert.equal(damaged.detailIssue, true); assert.equal(damaged.detailImages, undefined);
+  delete f.backend.image.details;
+  f.backend.image.width = 'untrusted dimension';
+  assert.equal(Object.hasOwn(await f.bridge.resolveImage({ kind: 'private', target: '101', id: imageId }), 'quality'), false);
   f.backend.image.conversationKey = 'wechat:group:202';
   await assert.rejects(f.bridge.resolveImage({ kind: 'private', target: '101', id: imageId }), { code: 'IMAGE_CONVERSATION_MISMATCH' });
   f.backend.image.conversationKey = 'wechat:private:101'; f.backend.image.sha256 = '0'.repeat(64);
   await assert.rejects(f.bridge.resolveImage({ kind: 'private', target: '101', id: imageId }), { code: 'IMAGE_INTEGRITY_FAILED' });
+});
+
+test('WeChat isolates optional crop corruption and still verifies later crops against the same message', async t => {
+  const f = await fixture(t), imageId = 'a'.repeat(64);
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
+  const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+  const detail = { mime: 'image/png', b64: bytes.toString('base64'), bytes: bytes.length, sha256, region: [0, 1900, 1080, 4100] };
+  f.backend.image = { ...detail, imageId, conversationKey: 'wechat:private:101', width: 868, height: 4827, sourceWidth: 1080, sourceHeight: 6000, sourceVariant: 'full' };
+  await f.bridge.start(f.config); await until(() => f.bridge.getStatus().state === 'ready');
+  const resolve = () => f.bridge.resolveImage({ kind: 'private', target: '101', id: imageId });
+  for (const bad of [null, { ...detail, region: [0, 0, 1081, 2100] }, { ...detail, sha256: '0'.repeat(64) }, { ...detail, bytes: bytes.length + 1 }]) {
+    f.backend.image.details = [bad, { ...detail, untrustedText: 'must not enter task' }];
+    const result = await resolve();
+    assert.equal(result.id, imageId); assert.equal(result.detailIssue, true);
+    assert.equal(result.detailImages.length, 1);
+    assert.equal(result.detailImages[0].id, crypto.createHash('sha256').update(imageId + ':detail:1:' + sha256).digest('hex'));
+    assert.equal(result.detailImages[0].untrustedText, undefined);
+  }
+  for (const malformed of ['not a list', Array(4).fill(detail)]) {
+    f.backend.image.details = malformed;
+    const result = await resolve();
+    assert.equal(result.id, imageId); assert.equal(result.detailIssue, true); assert.equal(result.detailImages, undefined);
+  }
+  f.backend.image.details = [detail]; delete f.backend.image.sourceWidth;
+  const missingQuality = await resolve();
+  assert.equal(missingQuality.detailIssue, true); assert.equal(missingQuality.detailImages, undefined);
 });
 
 test('WeChat sticker listing and sending retain the existing native server receipt and replay rules', async t => {

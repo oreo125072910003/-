@@ -35,6 +35,50 @@ except (ImportError, OSError) as error:
 from wechat_image_normalize import normalize_image
 
 
+def resolve_local_image(attach, ids, keys):
+    # A resource row can list a thumbnail ID before the original ID. Consider
+    # all exact-message copies before choosing, rather than returning the first
+    # decodable file. Never broaden this to unrelated cache files.
+    best = []
+    seen = set()
+    months = sorted(attach.iterdir(), reverse=True) if attach.is_dir() else []
+    for file_id in ids:
+        for month in months:
+            for suffix in ('_h.dat', '.dat', '_t.dat'):
+                file = month / 'Img' / (file_id + suffix)
+                if file in seen or not file.is_file() or file.stat().st_size > media.MAX_EMBED_SIZE:
+                    continue
+                seen.add(file)
+                for xor, aes in keys:
+                    decoded = media.decode_wechat_v2(str(file), xor, aes)
+                    if not decoded:
+                        continue
+                    try:
+                        raw = decoded[0]
+                        if not raw or len(raw) > media.MAX_EMBED_SIZE:
+                            continue
+                        with Image.open(io.BytesIO(raw)) as image:
+                            pixels = image.width * image.height
+                            if pixels > 40_000_000:
+                                continue
+                            # Verify the candidate before allowing a damaged
+                            # larger copy to displace a usable smaller image.
+                            image.verify()
+                        score = (pixels, suffix != '_t.dat')
+                        best.append((score, raw, suffix))
+                        best.sort(key=lambda item: item[0], reverse=True)
+                        del best[3:]
+                        break
+                    except (OSError, ValueError, EOFError, Image.DecompressionBombError):
+                        continue
+    for _, raw, suffix in best:
+        try:
+            return {**normalize_image(raw, include_details=True), 'sourceVariant': 'thumbnail' if suffix == '_t.dat' else 'full'}
+        except (OSError, ValueError, EOFError, RuntimeError, Image.DecompressionBombError):
+            continue
+    raise RuntimeError('IMAGE_LOCAL_COPY_UNAVAILABLE')
+
+
 def resolve(descriptor):
     reader = reader_api.Reader(ROOT, metadata_readonly=True)
     talker = descriptor['talker']
@@ -81,24 +125,7 @@ def resolve(descriptor):
     attach = reader.account / 'msg' / 'attach' / hashlib.md5(talker.encode()).hexdigest()
     # Resource IDs bind files to the exact server message. Local IDs alone are
     # deliberately insufficient because they collide between shards/chats.
-    for file_id in ids:
-        candidates = []
-        if attach.is_dir():
-            for month in sorted(attach.iterdir(), reverse=True):
-                image_dir = month / 'Img'
-                for suffix in ('.dat', '_h.dat', '_t.dat'):
-                    file = image_dir / (file_id + suffix)
-                    if file.is_file() and file.stat().st_size <= media.MAX_EMBED_SIZE:
-                        candidates.append(file)
-        for file in candidates:
-            for xor, aes in keys:
-                decoded = media.decode_wechat_v2(str(file), xor, aes)
-                if decoded:
-                    try:
-                        return normalize_image(decoded[0])
-                    except Exception:
-                        continue
-    raise RuntimeError('IMAGE_LOCAL_COPY_UNAVAILABLE')
+    return resolve_local_image(attach, ids, keys)
 
 
 def image_error_code(error):

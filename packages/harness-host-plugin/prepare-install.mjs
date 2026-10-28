@@ -37,7 +37,7 @@ export async function prepareHostedPluginInstall({ productDataRoot, workspacesRo
   const markerFile = path.join(destination, '.xiaozhushou-host-plugin');
   if (await exists(path.join(destination, 'package.json')) && !await exists(markerFile)) throw new Error('HOST_INSTALL_DIRECTORY_NOT_OWNED');
   await writeFile(markerFile, 'xiaozhushou-harness-host-v1\n', { mode: 0o600 });
-  const contents = await Promise.all(['package.json', 'index.mjs', 'server.mjs', 'image-input.mjs', 'text-policy.mjs', 'owner-access.mjs', 'product-access.mjs', 'locale/zh.json', 'locale/en.json', 'icon.svg'].map(async name => [name, await readFile(path.join(sourceDir, name), 'utf8')]));
+  const contents = await Promise.all(['package.json', 'index.mjs', 'server.mjs', 'context-policy.mjs', 'conversation-compaction.mjs', 'image-input.mjs', 'text-policy.mjs', 'owner-access.mjs', 'product-access.mjs', 'locale/zh.json', 'locale/en.json', 'icon.svg'].map(async name => [name, await readFile(path.join(sourceDir, name), 'utf8')]));
   contents.push(['contract-image-input.mjs', await readFile(path.join(sourceDir, '../contracts/image-input.mjs'), 'utf8')]);
   contents.push(['contract-tool-policy.mjs',await readFile(path.join(sourceDir,'../contracts/tool-policy.mjs'),'utf8')]);
   contents.push(['contract-model-failure.mjs',await readFile(path.join(sourceDir,'../contracts/model-failure.mjs'),'utf8')]);
@@ -62,10 +62,14 @@ export async function prepareHostedPluginInstall({ productDataRoot, workspacesRo
   // A distinct entry filename preserves reloads without escaping the package.
   const moduleUri = name => './' + (name === 'index.mjs' ? 'entry-' + revision + '.mjs' : name);
   const bridgeConfig = { productDataRoot: dataRoot, workspacesRoot: workspaces, tokenFile, port, provider, model, agentPreset: 'xiaozhushou-desktop-text-v1',revision,pluginVersion:JSON.parse(contents.find(([name])=>name==='package.json')[1]).version };
-  const patch = '- insert:\n' +
+  let patch = '- insert:\n' +
     '    - id: xiaozhushou-harness-host\n      name: ' + JSON.stringify(moduleUri('index.mjs')) + '\n      config: ' + JSON.stringify(bridgeConfig) + '\n' +
     '    - id: preset-xiaozhushou-desktop-text\n      name: "@deepseek-ai/dsh-agent-preset"\n      config:\n        id: xiaozhushou-desktop-text-v1\n        name: 小助手\n        description: 小助手独立产品会话，复用现有 Harness 登录\n        order: 21\n        plugins:\n' +
     '          - id: persona\n            name: "@deepseek-ai/dsh-persona"\n            config:\n              prefix: ' + JSON.stringify('你是小助手，是主人电脑上持续陪伴的个人助手。用自然清楚的中文交流。身份、任务和成果属于小助手；准确区分计划、执行与验证。只使用本轮主人明确授权且可见的能力；没有真实执行证据时，不能声称已操作微信、邮箱或本机文件。') + '\n              suffix: ""\n              includeRuntimeContext: false\n';
+  // Native Web presets isolate compaction services from the host plane.
+  // Include the native engine in this product preset; our scoped policy owns
+  // its earlier threshold without changing the global DSH configuration.
+  patch += '          - id: conversation-context\n            name: cordis:group\n            group: true\n            isolate:\n              compaction: true\n            config:\n              - id: conversation-compaction\n                name: "xiaozhushou-harness-host/conversation-compaction-' + revision + '.mjs"\n                config:\n                  auto: false\n                  maxTokens: 12000\n';
   await writeFile(path.join(destination, 'cordis.patch.yml'), patch);
   const endpoint = 'http://127.0.0.1:' + port, configFile = path.join(tokenDir, 'client.json');
   await writeFile(configFile, JSON.stringify({ schemaVersion: 1, endpoint, tokenFile, installDirectory: destination, revision }, null, 2) + '\n', { mode: 0o600 });

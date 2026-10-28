@@ -1,6 +1,6 @@
 {
   "name": "xiaozhushou-harness-host",
-  "version": "1.0.0",
+  "version": "1.0.5",
   "description": "小助手独立桌面会话，复用已登录 Harness 的模型、Skill 和已授权插件工具",
   "private": true,
   "type": "module",
@@ -8,6 +8,8 @@
   "exports": {
     ".": "./index.mjs",
     "./text-policy.mjs": "./text-policy.mjs",
+    "./conversation-compaction.mjs": "./conversation-compaction.mjs",
+    "./conversation-compaction-*.mjs": "./conversation-compaction-*.mjs",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
@@ -16,6 +18,8 @@
     "entry-*.mjs",
     "*-*.mjs",
     "server.mjs",
+    "context-policy.mjs",
+    "conversation-compaction.mjs",
     "image-input.mjs",
     "contract-image-input.mjs",
     "contract-tool-policy.mjs",
@@ -30,13 +34,17 @@
   ],
   "peerDependencies": {
     "@deepseek-ai/dsh": ">=0.2.1-rc.3 <0.3.0",
-    "@deepseek-ai/dsh-llm": ">=0.2.1-rc.3 <0.3.0"
+    "@deepseek-ai/dsh-llm": ">=0.2.1-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-compaction-basic": ">=0.2.1-rc.3 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh": {
       "optional": true
     },
     "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-compaction-basic": {
       "optional": true
     }
   },

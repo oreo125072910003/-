@@ -5,10 +5,11 @@ import path from 'node:path';
 import { TEXT_POLICY, apply as installTextPolicy } from './text-policy.mjs';
 import { bindOwnerAccess, normalizeOwnerGrants, describeTool } from './owner-access.mjs';
 import { validateTaskImages } from '../contracts/image-input.mjs';
-import { prepareNativeImageBlocks, supportsNativeImages, nativeImageTarget, offloadNativeImages } from './image-input.mjs';
+import { prepareNativeImageBlocks, supportsNativeImages, nativeImageTarget, nativeToolImageTarget, offloadNativeImages } from './image-input.mjs';
 import { PRODUCT_TOOLS } from '../contracts/product-tools.mjs';
 import { validateProductConnection } from './product-access.mjs';
 import { knownModelFailure } from '../contracts/model-failure.mjs';
+import { bindConversationContext, CONTEXT_POLICY, conversationContextOwner } from './context-policy.mjs';
 
 export const HOST_PROTOCOL = 'xiaozhushou-harness-host-v1';
 const SESSION = /^xzs-[a-f0-9]{32}$/;
@@ -65,6 +66,7 @@ function addUsage(total, value) {
 function visible(task) {
   return { taskId: task.id, sessionId: task.sessionId, status: task.status, nativeTerminal: task.nativeTerminal,
     ...(task.groupId ? { groupId: task.groupId } : {}),
+    ...(task.contextMaintenance ? { contextMaintenance: task.contextMaintenance } : {}),
     ...(task.result ? { result: task.result } : {}),
     cancellation: { requested: Boolean(task.cancelReason), confirmed: task.nativeTerminal && Boolean(task.cancelReason) },
     createdAt: task.createdAt, updatedAt: task.updatedAt };
@@ -112,6 +114,7 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     sessions = saved.sessions;
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const tasks = new Map(), active = new Map(), handles = new Map(), finalizations = new Set();
+  const contextPolicies = new Map();
   let modelVerified = false, lastModelError = null, closed = false, stateQueue = Promise.resolve();
   const persist = () => {
     const snapshot = JSON.stringify({ version: 1, sessions });
@@ -232,7 +235,11 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
     if (typeof event?.type === 'string' && event.type.startsWith('tool/')) {
       if (event.data?.turn !== undefined && task.turnId !== undefined && event.data.turn !== task.turnId) return;
       if (event.type === 'tool/call' && task.access?.policy.allows(event.data?.name)) { task.toolCallIds.add(event.data.callId); return; }
-      if (event.type === 'tool/result' && task.toolCallIds.has(event.data?.message?.source?.callId)) return;
+      if (event.type === 'tool/result' && task.toolCallIds.has(event.data?.message?.source?.callId)) {
+        try{const target=nativeToolImageTarget(event);if(target){task.imageCount+=target.imageIndexes.length;task.imageTargets.set(target.seq,target);}}
+        catch{task.imageTrackingError=true;requestCancel(task,'IMAGE_SESSION_EVENT_INVALID');}
+        return;
+      }
       task.failureCode = 'TOOL_POLICY_VIOLATION'; requestCancel(task, task.failureCode); return;
     }
     if (task.turnId === undefined || event?.data?.turn !== task.turnId) return;
@@ -303,16 +310,20 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
   }
   async function start(task, body, workspace, sid, resumed, conversation, images) {
     try {
+      task.setupStage = 'images';
       const imageBlocks = await prepareNativeImageBlocks(ctx, images, provider, model, { signal: task.controller.signal, timeoutMs: imagePrepareTimeoutMs });
       task.controller.signal.throwIfAborted();
+      task.setupStage = 'conversation-group';
       const group = await nativeGroup(workspace, conversation, task.controller.signal);
       const setup = async agentCtx => {
+        task.setupStage = 'preset-mount';
         const mounted = await ctx.agentPresets.mount(agentCtx, preset);
         if (mounted?.id !== preset) throw fault('SAFE_PRESET_UNAVAILABLE', '小助手独立文本安全预设尚未正确挂载。');
         // Preset plugins run in their own Cordis contexts. Install the final execution guard
         // directly on this unpublished Agent, rather than assuming JS property inheritance.
         installTextPolicy(agentCtx);
       };
+      task.setupStage = resumed ? 'agent-resume' : 'agent-create';
       let agent = ctx.agents.get(sid);
       if (!agent) {
         const handle = resumed
@@ -333,10 +344,18 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
       }
       if (agent.ctx?.[TEXT_POLICY] !== true) throw fault('SAFE_PRESET_UNAVAILABLE', '小助手会话没有经过独立文本权限检查。');
       task.agent = agent;
+      task.setupStage = 'context-policy';
+      if (conversation?.channel === 'wechat' && !contextPolicies.has(agent.ctx)) {
+        const dispose = bindConversationContext(agent.ctx, ctx, {
+          onMaintenance: value => { const current = active.get(sid); if (current) current.contextMaintenance = value; } });
+        if (typeof dispose === 'function') contextPolicies.set(agent.ctx, dispose);
+      }
       if (task.nativeTerminal) { if (closed) { await handles.get(sid)?.dispose?.(); handles.delete(sid); } return; }
+      task.setupStage = 'conversation-classify';
       await classifySession(task, group, conversation);
       if (task.nativeTerminal) return;
-      task.access = await bindOwnerAccess(agent.ctx, ctx, agent, { grants: task.grants, executionPolicy:body.executionPolicy,productConnection:body.productConnection,personaPrefix: body.personaPrefix, active: () => active.get(sid) === task && !task.nativeTerminal && !task.cancelReason && !task.turnEnded, signal: task.controller.signal });
+      task.setupStage = 'owner-access';
+      task.access = await bindOwnerAccess(agent.ctx, ctx, agent, { grants: task.grants, executionPolicy:body.executionPolicy,productConnection:body.productConnection,personaPrefix: body.personaPrefix, active: () => active.get(sid) === task && !task.nativeTerminal && !task.cancelReason && !task.turnEnded, signal: task.controller.signal,prepareImages:async images=>{sessions[sid]={...sessions[sid],pendingImageTaskId:task.id};await persist();return prepareNativeImageBlocks(ctx,images,provider,model,{signal:task.controller.signal,timeoutMs:imagePrepareTimeoutMs});} });
       if (task.nativeTerminal) { task.access.dispose(); return; }
       if (!resumed || imageBlocks.length || task.groupId && sessions[sid]?.groupId !== task.groupId) {
         task.controller.signal.throwIfAborted();
@@ -348,6 +367,18 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
       task.submitted = true;
       agent.followup(createUserMessage({ content: [{ type: 'text', text: task.access.instructions + body.prompt }, ...imageBlocks], source: { kind: 'xiaozhushou-desktop-host', form: 'direct', taskId: task.id, authority: task.grants.skills.length || task.grants.tools.length ? 'product-owner' : 'text-only' } }));
     } catch (error) {
+      // Local diagnostic only. Never record messages, personas, grants or
+      // credentials; the public error keeps its existing bounded wording.
+      try {
+        const directory = path.join(stateDir, 'diagnostics'); await mkdir(directory, { recursive: true });
+        const physical = await realpath(directory);
+        if (inside(stateDir, physical)) {
+          let diagnostic = String(error?.message || 'Unknown setup failure');
+          for (const secret of [body.prompt, body.personaPrefix, token, body.productConnection?.token]) if (typeof secret === 'string' && secret) diagnostic = diagnostic.replaceAll(secret, '[redacted]');
+          diagnostic = diagnostic.replace(/Bearer\s+[^\s"']+|sk-[A-Za-z0-9_-]{16,}/gi, '[redacted]').replace(/((?:password|token|api[_ -]?key|secret)\s*[=:]\s*)[^\s,;"']+/gi, '$1[redacted]');
+          await writeFile(path.join(physical, task.id + '.json'), JSON.stringify({ taskId: task.id, stage: task.setupStage, code: error?.code || 'HOST_SESSION_FAILED', name: String(error?.name || 'Error').slice(0, 100), diagnostic: diagnostic.slice(0, 2000) }) + '\n', { mode: 0o600 });
+        }
+      } catch { /* Diagnostics cannot replace the original task result. */ }
       if (task.submitted) { task.failureCode = error.code || 'PROMPT_QUEUE_FAILED'; requestCancel(task, task.failureCode); }
       else terminalize(task, 'failed', { ok: false, finalText: '', sessionId: sid, artifacts: [], error: { code: error.code || 'HOST_SESSION_FAILED', message: task.imageCount ? '无法准备图片或建立 Harness 会话，本轮未提交。' : '无法建立小助手 Harness 会话，请检查插件预设和当前 Harness 状态。' } });
     }
@@ -375,8 +406,11 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
       const url = new URL(req.url, 'http://' + expectedHost);
       if (url.search || url.hash) throw fault('INVALID_ROUTE', '请求路径无效。', 404);
       if (req.method === 'GET' && url.pathname === '/health') {
+        const presetState = typeof ctx.agentPresets?.list === 'function' ? (await ctx.agentPresets.list()).find(item => item.id === preset) : undefined;
+        const presetProblem = presetState?.broken ? String(presetState.broken).slice(0, 2000) : undefined;
+        const contextPolicy = typeof ctx.agentPresets?.serviceFor === 'function' || typeof (typeof ctx.get === 'function' ? ctx.get('compaction') : ctx.compaction)?.compactRegion === 'function' ? { ...CONTEXT_POLICY, owner: conversationContextOwner(ctx) } : null;
         const images = await supportsNativeImages(ctx, provider, model, { timeoutMs: Math.min(imagePrepareTimeoutMs, 5000) });
-        reply(200, { ok: true, protocol: HOST_PROTOCOL, project: 'xiaozhushou',pluginVersion:config.pluginVersion??null,revision:config.revision??null, provider, model, preset, productDataRoot: dataRoot, workspacesRoot, modelVerified, lastModelError, credentialsSource: 'harness-existing-login', activeTasks: active.size, toolPolicy: 'product-owner-task-grants-v1', capabilities: { text: true, resume: true, streaming: false, mcp: true, skills: true, ownerTaskGrants: true, workerTextOnly: true, trustedComputerTasks: true, desktopComputerTasks: true, sessionGroups: Boolean(workspaceRegistry()?.resolveByPath && workspaceRegistry()?.create), defaultToolAccess: 'none', images, artifacts: false, cancel: 'native-owned-session' } }); return;
+        reply(200, { ok: true, protocol: HOST_PROTOCOL, project: 'xiaozhushou',pluginVersion:config.pluginVersion??null,revision:config.revision??null, provider, model, preset, contextPolicy, ...(presetProblem ? { presetProblem } : {}), productDataRoot: dataRoot, workspacesRoot, modelVerified, lastModelError, credentialsSource: 'harness-existing-login', activeTasks: active.size, toolPolicy: 'product-owner-task-grants-v1', capabilities: { text: true, resume: true, streaming: false, mcp: true, skills: true, ownerTaskGrants: true, workerTextOnly: true, trustedComputerTasks: true, desktopComputerTasks: true, selfImprovement: true, sessionGroups: Boolean(workspaceRegistry()?.resolveByPath && workspaceRegistry()?.create), defaultToolAccess: 'none', images, artifacts: false, cancel: 'native-owned-session' } }); return;
       }
       if (req.method === 'GET' && url.pathname === '/catalog') { reply(200, await catalog()); return; }
       if (req.method === 'POST' && url.pathname === '/tasks') { reply(202, await submit(await readJson(req, 5 * 1024 * 1024))); return; }
@@ -399,6 +433,8 @@ export async function createHostedBridge(ctx, config = {}, { createUserMessage }
       if (typeof offEvents === 'function') offEvents();
       server.closeAllConnections?.(); await new Promise(resolve => server.close(resolve));
       for (const task of tasks.values()) { clearTimeout(task.timeout); clearTimeout(task.cancelTimer); }
+      for (const dispose of contextPolicies.values()) dispose();
+      contextPolicies.clear();
       for (const handle of handles.values()) { try { await handle?.dispose?.(); } catch {} }
       await stateQueue.catch(() => {});
     },

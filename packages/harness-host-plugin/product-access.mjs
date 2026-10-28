@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { PRODUCT_TOOLS } from '../contracts/product-tools.mjs';
+import { validateTaskImages } from '../contracts/image-input.mjs';
 
 export function validateProductConnection(value) {
   if (value === undefined) return undefined;
@@ -10,7 +11,7 @@ export function validateProductConnection(value) {
   return value;
 }
 
-export function registerProductTools(agentCtx, { names, connection, policy, signal }) {
+export function registerProductTools(agentCtx, { names, connection, policy, signal, prepareImages }) {
   const selected = PRODUCT_TOOLS.filter(tool => names.includes(tool.name));
   if (!selected.length) return () => {};
   validateProductConnection(connection);
@@ -19,7 +20,7 @@ export function registerProductTools(agentCtx, { names, connection, policy, sign
   try {
     for (const tool of selected) disposers.push(agentCtx.tools.register({
       name: tool.name, description: tool.description, parameters: tool.parameters,
-      output: { schema: { type: 'object', properties: { content: { type: 'string' }, isError: { type: 'boolean' } }, required: ['content', 'isError'], additionalProperties: false }, render: (_args, result) => [{ type: 'text', text: result.content }] },
+      output: { schema: { type: 'object', properties: { content: { type: 'string' }, isError: { type: 'boolean' }, imageBlocks:{type:'array',items:{type:'object',properties:{type:{type:'string',enum:['image']},attachment:{type:'object',properties:{attachmentId:{type:'string'},mediaType:{type:'string'},bytes:{type:'integer'},width:{type:'integer'},height:{type:'integer'}},required:['attachmentId','mediaType','bytes','width','height'],additionalProperties:false}},required:['type','attachment'],additionalProperties:false}} }, required: ['content', 'isError'], additionalProperties: false }, render: (_args, result) => [{ type: 'text', text: result.content },...(result.imageBlocks??[])] },
       async execute(args, exec) {
         if (!policy.allows(tool.name)) throw Error('PRODUCT_TOOL_NOT_GRANTED');
         const bounded = AbortSignal.any([signal, AbortSignal.timeout(90000), ...(exec?.signal ? [exec.signal] : [])]);
@@ -34,7 +35,13 @@ export function registerProductTools(agentCtx, { names, connection, policy, sign
         });
         bounded.throwIfAborted();
         if (!policy.allows(tool.name)) throw Error('PRODUCT_TOOL_NOT_GRANTED');
-        return result;
+        const images=validateTaskImages(result.images);const {images:ignored,...visible}=result;
+        if(images.length){
+          if(!prepareImages)throw Error('当前宿主尚未接通截图视觉回传，请更新连接组件。');
+          visible.imageBlocks=(await prepareImages(images)).map(({attachment})=>({type:'image',attachment:Object.fromEntries(['attachmentId','mediaType','bytes','width','height'].map(key=>[key,attachment[key]]))}));bounded.throwIfAborted();
+          if(!policy.allows(tool.name))throw Error('PRODUCT_TOOL_NOT_GRANTED');
+        }
+        return visible;
       },
     }));
   } catch (error) { for (const dispose of disposers.reverse()) dispose?.(); throw error; }

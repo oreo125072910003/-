@@ -128,7 +128,7 @@ function readSelectedFile(root, relative, maximum = 131072) {
   } finally { fs.closeSync(descriptor); }
 }
 
-export function createWechatController({ store, dataDir, secretStore, bridgeFactory, createTask, getTask, readTaskReply, readTaskDeliveries, onDeliveryUpdate, cancelTask, authorizeAttachment, fileReaderSources=[], ensureRuntime, recoveryMs = 5000, autoOptions = {}, onChange = () => {} }) {
+export function createWechatController({ store, dataDir, secretStore, bridgeFactory, createTask, getTask, readTaskReply, readTaskDeliveries, onDeliveryUpdate, cancelTask, authorizeAttachment, fileReaderSources=[], ensureRuntime, recoveryMs = 5000, autoOptions = {}, interceptMessage, onChange = () => {} }) {
   let bridge = null, generation = 0, closing = false, pendingConnect = null, pendingDisconnect = null, closingOperation = null;
   let recoveryEnabled = false, recoveryBlocked = false, connectController;
   let connection = { state: 'offline', detail: '微信尚未连接。请先导入本机现有微信连接。', accountVerified: false, readerConnected: false };
@@ -239,7 +239,13 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
       if (!allowed(message)) return;
       message.inboundKey = hash([accountId, message.kind, conversationId, message.externalId]);
     } catch { return; /* An invalid external event never becomes a desktop command. */ }
-    if (store.addWechatMessage(message).inserted) { onChange();autoReply.enqueue(message); }
+    if (store.addWechatMessage(message).inserted) {
+      onChange();
+      if (!interceptMessage) autoReply.enqueue(message);
+      else void Promise.resolve().then(() => interceptMessage(message)).then(handled => {
+        if (!handled && epoch === generation && !closing) autoReply.enqueue(message);
+      }).catch(() => { /* An approval handler failure must not turn into a model instruction. */ });
+    }
   }
   function stateChanged(state, epoch) {
     if (epoch !== generation || closing) return;
@@ -344,6 +350,7 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
     onChange,
   });
   const api = {
+    getApprovalState() { return { settings: { ...current() }, connection: { ...connection } }; },
     async getState() {
       const config = current(), secret = await credentials();
       const messages = store.listWechatMessages().filter(message=>!config.boundAccountId||message.accountId===config.boundAccountId).map(message => {
@@ -501,7 +508,7 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
       if(result?.id!==id||typeof result.b64!=='string'||result.b64.length>1100000||!['image/png','image/jpeg','image/webp'].includes(result.mime))throw Error('图片内容或格式无效。');
       const bytes=Buffer.from(result.b64,'base64');
       if(!bytes.length||bytes.length>768*1024||bytes.toString('base64')!==result.b64||createHash('sha256').update(bytes).digest('hex')!==result.sha256)throw Error('图片内容摘要不匹配。');
-      return{id,mime:result.mime,b64:result.b64,sha256:result.sha256,bytes:bytes.length};
+      return{id,mime:result.mime,b64:result.b64,sha256:result.sha256,bytes:bytes.length,...(result.quality?{quality:result.quality}:{}),...(result.detailImages?{detailImages:result.detailImages}:{}),...(result.detailIssue===true?{detailIssue:true}:{})};
     },
     async getStickers({kind,target,query=''}={}){
       const {sender,epoch}=readyTarget(kind,target);const term=boundedText(query,'表情搜索',500,{empty:true});
@@ -515,6 +522,11 @@ export function createWechatController({ store, dataDir, secretStore, bridgeFact
       const {config}=readyTarget(kind,target),id=safeId(requestId),content=boundedText(text,'发送内容',16000);
       if(Buffer.byteLength(content,'utf8')>16000)throw Error('回复内容超过微信接口的 16000 字节限制，请缩短后发送。');
       return dispatch({kind,target,text:content,requestId:id,dedupeKey:hash([config.boundAccountId,'manual',kind,target,id])});
+    },
+    async sendNotification({accountId,target,text,requestId,beforeSubmit}={}){
+      const {config}=readyTarget('private',target),id=safeId(requestId),content=boundedText(text,'通知内容',4000);
+      if(config.boundAccountId!==accountId)throw Error('通知绑定的微信账号已变化。');
+      return dispatch({kind:'private',target,text:content,requestId:'auto_notice_'+id,dedupeKey:hash([accountId,'mail-notification',target,id]),automatic:true,sendContext:{beforeSubmit}});
     },
     async sendSticker({kind,target,stickerId,requestId}={}){
       const {config,sender}=readyTarget(kind,target),id=safeId(requestId);

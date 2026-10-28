@@ -144,6 +144,17 @@ test('native scoped tool registration invokes the authenticated product handler 
   access.dispose(); assert.equal(registered.size, 0); await assert.rejects(tool.execute({ name: 'late.txt', text: 'No stale calls' }), /NOT_GRANTED/);
 });
 
+test('a desktop observation crosses the authenticated bridge as native image blocks, not an artifact name',async t=>{
+  const png=renderProductDrawing(svg),sha256=createHash('sha256').update(png).digest('hex');
+  const desktop={async execute(){return {snapshotId:'fixture',title:'Fixture',width:800,height:600,image:png.toString('base64'),mime:'image/png'};},close(){}};
+  const f=await fixture(t,{desktop}),registered=new Map(),context={tools:{register(tool){registered.set(tool.name,tool);return()=>registered.delete(tool.name);}}};
+  const grants={skills:[],tools:['xiaozhushou_desktop']};let observed;
+  const access=await bindOwnerAccess(context,{tools:{schemas:()=>[]}}, {}, {grants,executionPolicy:'trusted-desktop-computer-task-v1',active:()=>true,signal:f.controller.signal,productConnection:f.access.connection,prepareImages:async images=>{observed=images;return [{type:'image',attachment:{attachmentId:'sha256:'+sha256,mediaType:'image/png',bytes:png.length,width:800,height:600}}];}});
+  const tool=registered.get('xiaozhushou_desktop'),result=await tool.execute({action:'observe',windowId:'fixture'});
+  assert.equal(observed[0].sha256,sha256);assert.equal(tool.output.render({},result)[1].type,'image');assert.equal(result.content.includes('base64'),false);
+  access.dispose();await assert.rejects(tool.execute({action:'windows'}),/NOT_GRANTED/);
+});
+
 test('computer tools require private computer scope and product connections are loopback only', () => {
   for (const tool of PRODUCT_TOOLS.filter(tool => tool.computer)) {
     assert.equal(describeTool(tool.name).grantable, false); assert.equal(describeTool(tool.name).computerGrantable, true);

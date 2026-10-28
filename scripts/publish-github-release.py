@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import http.client
 import json
 import os
 from pathlib import Path
@@ -70,29 +69,28 @@ def main() -> None:
         url = urllib.parse.urlsplit(release['upload_url'].split('{')[0] + '?name=' + urllib.parse.quote(asset.name))
         if url.scheme != 'https' or url.hostname != 'uploads.github.com':
             raise RuntimeError('Unexpected GitHub asset upload endpoint.')
-        connection = http.client.HTTPSConnection(url.hostname, timeout=600)
         print(json.dumps({'uploading': asset.name, 'bytes': asset.stat().st_size}, ensure_ascii=False), flush=True)
-        try:
-            connection.putrequest('POST', url.path + '?' + url.query)
-            for key, value in {**headers, 'Content-Type': 'application/octet-stream', 'Content-Length': str(asset.stat().st_size)}.items():
-                connection.putheader(key, value)
-            connection.endheaders()
+
+        def chunks():
             sent = 0
             next_report = 32 * 1024 * 1024
             with asset.open('rb') as stream:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-                    connection.send(chunk)
+                    yield chunk
                     sent += len(chunk)
                     if sent >= next_report:
                         print(json.dumps({'uploading': asset.name, 'sentBytes': sent}, ensure_ascii=False), flush=True)
                         next_report += 32 * 1024 * 1024
-            response = connection.getresponse()
-            payload = response.read()
+
+        # Use the same system proxy and TLS handling as the metadata API. Keep
+        # a fixed content length and stream bounded chunks for large packages.
+        request = urllib.request.Request(url.geturl(), data=chunks(), method='POST',
+                                         headers={**headers, 'Content-Type': 'application/octet-stream',
+                                                  'Content-Length': str(asset.stat().st_size)})
+        with urllib.request.urlopen(request, timeout=600) as response:
             if response.status != 201:
                 raise RuntimeError('GitHub asset upload failed with HTTP ' + str(response.status))
-            result = json.loads(payload)
-        finally:
-            connection.close()
+            result = json.load(response)
         if result.get('state') != 'uploaded' or result.get('size') != asset.stat().st_size:
             raise RuntimeError('Uploaded asset state or length differs.')
         if result.get('digest') and result['digest'] != 'sha256:' + checksum:

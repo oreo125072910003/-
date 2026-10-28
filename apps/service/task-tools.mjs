@@ -8,6 +8,7 @@ import { Resvg } from '@resvg/resvg-js';
 import { extractDocument, writeOfficeDocument } from '../../packages/documents/index.mjs';
 import { productTool } from '../../packages/contracts/product-tools.mjs';
 import { MAX_WECHAT_DELIVERIES } from '../../packages/contracts/wechat-delivery.mjs';
+import { createDesktopController, runDesktopHelper } from '../../packages/desktop-control/index.mjs';
 
 const inside = (root, file) => { const relative = path.relative(root, file); return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative); };
 const text = (value, maximum = 1000) => { if (typeof value !== 'string' || !value.trim() || value.length > maximum || value.includes('\0')) throw Error('输入内容无效或超过长度限制。'); return value; };
@@ -111,7 +112,7 @@ export async function captureProductScreenshot(destination, options = {}) {
 
 /** One capability per live product task. No authority or address is taken from
  * model arguments; every operation rechecks the current product-side grant. */
-export async function createTaskToolAccess({ task, tools, signal, authorize, addArtifact, resolveArtifact, onDelivery, onActivity = () => {}, mail, wechat, conversation, browser, readWechatDocument, screenshot = captureProductScreenshot, runCommand = runProductCommand } = {}) {
+export async function createTaskToolAccess({ task, tools, signal, authorize, addArtifact, resolveArtifact, onDelivery, onActivity = () => {}, mail, wechat, conversation, browser, improvement, readWechatDocument, screenshot = captureProductScreenshot, runCommand = runProductCommand, desktop = createDesktopController(), preview = filename => runDesktopHelper({operation:'preview',file:filename},{signal}) } = {}) {
   const selected = new Set(tools.filter(name => productTool(name)));
   if (!selected.size) return { connection: undefined, async close() {} };
   const token = randomBytes(32).toString('base64url'), requests = new Map(), operations = new Set();
@@ -133,11 +134,21 @@ export async function createTaskToolAccess({ task, tools, signal, authorize, add
     return path.join(output, randomUUID().slice(0, 8) + '_' + name(filename));
   };
   const register = (filename, mime) => publicArtifact(addArtifact(filename, path.basename(filename), mime));
+  const withImage = (result, image, mime) => {
+    const bytes=Buffer.from(image,'base64'),sha256=digest(bytes);
+    return {...result,images:[{id:sha256,sha256,mime,b64:image,bytes:bytes.length}]};
+  };
   async function execute(toolName, args) {
     await check(toolName);
     const schema = productTool(toolName).parameters;
     if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !Object.hasOwn(schema.properties, key)) || schema.required?.some(key => !Object.hasOwn(args, key))) throw Error('功能参数无效。');
     switch (toolName) {
+      case 'xiaozhushou_improve': {
+        if (!improvement) throw Error('本轮没有主人专用的自我完善权限。');
+        if (args.action === 'state') return improvement.getState();
+        if (args.action !== 'propose') throw Error('自我完善仅支持查看和提出提案。');
+        return improvement.propose(args);
+      }
       case 'xiaozhushou_document': {
         const written = await writeOfficeDocument({ workspace: output, title: args.title, blocks: args.blocks, formats: args.formats ?? ['docx'], signal: bounded });
         await check(toolName);
@@ -206,7 +217,13 @@ export async function createTaskToolAccess({ task, tools, signal, authorize, add
       }
       case 'xiaozhushou_screenshot': {
         const filename = destination('电脑截图.png'); await screenshot(filename, { cwd: workspace, signal: bounded }); await check(toolName);
-        return { artifact: register(filename, 'image/png') };
+        const artifact=register(filename,'image/png'),image=await preview(filename);await check(toolName);
+        return withImage({artifact},image.image,image.mime);
+      }
+      case 'xiaozhushou_desktop': {
+        const result=await desktop.execute(args,{signal:bounded,authorize:async()=>{await check(toolName);return true;}});
+        const {image,mime,...state}=result;
+        return image?withImage(state,image,mime):state;
       }
       case 'xiaozhushou_export_file': {
         const current = file(args.path, true);
@@ -251,12 +268,12 @@ export async function createTaskToolAccess({ task, tools, signal, authorize, add
         await check(body.name); activity('started');
         try { const result = await execute(body.name, body.args); activity('completed'); return result; }
         catch (error) { activity('failed'); throw error; }
-      })().then(result => ({ content: JSON.stringify(result), isError: false }), error => ({ content: String(error.message || '功能执行失败。').slice(0, 1000), isError: true }));
+      })().then(result => {const {images,...content}=result;return { content: JSON.stringify(content), isError: false,...(images?{images}:{}) };}, error => ({ content: String(error.message || '功能执行失败。').slice(0, 1000), isError: true }));
       requests.set(body.id, { digest: fingerprint, operation }); operations.add(operation);
       try { const result = await operation; await check(body.name); reply(200, result); } finally { operations.delete(operation); }
     } catch (error) { reply(400, { content: String(error.message || '功能执行失败。').slice(0, 1000), isError: true }); }
   });
   server.requestTimeout = 10000; server.headersTimeout = 10000;
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  return { connection: { endpoint: `http://127.0.0.1:${server.address().port}/tools`, token }, async close() { if (closed) return; closed = true; lifetime.abort(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await Promise.allSettled([...operations]); } };
+  return { connection: { endpoint: `http://127.0.0.1:${server.address().port}/tools`, token }, async close() { if (closed) return; closed = true; desktop.close(); lifetime.abort(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await Promise.allSettled([...operations]); } };
 }

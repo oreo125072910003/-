@@ -90,6 +90,14 @@ export function nativeImageTarget(event, taskId) {
   return { seq: event.seq, imageIndexes: indexes };
 }
 
+export function nativeToolImageTarget(event) {
+  if(event?.type!=='tool/result')return null;
+  const images=event.data?.message?.content?.filter(block=>block.type==='image')??[];
+  if(!images.length)return null;
+  if(!Number.isSafeInteger(event.seq)||event.seq<0)throw fault('IMAGE_SESSION_EVENT_INVALID','截图结果缺少原生会话位置。');
+  return {seq:event.seq,imageIndexes:images.map((_,index)=>index)};
+}
+
 /** Only this task's admitted image blocks are removed from future model history. */
 export function offloadNativeImages(session, targets) {
   if (!targets.length) return;
@@ -103,7 +111,7 @@ export function offloadNativeImages(session, targets) {
     // model surface, or projected an offloaded image during a provider retry.
     if (!visible.has(target.seq)) continue;
     const event = session.eventAt(target.seq);
-    const message = event?.type === 'user/message' ? session.deriveEventMessage(event) : null;
+    const message = ['user/message','tool/result'].includes(event?.type) ? session.deriveEventMessage(event) : null;
     if (!Array.isArray(message?.content)) throw fault('IMAGE_OFFLOAD_FAILED', 'Harness 图片投影未通过核对。');
     const images = message.content.filter(block => block.type === 'image');
     if (target.imageIndexes.some(index => !Number.isSafeInteger(index) || index < 0 || index >= images.length)) throw fault('IMAGE_OFFLOAD_FAILED', 'Harness 图片位置未通过核对。');

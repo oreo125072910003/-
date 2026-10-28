@@ -118,12 +118,17 @@ export async function runHostedTask({ prompt, workspace, sessionId, conversation
     let value = verifyTask(await request(config, '/tasks', { method: 'POST', body: { taskId, prompt, workspace, ...(settings.hostedProductConnection ? {productConnection:settings.hostedProductConnection} : {}), ...(taskImages.length ? { images: taskImages } : {}), ...(sessionId ? { sessionId } : {}), ...(conversation ? { conversation } : {}), ...(personaPrefix ? { personaPrefix } : {}), ...(executionPolicy?{executionPolicy}:{}), ...(executionPolicy==='trusted-computer-task-v1'?{computerScope:settings.hostedComputerScope}:{}), ...(grants ? { authority: 'product-owner', ownerGrants: grants } : {}) } }), taskId);
     lastSession = value.sessionId;
     const deadline = Date.now() + (settings.timeoutMs ?? 10 * 60 * 1000);
-    let nextHeartbeat = Date.now() + 15000;
+    let nextHeartbeat = Date.now() + 15000, lastMaintenance;
     while (!final(value)) {
       if (cancelled || Date.now() >= deadline) { value = await stopAndConfirm(); break; }
       if (value.status !== lastStatus) { lastStatus = value.status; emit('status', value.status === 'running' ? '小助手正在思考…' : value.status === 'saving' ? '正在保存 Harness 会话…' : 'Harness 正在处理任务…'); }
       await delay(Math.min(500, Math.max(20, settings.hostedPollMs ?? 150)));
       value = verifyTask(await request(config, '/tasks/' + taskId), taskId);
+      if (value.contextMaintenance?.state && value.contextMaintenance.state !== lastMaintenance) {
+        lastMaintenance = value.contextMaintenance.state;
+        if (lastMaintenance === 'running') emit('status', '正在整理较早的会话记录，保留近期对话和重要信息…');
+        if (lastMaintenance === 'completed') emit('status', '较早的会话记录已整理，正在继续回复…');
+      }
       if (Date.now() >= nextHeartbeat) { emit('heartbeat', 'DSH 仍在处理本轮任务。'); nextHeartbeat = Date.now() + 15000; }
     }
     const result = value.result;

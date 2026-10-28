@@ -24,7 +24,7 @@ function fakeImap(sources, audit = [], { uidValidity = '11', oversized = false }
     client.mailbox = { exists: sources.length, uidValidity: BigInt(uidValidity) };
     client.connect = async () => { audit.push({ type: 'connect' }); };
     client.getMailboxLock = async (name, settings) => { audit.push({ type: 'lock', name, settings }); return { release() { audit.push({ type: 'release' }); } }; };
-    client.fetch = async function* (range, query) { audit.push({ type: 'fetch', range, query }); for (let index = 0; index < sources.length; index++) yield { uid: index + 1, size: oversized ? 9 * 1024 * 1024 : sources[index].length, flags: new Set(), envelope: { subject: 'metadata', from: [{ address: 'friend@example.test' }] } }; };
+    client.fetch = async function* (range, query, settings) { audit.push({ type: 'fetch', range, query,settings }); for (let index = 0; index < sources.length; index++) yield { uid: index + 1, size: oversized ? 9 * 1024 * 1024 : sources[index].length, flags: new Set(), envelope: { subject: 'metadata', from: [{ address: 'friend@example.test' }] } }; };
     client.fetchOne = async (uid, query, settings) => { audit.push({ type: 'source', uid, query, settings }); return { uid: Number(uid), source: sources[Number(uid) - 1] }; };
     client.close = () => { audit.push({ type: 'close' }); };
     return client;
@@ -127,6 +127,14 @@ test('mailbox UIDVALIDITY changes create distinct identities instead of overwrit
   const { accounts } = await context.controller.importAccounts({ accounts: [config()] });
   const first = await context.controller.sync({ accountId: accounts[0].id }); validity = '12'; const second = await context.controller.sync({ accountId: accounts[0].id });
   assert.notEqual(first.messages[0].id, second.messages[0].id); assert.equal(context.controller.getState().messages.length, 2);
+});
+
+test('monitor incrementally fetches UIDs while a changed mailbox generation falls back to a quiet baseline',async t=>{
+  let validity='11';const audit=[],f=await setup(t,{imapFactory:options=>fakeImap([mime(),mime(),mime()],audit,{uidValidity:validity})(options)});
+  const {accounts}=await f.controller.importAccounts({accounts:[config()]});
+  const result=await f.controller.sync({accountId:accounts[0].id,afterUid:1,uidValidity:'11',limit:1});
+  assert.equal(result.pagination,'uid-incremental');assert.deepEqual(result.messages.map(m=>m.uid),[2]);assert.deepEqual(audit.find(e=>e.type==='fetch').settings,{uid:true});
+  validity='12';const reset=await f.controller.sync({accountId:accounts[0].id,afterUid:3,uidValidity:'11'});assert.equal(reset.pagination,'latest-only');assert.equal(reset.uidValidity,'12');
 });
 
 test('manual SMTP send persists its receipt and repeated clicks or restart never resend the immutable draft', async t => {
