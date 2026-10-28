@@ -10,7 +10,7 @@ import {TextEncoder} from 'node:util';
 const source=fs.readFileSync(new URL('../apps/desktop/renderer/app.js',import.meta.url),'utf8');
 function fixture(api={}) {
   const listeners={},notices=[];
-  const context=vm.createContext({window:{assistant:api},document:{querySelector:()=>null,addEventListener:(name,fn)=>listeners[name]=fn},TextEncoder,setTimeout,clearTimeout,notices});
+  const context=vm.createContext({window:{assistant:api,addEventListener:(name,fn)=>listeners['window:'+name]=fn},document:{querySelector:()=>null,addEventListener:(name,fn)=>listeners[name]=fn},TextEncoder,setTimeout,clearTimeout,notices});
   const end=source.lastIndexOf('\nrenderShell();');assert.ok(end>0);
   vm.runInContext(source.slice(0,end),context);
   vm.runInContext('renderPage=()=>{};renderShell=()=>{};renderMailPreservingFocus=()=>{};renderWechatPreservingFocus=()=>{};refresh=async()=>{};notify=(...args)=>notices.push(args);globalThis.subject={state,replyMail,useWechatDraft,navigate,selectWechatConversation,renderWechatInbox,renderMailInbox,saveWechatDshAccess,currentWechatGrants,renderWechatDshAccess,renderWechatComputerAccess,saveWechatComputerAccess,wechatAccessOperation,applyWechatState,renderWechatReaderConfiguration};',context);

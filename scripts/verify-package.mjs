@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import * as asar from '@electron/asar';
+import {assertDistributionArchive,verifyWechatCompanions} from './installer-manifest.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const metadata = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
@@ -14,6 +15,8 @@ const manifest = JSON.parse(fs.readFileSync(path.join(release, 'release.json'), 
 const packaged = JSON.parse(asar.extractFile(archive, 'package.json').toString());
 if (packaged.version !== metadata.version || manifest.version !== metadata.version) throw Error('Release version mismatch');
 if (hash(fs.readFileSync(path.join(application, '小助手.exe'))) !== manifest.sha256) throw Error('Executable hash mismatch');
+assertDistributionArchive(asar.listPackage(archive));
+const companions=verifyWechatCompanions(application,manifest);
 const checked = [];
 for (const entry of asar.listPackage(archive)) {
   const name = entry.replace(/^[/\\]+/, '').replaceAll('\\', '/');
@@ -44,7 +47,8 @@ if (!tests.total || tests.failed || tests.passed !== tests.total) throw Error('F
 const smokeFile = path.join(root, 'dist', `smoke-${metadata.version}`, 'desktop-smoke.json');
 const smoke = fs.existsSync(smokeFile) ? JSON.parse(fs.readFileSync(smokeFile, 'utf8')) : null;
 if (!smoke?.ok || smoke.version !== metadata.version) throw Error('Packaged desktop smoke test has not passed');
+if(smoke.portableWechatComponentsPrepared!==true||smoke.portableWechatRuntimeVerified!==true)throw Error('Packaged WeChat setup and reader runtime have not passed the real preparation smoke.');
 const result = { ok: true, version: metadata.version, executableSha256: manifest.sha256, matchedSourceFiles: checked.length,
-  noMachineConfiguration: true, contractResourcesMatched: true, tests, desktopSmokePassed: true, checked };
+  noMachineConfiguration: true, contractResourcesMatched: true,companions,wechatClientBundled:true,readerRuntimeBundled:true,portableWechatComponentsPrepared:true,portableWechatRuntimeVerified:true, tests, desktopSmokePassed: true, checked };
 fs.writeFileSync(path.join(release, 'verification.json'), JSON.stringify(result, null, 2) + '\n');
 console.log(JSON.stringify({ ...result, checked: undefined }));

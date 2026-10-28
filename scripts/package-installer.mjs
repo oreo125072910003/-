@@ -4,7 +4,7 @@ import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {extractFile,listPackage} from '@electron/asar';
-import {assertInstallerVersions,assertDistributionArchive,renderInstallerFileLists,quoteNsis} from './installer-manifest.mjs';
+import {assertInstallerVersions,assertDistributionArchive,renderInstallerFileLists,quoteNsis,verifyWechatCompanions} from './installer-manifest.mjs';
 
 const root=fileURLToPath(new URL('../',import.meta.url));
 const args=process.argv.slice(2);
@@ -17,6 +17,7 @@ const archive=path.join(application,'resources/app.asar'),manifest=JSON.parse(fs
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 assertInstallerVersions({version,manifestVersion:manifest.version,packageVersion:JSON.parse(extractFile(archive,'package.json')).version,executableSha256:digest(fs.readFileSync(path.join(application,'小助手.exe'))),manifestSha256:manifest.sha256});
 assertDistributionArchive(listPackage(archive));
+const companions=verifyWechatCompanions(application,manifest);
 const compilerResult=spawnSync(process.env.PYTHON??'python',[path.join(root,'scripts/ensure-nsis.py')],{encoding:'utf8',windowsHide:true,timeout:120000});
 if(compilerResult.status!==0)throw Error(compilerResult.stderr||'Could not prepare the pinned NSIS compiler.');
 const compiler=JSON.parse(compilerResult.stdout.trim());
@@ -31,9 +32,9 @@ const output=path.join(release,`小助手-Setup-${version}.exe`);
 const template=fs.readFileSync(path.join(root,'packaging/windows/assistant.nsi'),'utf8');
 const definitions=`!define APP_VERSION "${version}"\r\n!define APP_SIZE_KIB ${Math.ceil(files.reduce((n,f)=>n+f.size,0)/1024)}\r\n!define OUTPUT_FILE "${quoteNsis(output)}"\r\n`;
 const script=path.join(generated,'assistant.nsi');fs.writeFileSync(script,'\uFEFF'+definitions+template);
-const result=spawnSync(compiler.compiler,['/V3',script],{cwd:generated,encoding:'utf8',windowsHide:true,timeout:600000,maxBuffer:20*1024*1024});
+const result=spawnSync(compiler.compiler,['/V3',script],{cwd:generated,encoding:'utf8',windowsHide:true,timeout:1800000,maxBuffer:20*1024*1024});
 fs.writeFileSync(path.join(release,'installer-build.log'),result.stdout+'\n'+result.stderr);
 if(result.status!==0)throw Error('NSIS installer build failed: '+(result.stderr||result.stdout).slice(-3000));
-const report={ok:true,version,filename:output,bytes:fs.statSync(output).size,sha256:digest(fs.readFileSync(output)),applicationSha256:manifest.sha256,archiveSha256:digest(fs.readFileSync(archive)),programFiles:files.length,compiler,perUser:true,requiresAdministrator:false,uninstallPreservesData:true,signature:'unsigned',machineConfigurationIncluded:false};
+const report={ok:true,version,filename:output,bytes:fs.statSync(output).size,sha256:digest(fs.readFileSync(output)),applicationSha256:manifest.sha256,archiveSha256:digest(fs.readFileSync(archive)),programFiles:files.length,companions,wechatClientBundled:true,readerRuntimeBundled:true,clientVersion:companions.clientVersion,compiler,perUser:true,requiresAdministrator:false,uninstallPreservesData:true,signature:'unsigned',machineConfigurationIncluded:false};
 fs.writeFileSync(path.join(release,'installer.json'),JSON.stringify(report,null,2)+'\n');
 console.log(JSON.stringify(report));

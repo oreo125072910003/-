@@ -1,6 +1,6 @@
 {
   "name": "xiaozhushou-harness-host",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "小助手独立桌面会话，复用已登录 Harness 的模型、Skill 和已授权插件工具",
   "private": true,
   "type": "module",

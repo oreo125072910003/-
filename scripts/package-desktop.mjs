@@ -8,10 +8,13 @@ import { spawnSync } from 'node:child_process';
 import { packager } from '@electron/packager';
 import { inspectRuntime } from '../packages/runtime-harness/index.mjs';
 import { buildDesktopHelper } from '../packages/desktop-control/build.mjs';
+import { bundleWechatComponents } from './bundle-wechat-components.mjs';
+import { verifyWechatCompanions } from './installer-manifest.mjs';
 
 const root=fileURLToPath(new URL('../',import.meta.url));
 const metadata=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
 const distribution=process.env.XIAOZHUSHOU_DISTRIBUTION==='1';
+const fullWechat=!process.argv.includes('--without-wechat');
 const releaseLabel=metadata.version.includes('-')?'预览版':'稳定版';
 const releaseRoot=path.join(root,'dist','releases',metadata.version);
 const stage=fs.mkdtempSync(path.join(os.tmpdir(),'xiaozhushou-package-'));
@@ -51,7 +54,7 @@ try{
   const built=spawnSync(ps,['-NoProfile','-ExecutionPolicy','Bypass','-File',path.join(root,'代码','合同助手','mcp','build.ps1'),'-OutputFolder','out/desktop-release'],{cwd:root,encoding:'utf8',windowsHide:true});
   if(built.status!==0)throw Error('合同程序构建失败：'+(built.stderr||built.stdout).slice(-3000));
   for(const relative of ['apps/desktop','apps/service','packages/contracts','packages/storage','packages/runtime-harness','packages/wechat-bridge','packages/extensions','packages/workers','packages/documents','packages/mail-plugin','packages/harness-host-plugin','packages/desktop-control',
-    '代码/项目/package.json','代码/项目/scripts/hook-onebot.mjs','代码/项目/scripts/text-delivery-store.mjs','代码/项目/scripts/wechat-account-check.mjs','代码/项目/scripts/reader-account-state.mjs',
+    '代码/项目/package.json','代码/项目/scripts/hook-onebot.mjs','代码/项目/scripts/text-delivery-store.mjs','代码/项目/scripts/wechat-account-check.mjs','代码/项目/scripts/reader-account-state.mjs','代码/项目/scripts/reader-setup.mjs',
     '代码/项目/components/qq-bridge/src/core/wechat-events.js','代码/项目/components/qq-bridge/src/core/sticker-policy.js','代码/项目/components/qq-bridge/src/core/proactive-policy.js',
     '代码/项目/components/qq-bridge/src/onebot/normalize.js','代码/项目/public/console/conversation-settings.mjs','代码/项目/packages/dsh-social-bridge-plugin/conversation-policy.mjs','代码/项目/packages/extension-runtime/catalog.mjs'])copy(relative);
   const lock=JSON.parse(fs.readFileSync(path.join(root,'package-lock.json'),'utf8'));
@@ -71,22 +74,29 @@ try{
   const embeddedContract=path.join(stage,'contract-resource');fs.mkdirSync(embeddedContract);
   for(const name of ['合同填写小助手.exe','合同助手MCP.exe'])fs.copyFileSync(path.join(contractOutput,name),path.join(embeddedContract,name));
   fs.copyFileSync(path.join(root,'代码','合同助手','desktop','source-origin.json'),path.join(embeddedContract,'source-origin.json'));
+  const bundledWechat=fullWechat?bundleWechatComponents({root,stage}):null;
+  const embeddedWechat=path.join(stage,'companions');
+  const componentManifest=fullWechat?JSON.parse(fs.readFileSync(path.join(embeddedWechat,'manifest.json'),'utf8')):null;
+  const companions=fullWechat?{...bundledWechat,manifestSha256:createHash('sha256').update(fs.readFileSync(path.join(embeddedWechat,'manifest.json'))).digest('hex'),hookSha256:componentManifest.hookSha256}:{included:false};
+  if(fullWechat)console.log(JSON.stringify({stage:'bundled-wechat-components',...companions}));
   fs.writeFileSync(path.join(stage,'THIRD-PARTY-NOTICES.txt'),`小助手 ${metadata.version} ${releaseLabel}\nElectron (MIT) https://github.com/electron/electron\n${productionDependencies.map(([name,entry])=>`${name.slice(13)} ${entry.version} (${entry.license??'见包内许可文件'})`).join('\n')}\n合同源码来源见 resources/contract-resource/source-origin.json\nHarness 是独立安装的核心依赖，本包不复制用户 Harness 或其个人配置。\n`);
   fs.mkdirSync(releaseRoot,{recursive:true});
   const expected=path.join(releaseRoot,'小助手-win32-x64');
   if(!inside(releaseRoot,expected)||path.basename(expected)!=='小助手-win32-x64')throw Error('Unexpected package overwrite target');
   const output=await packager({dir:stage,out:releaseRoot,name:'小助手',platform:'win32',arch:'x64',electronVersion:metadata.devDependencies.electron,
     appVersion:metadata.version,buildVersion:metadata.version,appBundleId:'local.xiaozhushou.desktop',asar:{unpack:'**/*.{node,ps1,py,exe}'},prune:false,overwrite:true,
-    icon,electronZipDir:verifiedElectronCache(),extraResource:[embeddedContract],ignore:[/contract-resource/,/assistant\.ico$/],
+    icon,electronZipDir:verifiedElectronCache(),extraResource:[embeddedContract,...(fullWechat?[embeddedWechat]:[])],ignore:[/contract-resource/,/^\/companions(?:\/|$)/,/assistant\.ico$/],
     win32metadata:{CompanyName:'小助手项目',FileDescription:'小助手个人桌面助理',ProductName:'小助手'},
   });
   const executable=path.join(output[0],'小助手.exe');
   const manifest={version:metadata.version,createdAt:new Date().toISOString(),executable,sha256:createHash('sha256').update(fs.readFileSync(executable)).digest('hex'),
     harness:{bundled:false,detectedVersion:runtime.version??null,programLocationOnly:runtime.available?runtime.command:null},
     contract:{included:true,syntheticDevelopmentTemplate:true},accountCredentialsIncluded:false,personalChatIncluded:false,
+    wechatClientBundled:fullWechat,readerRuntimeBundled:fullWechat,clientVersion:componentManifest?.clientVersion??null,companions,
     signature:'unsigned',capabilities:['local-organize','persistent-tasks','dsh-existing-login','wechat-account-contacts-history-media','mail-imap-smtp','workers','docx-pdf','literature-search','legacy-skill-migration','dsh-owner-grants']};
   fs.writeFileSync(path.join(releaseRoot,'release.json'),JSON.stringify(manifest,null,2)+'\n');
-  fs.writeFileSync(path.join(output[0],'使用说明.txt'),`小助手 ${metadata.version} ${releaseLabel}\r\n\r\n双击“小助手.exe”启动。请保留整个文件夹，不要单独移动 EXE。\r\n\r\n入口分为工作台、任务记录、微信通信、能力中心和控制面板。\r\n微信页导入本机已有微信运行环境，核对允许的会话后连接。账号版本与消息源通过核验后才接收，首次导入默认自动连接与回复已授权聊天的新文字消息，可在微信页暂停；历史消息不会补发。同一聊天持续使用独立DSH上下文，只有数据库服务器回执才标为已送达。图片/文件在附件区选择后发送；默认使用本机已核验版本的 Hook 发送 PNG/JPEG 图片和文件，无需保持目标聊天在前台；只有精确匹配的服务器回执才标为送达，结果不明时不会自动重发。\r\n能力中心可管理本机stdio MCP插件和Skills。插件默认停用，启用不等于模型能自动调用任意工具。\r\n小助手始终由DSH提供核心能力，默认复用现有Harness登录，不需要另填API Key。请通过Harness官方插件命令安装产品宿主插件；其他API仅是可选辅助能力。\r\n支持资料整理、任务和成果保存、人格设置以及本地合同工具。合同内置合成开发模板，正式工作请导入并核对自己的模板。\r\n支持多账号IMAP/SMTP邮箱导入、只读收信和手动发送；支持DSH分步骤写作/审查协作、DOCX/PDF成果导出、Crossref/arXiv文献检索。实际登录、授权及服务端可用性以界面状态为准。\r\n关闭窗口后留在托盘，右键托盘可退出。\r\n新版本会迁移数据库，旧0.1/0.2/0.3不能再打开新数据；原数据不会删除。\r\n本程序未进行代码签名。\r\n`);
+  verifyWechatCompanions(output[0],manifest,{required:fullWechat});
+  fs.writeFileSync(path.join(output[0],'使用说明.txt'),`小助手 ${metadata.version} ${releaseLabel}\r\n\r\n双击“小助手.exe”启动。请保留整个文件夹，不要单独移动 EXE。\r\n\r\n入口分为工作台、任务记录、微信通信、能力中心和控制面板。\r\n${fullWechat?"本包已包含专用微信 4.1.10.27、Python 与读取环境。首次使用请在微信页点击“新电脑 · 连接微信”，准备组件后由你扫码登录并核验账号；无需另下微信或先安装完整插件。":"本轻量包不含专用微信，请使用完整版或导入已有微信环境。"}已有环境仍可从微信页导入，核对允许的会话后连接。账号版本与消息源通过核验后才接收，首次导入默认自动连接与回复已授权聊天的新文字消息，可在微信页暂停；历史消息不会补发。同一聊天持续使用独立DSH上下文，只有数据库服务器回执才标为已送达。图片/文件在附件区选择后发送；默认使用本机已核验版本的 Hook 发送 PNG/JPEG 图片和文件，无需保持目标聊天在前台；只有精确匹配的服务器回执才标为送达，结果不明时不会自动重发。\r\n能力中心可管理本机stdio MCP插件和Skills。插件默认停用，启用不等于模型能自动调用任意工具。\r\n小助手始终由DSH提供核心能力，默认复用现有Harness登录，不需要另填API Key。请通过Harness官方插件命令安装产品宿主插件；其他API仅是可选辅助能力。\r\n支持资料整理、任务和成果保存、人格设置以及本地合同工具。合同内置合成开发模板，正式工作请导入并核对自己的模板。\r\n支持多账号IMAP/SMTP邮箱导入、只读收信和手动发送；支持DSH分步骤写作/审查协作、DOCX/PDF成果导出、Crossref/arXiv文献检索。实际登录、授权及服务端可用性以界面状态为准。\r\n关闭窗口后留在托盘，右键托盘可退出。\r\n新版本会迁移数据库，旧0.1/0.2/0.3不能再打开新数据；原数据不会删除。\r\n本程序未进行代码签名。\r\n`);
   console.log(JSON.stringify({ok:true,executable,releaseManifest:path.join(releaseRoot,'release.json')}));
 }finally{
   const expectedParent=path.resolve(os.tmpdir());

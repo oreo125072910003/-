@@ -42,7 +42,7 @@ test('desktop preload and DSH share the same explicit public service contract', 
   assert.equal(Object.isFrozen(UI_SERVICE_METHODS), true);
   for (const name of UI_SERVICE_METHODS) assert.equal(typeof exposed[name], 'function', name);
   const desktopNative = Object.keys(exposed).filter(name => name !== 'onChange' && !UI_SERVICE_METHODS.includes(name));
-  assert.deepEqual(desktopNative.sort(), NATIVE_METHODS.filter(name => !name.includes('PortableWechat')).sort());
+  assert.deepEqual(desktopNative.sort(), [...NATIVE_METHODS].sort());
   for (const internal of ['close','getStore','installMcp','grantAttachments','proposeSelfImprovementApproval','approveSelfImprovement']) assert.equal(Object.hasOwn(exposed, internal), false);
 });
 
@@ -83,6 +83,9 @@ test('installed plugin layout loads both shared contracts from its payload witho
   const contracts = path.join(directory, 'payload/packages/contracts');
   fs.mkdirSync(contracts, { recursive: true });
   for (const name of ['product-data.cjs','ui-service-methods.mjs']) fs.copyFileSync(new URL('../packages/contracts/' + name, import.meta.url), path.join(contracts, name));
+  const bridge = path.join(directory, 'payload/packages/wechat-bridge');
+  fs.mkdirSync(bridge, { recursive: true });
+  fs.copyFileSync(new URL('../packages/wechat-bridge/portable.mjs', import.meta.url), path.join(bridge, 'portable.mjs'));
   const host = await import(pathToFileURL(path.join(directory, 'host.mjs')).href);
   const paths = await import(pathToFileURL(path.join(directory, 'paths.mjs')).href);
   assert.deepEqual(host.SERVICE_METHODS, UI_SERVICE_METHODS);

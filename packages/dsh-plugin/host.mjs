@@ -130,11 +130,9 @@ export async function createNativeAssistant(ctx, config, overrides = {}) {
     throw fault('没有这个界面操作。', 404);
   }
   const assets = {
-    '/': ['text/html; charset=utf-8', () => fs.readFileSync(path.join(payloadRoot, 'apps/desktop/renderer/index.html'), 'utf8').replace("connect-src 'none'", "connect-src 'self'").replace('</head>', '<link rel="stylesheet" href="./setup.css" /></head>').replace('</body>', '<script type="module" src="./setup-ui.js"></script></body>').replace('<script type="module" src="./app.js">', '<script src="./browser.js"></script><script type="module" src="./app.js">')],
-    '/setup-ui.js': ['text/javascript; charset=utf-8', () => fs.readFileSync(new URL('./setup-ui.js', baseURL))],
-    '/setup.css': ['text/css; charset=utf-8', () => fs.readFileSync(new URL('./setup.css', baseURL))],
+    '/': ['text/html; charset=utf-8', () => fs.readFileSync(path.join(payloadRoot, 'apps/desktop/renderer/index.html'), 'utf8').replace("connect-src 'none'", "connect-src 'self'").replace('<script type="module" src="./app.js">', '<script src="./browser.js"></script><script type="module" src="./app.js">')],
     '/browser.js': ['text/javascript; charset=utf-8', () => fs.readFileSync(new URL('./browser.js', baseURL), 'utf8').replace('METHODS_PLACEHOLDER', JSON.stringify([...SERVICE_METHODS, ...NATIVE_METHODS]))],
-    ...Object.fromEntries(['app.js','styles.css'].map(name => ['/' + name, [name.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8', () => fs.readFileSync(path.join(payloadRoot, 'apps/desktop/renderer', name))]]))
+    ...Object.fromEntries(['app.js','styles.css','wechat-setup.js','wechat-setup.css'].map(name => ['/' + name, [name.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8', () => fs.readFileSync(path.join(payloadRoot, 'apps/desktop/renderer', name))]]))
   };
   async function handler(req, res) {
     try {

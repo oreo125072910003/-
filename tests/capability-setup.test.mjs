@@ -66,7 +66,7 @@ test('desktop computer, local file reading and delivery run end-to-end with pers
 
 test('bulk selectors honor filters, ignore unavailable abilities, and full-save selects the whole catalog',()=>{
   const source=fs.readFileSync(new URL('../apps/desktop/renderer/app.js',import.meta.url),'utf8');
-  const context=vm.createContext({window:{assistant:{}},document:{querySelector:()=>null,addEventListener:()=>{}},TextEncoder,setTimeout,clearTimeout});
+  const context=vm.createContext({window:{assistant:{},addEventListener:()=>{}},document:{querySelector:()=>null,addEventListener:()=>{}},TextEncoder,setTimeout,clearTimeout});
   vm.runInContext(source.slice(0,source.lastIndexOf('\nrenderShell();'))+'\nglobalThis.subject={state,selectCatalog};',context);
   const {state,selectCatalog}=context.subject;
   state.dshAccess={catalog:{skills:[{name:'office',modelInvocable:true},{name:'internal',modelInvocable:false}],tools:[{name:'read',description:'files',grantable:true},{name:'draw',grantable:true},{name:'shell',grantable:false}]}};
@@ -77,7 +77,7 @@ test('bulk selectors honor filters, ignore unavailable abilities, and full-save 
 
 test('computer status reports saved settings separately from a ready live host',()=>{
   const source=fs.readFileSync(new URL('../apps/desktop/renderer/app.js',import.meta.url),'utf8');
-  const context=vm.createContext({window:{assistant:{}},document:{querySelector:()=>null,addEventListener:()=>{}},TextEncoder,setTimeout,clearTimeout});
+  const context=vm.createContext({window:{assistant:{},addEventListener:()=>{}},document:{querySelector:()=>null,addEventListener:()=>{}},TextEncoder,setTimeout,clearTimeout});
   vm.runInContext(source.slice(0,source.lastIndexOf('\nrenderShell();'))+'\nglobalThis.subject={state,desktopComputerState,renderDesktopComputerAccess};',context);
   const {state,desktopComputerState,renderDesktopComputerAccess}=context.subject;
   state.dshAccess={computerEnabled:true,connected:true};state.bootstrap={runtime:{available:true,capabilities:{}}};

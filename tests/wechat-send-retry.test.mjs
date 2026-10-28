@@ -11,7 +11,7 @@ function fixture() {
   const outcome={status:'rejected',error:'确认未发送'};
   const api={sendWechatMessage:async value=>{calls.push(value);return{...outcome};},sendWechatSticker:async value=>{calls.push(value);return{...outcome};}};
   const source=fs.readFileSync(new URL('../apps/desktop/renderer/app.js',import.meta.url),'utf8');
-  const context=vm.createContext({window:{assistant:api},document:{querySelector:()=>null,addEventListener:()=>{}},TextEncoder,crypto,setTimeout,clearTimeout,notices});
+  const context=vm.createContext({window:{assistant:api,addEventListener:()=>{}},document:{querySelector:()=>null,addEventListener:()=>{}},TextEncoder,crypto,setTimeout,clearTimeout,notices});
   const end=source.lastIndexOf('\nrenderShell();');assert(end>0);
   vm.runInContext(source.slice(0,end),context);
   vm.runInContext('renderPage=()=>{};renderWechatPreservingFocus=()=>{};refresh=async()=>{};notify=(...args)=>notices.push(args);globalThis.subject={state,sendWechatReply,sendWechatSticker,wechatSendRequest};',context);

@@ -28,7 +28,7 @@ const icon = (name, className = '') => `<svg class="${className}" viewBox="0 0 2
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const api = window.assistant;
 const state = { page: 'home', bootstrap: null, settings: {}, tasks: [], filter: 'all', attachments: [], kind: 'agent', prompt: '', sending: false, loading: true, error: '', selectedTask: null, detail: null, detailLoading: false, detailError: '', settingsDirty: false,
-  wechat: null, wechatError: '', wechatTab: 'inbox', wechatConnectionExpanded: null, selectedMessageId: null, selectedConversationKey: '', wechatReply: '', wechatReplyByConversation: {}, wechatBusy: '', wechatSettingsDraft: null,
+  wechat: null, portableWechat: null, wechatError: '', wechatTab: 'inbox', wechatConnectionExpanded: null, selectedMessageId: null, selectedConversationKey: '', wechatReply: '', wechatReplyByConversation: {}, wechatBusy: '', wechatSettingsDraft: null,
   wechatContactKind: 'private', wechatContactKeyword: '', wechatContactResults: { private: [], groups: [] }, wechatContactNames: {}, wechatAllowedDraft: null, wechatContactsSearched: false,
   wechatDshAccess: null, wechatDshDraft: null, wechatDshOpen: false, wechatDshQuery: '', wechatDshBusy: '', wechatDshError: '',
   wechatHistoryLoaded: {}, wechatImages: {}, wechatStickers: {}, wechatStickerPanel: false, wechatStickerQuery: '', wechatSendAttempts: {}, wechatAttachmentsByConversation: {}, wechatAccountKey: '',
@@ -488,6 +488,15 @@ function renderWechatReaderConfiguration() {
   if(!reader || ['applied', 'ready'].includes(reader.state))return '';
   return `<p class="info-note" role="status">${icon('info')}<span>${reader.state==='pending'?'名单待配置，新增会话尚未接收。 ':''}${escape(reader.detail||'正在同步本机接收名单。')}</span></p>`;
 }
+function renderWechatFirstSetup() {
+  if (!state.wechat || state.wechat.settings?.connectionImported || state.portableWechat?.connectionImported) return '';
+  const portable = state.portableWechat;
+  if (portable?.available === true) return `<section class="wechat-first-setup" aria-label="安装包内置微信"><div><h2>安装包已包含微信</h2><p>专用微信 4.1.10.27、连接组件和本机读取环境都在包内。先准备组件，再打开微信登录、识别账号并验证连接。</p><p class="portable-package-note">${portable.prepared ? '本机组件已准备好，可以继续登录与连接。' : '组件会准备到小助手自己的数据目录，不会替换已有微信连接。'}</p></div><button type="button" class="primary-button" data-action="wechat-setup">准备并连接微信${icon('arrow')}</button></section>`;
+  const unavailable = portable?.available === false;
+  const title = unavailable ? '此安装包未包含微信组件' : portable?.checkFailed ? '暂时无法检查微信组件' : portable?.supported === false ? '当前版本未提供微信准备向导' : '正在检查安装包中的微信组件';
+  const detail = unavailable ? '请使用带微信组件的完整版，或导入这台电脑已有的微信连接。' : portable?.checkFailed || portable?.supported === false ? '可以导入已有连接；首次使用请更新到带微信组件的完整版。' : '检查完成后，这里会显示准备与连接入口。已有连接也可以直接导入。';
+  return `<section class="wechat-first-setup unavailable" aria-label="微信组件状态"><div><h2>${title}</h2><p>${detail}</p></div><button type="button" class="secondary-button" data-action="wechat-import" ${state.wechatBusy ? 'disabled' : ''}>${icon('folder')}导入已有连接</button></section>`;
+}
 function renderWechat() {
   const connection = wechatConnectionInfo();
   const settings = state.wechat?.settings || {};
@@ -499,7 +508,8 @@ function renderWechat() {
   const automaticLabel = ({ generating: '正在思考回复', sending: '正在发送回复', unconfirmed: '发送结果待核对', error: '自动回复需要处理', paused: '自动回复已暂停', closed: '自动回复已停止' })[automaticState] || (settings.autoReply ? '自动回复已开启' : '自动回复已关闭');
   return `<div class="page-heading"><div><h1>${icon('chat')}微信通信</h1></div></div>
     ${state.wechatError ? `<div class="load-error" role="alert">${escape(state.wechatError)}<button class="text-button" data-action="wechat-refresh">${icon('refresh')}重试</button></div>` : ''}
-    <details id="wechat-connection-details" class="wechat-connection-details" ${(state.wechatConnectionExpanded ?? connection.state !== 'ready') ? 'open' : ''}><summary class="wechat-connection-summary"><span class="wechat-summary-icon">${icon('chat')}</span><span class="wechat-summary-identity"><strong>${escape(state.wechat?.profile?.nickname || '我的微信')}</strong><small class="${['error', 'unconfirmed'].includes(automaticState) ? 'attention' : ''}">${escape(automaticLabel)}</small></span>${pill(connection.label, connection.style)}<span class="wechat-summary-action">连接与自动回复设置${icon('chevron')}</span></summary><section class="connection-panel"><div class="panel-heading"><h2>${icon('chat')}我的微信</h2>${pill(connection.label, connection.style)}</div>${renderWechatProfile()}<div class="wechat-connect-footer"><div class="connection-copy"><strong>${escape(detail)}</strong><p>${settings.connectionImported ? '已导入本机连接' : '首次使用请导入现有微信连接'} · 已选择 ${settings.allowedPrivate?.length || 0} 位好友、${settings.allowedGroups?.length || 0} 个群${!allowedCount ? ' · 尚不接收任何会话' : ''}</p></div><div class="wechat-connection-buttons"><button class="secondary-button" data-action="wechat-import" ${busy || connected ? 'disabled' : ''}>${icon('folder')}${state.wechatBusy === 'import' ? '正在导入…' : '导入现有微信连接'}</button>${connected ? `<button class="secondary-button" data-action="wechat-disconnect" ${busy ? 'disabled' : ''}>断开连接</button>` : `<button class="primary-button" data-action="wechat-connect" ${busy || !settings.connectionImported ? 'disabled' : ''}>${icon('engine')}${state.wechatBusy === 'connect' ? '正在连接…' : '连接我的微信'}</button>`}</div></div>${renderWechatAutomation()}</section></details>${renderWechatReaderConfiguration()}
+    ${renderWechatFirstSetup()}
+    <details id="wechat-connection-details" class="wechat-connection-details" ${(state.wechatConnectionExpanded ?? (settings.connectionImported === true && connection.state !== 'ready')) ? 'open' : ''}><summary class="wechat-connection-summary"><span class="wechat-summary-icon">${icon('chat')}</span><span class="wechat-summary-identity"><strong>${escape(state.wechat?.profile?.nickname || '我的微信')}</strong><small class="${['error', 'unconfirmed'].includes(automaticState) ? 'attention' : ''}">${escape(automaticLabel)}</small></span>${pill(connection.label, connection.style)}<span class="wechat-summary-action">${settings.connectionImported ? '连接与自动回复设置' : '已有连接与手动导入'}${icon('chevron')}</span></summary><section class="connection-panel"><div class="panel-heading"><h2>${icon('chat')}我的微信</h2>${pill(connection.label, connection.style)}</div>${renderWechatProfile()}<div class="wechat-connect-footer"><div class="connection-copy"><strong>${escape(detail)}</strong><p>${settings.connectionImported ? '已导入本机连接' : '首次使用请导入现有微信连接'} · 已选择 ${settings.allowedPrivate?.length || 0} 位好友、${settings.allowedGroups?.length || 0} 个群${!allowedCount ? ' · 尚不接收任何会话' : ''}</p></div><div class="wechat-connection-buttons"><button class="secondary-button" data-action="wechat-import" ${busy || connected ? 'disabled' : ''}>${icon('folder')}${state.wechatBusy === 'import' ? '正在导入…' : '导入现有微信连接'}</button>${connected ? `<button class="secondary-button" data-action="wechat-disconnect" ${busy ? 'disabled' : ''}>断开连接</button>` : `<button class="primary-button" data-action="wechat-connect" ${busy || !settings.connectionImported ? 'disabled' : ''}>${icon('engine')}${state.wechatBusy === 'connect' ? '正在连接…' : '连接我的微信'}</button>`}</div></div>${renderWechatAutomation()}</section></details>${renderWechatReaderConfiguration()}
     <div class="xp-tabs" role="tablist" aria-label="微信功能">${[['inbox', 'mail', '消息与回复'], ['contacts', 'heart', '好友与群聊'], ['settings', 'settings', '连接设置']].map(([id, image, title]) => `<button id="wechat-tab-${id}" role="tab" aria-selected="${state.wechatTab === id}" aria-controls="wechat-panel" class="${state.wechatTab === id ? 'active' : ''}" data-action="wechat-tab" data-tab="${id}">${icon(image)}${title}${id === 'inbox' ? `<span class="tab-count">${wechatMessages().length}</span>` : ''}</button>`).join('')}<button class="tab-refresh" data-action="wechat-refresh" title="刷新微信状态">${icon('refresh')}刷新</button></div>
     <section id="wechat-panel" class="tab-panel" role="tabpanel" aria-labelledby="wechat-tab-${state.wechatTab}">${state.wechatTab === 'settings' ? renderWechatSettings() : state.wechatTab === 'contacts' ? renderWechatContacts() : renderWechatInbox()}</section>`;
 }
@@ -1311,6 +1321,7 @@ document.addEventListener('click', async (event) => {
   const action = button.dataset.action;
   try {
     if (action === 'navigate') navigate(button.dataset.page);
+    else if (action === 'wechat-setup') window.dispatchEvent(new CustomEvent('xiaozhushou:wechat-setup-open'));
     else if (action === 'refresh') { await refresh({ preserveForm: false }); if (!state.error) notify('已经重新连接。'); }
     else if (action === 'filter') { state.filter = button.dataset.filter; renderPage(); }
     else if (action === 'start-literature') { state.kind='literature'; state.prompt=''; navigate('home'); document.querySelector('#task-prompt')?.focus(); }
@@ -1450,6 +1461,14 @@ document.addEventListener('click', async (event) => {
   } catch (error) { button.disabled = false; notify(error.message || '没有完成这一步，请再试一次。', true); }
 });
 
+window.addEventListener('xiaozhushou:wechat-setup-state', event => {
+  const value = event.detail;
+  if (!value || typeof value !== 'object') return;
+  const next = { supported: value.supported !== false, available: typeof value.available === 'boolean' ? value.available : null, prepared: value.prepared === true, connectionImported: value.connectionImported === true, checkFailed: value.checkFailed === true };
+  if (JSON.stringify(next) === JSON.stringify(state.portableWechat)) return;
+  state.portableWechat = next;
+  if (state.page === 'wechat') renderWechatPreservingFocus();
+});
 renderShell();
 refresh({ initial: true });
 if (api && typeof api.onChange === 'function') {

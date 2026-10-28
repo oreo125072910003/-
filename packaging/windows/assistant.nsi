@@ -25,7 +25,7 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "小助手项目"
 BrandingText "小助手 · DSH 个人工作空间"
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "把小助手放到你的电脑上"
-!define MUI_WELCOMEPAGE_TEXT "安装任务、微信、邮箱与能力中心工作台。小助手始终由 DSH 提供核心能力，请先安装并登录 DSH。$\r$\n$\r$\n仅安装到当前 Windows 用户，不需要管理员权限。已有账号和记录保留在原个人数据目录。$\r$\n$\r$\n升级前请从托盘正常退出旧版小助手；安装程序不会强制结束任务。"
+!define MUI_WELCOMEPAGE_TEXT "本包包含小助手、专用微信 4.1.10.27 及读取环境。安装后可在微信页准备组件，再由你登录微信。小助手始终由 DSH 提供核心能力，请先安装并登录 DSH。$\r$\n$\r$\n仅安装到当前 Windows 用户，不需要管理员权限。已有账号和记录保留在原个人数据目录。$\r$\n$\r$\n升级前请从托盘正常退出旧版小助手；安装程序不会强制结束任务。"
 !define MUI_FINISHPAGE_TITLE "小助手已安装"
 !define MUI_FINISHPAGE_TEXT "可以从桌面或开始菜单打开小助手。DSH 继续使用原登录。$\r$\n$\r$\n关闭工作台后小助手留在托盘；卸载只移除程序，保留个人数据、DSH 和微信。"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\小助手.exe"

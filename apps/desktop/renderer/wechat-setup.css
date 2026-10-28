@@ -1,0 +1,39 @@
+.wechat-first-setup { display:flex; align-items:center; gap:24px; margin-bottom:20px; padding:23px 25px; background:var(--white); border:1px solid #d8e0cf; border-left:4px solid var(--green); border-radius:6px; }
+.wechat-first-setup > div { flex:1; min-width:0; }
+.wechat-first-setup h2 { font-size:19px; color:var(--ink); margin:0 0 7px; }
+.wechat-first-setup p { font-size:13px; line-height:1.8; color:var(--muted); max-width:74ch; }
+.wechat-first-setup .primary-button { flex-shrink:0; min-height:40px; }
+.wechat-first-setup .portable-package-note { margin-top:6px; color:#58674f; font-size:12px; }
+.wechat-first-setup.unavailable { border-left-color:#a49679; }
+.portable-setup-trigger { position:fixed; right:24px; bottom:40px; z-index:80; border:1px solid #c8d4bc; border-radius:6px; padding:10px 15px; background:var(--green-soft); color:var(--green); font:inherit; font-size:12px; font-weight:500; line-height:1.65; box-shadow:0 3px 15px #283b2510; cursor:pointer; }
+.portable-setup-trigger[hidden] { display:none; }
+.portable-setup-dialog { width:min(650px,calc(100vw - 48px)); max-height:calc(100dvh - 48px); overflow:auto; padding:24px 27px; background:var(--white); border:1px solid #d2dac8; border-radius:10px; color:var(--ink); box-shadow:0 20px 90px #26392235; font:14px/1.7 "Segoe UI Variable Text","Microsoft YaHei UI",sans-serif; }
+.portable-setup-dialog::backdrop { background:#21332655; backdrop-filter:blur(2px); }
+.portable-setup-dialog header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:14px; }
+.portable-eyebrow { display:block; color:var(--muted); font-size:11px; margin-bottom:5px; }
+.portable-setup-dialog h2 { margin:0; font-size:23px; font-weight:600; }
+.portable-setup-dialog .portable-close { width:32px; height:32px; padding:0; background:transparent; border:0; border-radius:4px; color:var(--muted); font-size:25px; cursor:pointer; }
+.portable-setup-dialog .portable-close:hover { background:var(--green-soft); }
+.portable-components { font-size:13px; line-height:1.8; color:var(--muted); margin:0 0 17px; }
+.portable-steps { padding:0; margin:0; list-style:none; }
+.portable-steps li { display:flex; align-items:flex-start; gap:14px; margin:0; padding:15px 0; border-top:1px solid var(--line); }
+.portable-step-number { color:#87937b; font-size:12px; font-variant-numeric:tabular-nums; padding-top:8px; }
+.portable-steps li > div { flex:1; min-width:0; }
+.portable-steps li p { color:var(--muted); font-size:12px; line-height:1.8; margin:6px 0 0; }
+.portable-steps li[data-active] .portable-step-number, .portable-steps li[data-complete] .portable-step-number { color:var(--green); font-weight:600; }
+.portable-setup-dialog button[data-setup] { min-height:35px; border:1px solid #cad5c1; border-radius:5px; background:var(--white); color:var(--green); padding:6px 12px; cursor:pointer; font:inherit; font-size:13px; font-weight:500; line-height:1.6; }
+.portable-setup-dialog button[data-setup="bind"] { background:var(--green); color:white; border-color:var(--green); }
+.portable-setup-dialog button:disabled { opacity:.55; cursor:default; }
+.portable-account-label { display:grid; gap:5px; margin-top:12px; color:#5b6852; font-size:12px; }
+.portable-account-label select { width:100%; padding:8px 10px; min-height:36px; border:1px solid #ced7c4; border-radius:5px; background:var(--white); color:var(--ink); font:inherit; }
+.portable-setup-status { margin:10px 0 17px; padding:11px 13px; min-height:43px; background:var(--green-soft); color:#4d6342; border-radius:5px; font-size:12px; overflow-wrap:anywhere; }
+.portable-setup-dialog[data-state="failed"] .portable-setup-status { background:#faf0dd; color:#8a612e; }
+.portable-setup-dialog footer { display:flex; align-items:center; justify-content:space-between; gap:16px; border-top:1px solid var(--line); padding-top:13px; }
+.portable-setup-dialog footer span { font-size:11px; color:var(--muted); }
+@media(max-width:720px) {
+  .wechat-first-setup { flex-direction:column; align-items:flex-start; gap:15px; padding:18px; }
+  .wechat-first-setup h2 { font-size:18px; }
+  .portable-setup-dialog { width:calc(100vw - 30px); max-height:calc(100dvh - 30px); padding:18px; }
+  .portable-setup-dialog h2 { font-size:21px; }
+  .portable-setup-trigger { right:16px; bottom:37px; }
+}

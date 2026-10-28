@@ -10,3 +10,7 @@ export const UI_SERVICE_METHODS = Object.freeze([
   'getWechatDshAccess','saveWechatDshGrants','importWechatDshGrants','saveWechatComputerAccess',
   'getExtensionsState','configureSelfImprovement','proposeSelfImprovement','installBuiltinMcp','enableMcp','disableMcp','testMcp','setMcpTools','importBundledSkill','enableSkill','disableSkill'
 ]);
+
+export const PORTABLE_WECHAT_METHODS = Object.freeze([
+  'getPortableWechatState','preparePortableWechat','openPortableWechat','discoverPortableWechat','bindPortableWechat'
+]);

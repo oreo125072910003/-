@@ -8,7 +8,8 @@ const methods = ['getBootstrap','listTasks','getTask','getTaskReplyText','create
   'getDshAccessState','refreshDshAccessCatalog','saveDshOwnerGrants','setDesktopComputerAccess','restoreProductFeatures',
   'getWechatDshAccess','saveWechatDshGrants','importWechatDshGrants','saveWechatComputerAccess',
   'getExtensionsState','configureSelfImprovement','proposeSelfImprovement','importMcpManifest','installBuiltinMcp','enableMcp','disableMcp','testMcp','setMcpTools',
-  'importSkill','importBundledSkill','enableSkill','disableSkill'];
+  'importSkill','importBundledSkill','enableSkill','disableSkill',
+  'getPortableWechatState','preparePortableWechat','openPortableWechat','discoverPortableWechat','bindPortableWechat'];
 const api = Object.fromEntries(methods.map(name => [name,(...args) => ipcRenderer.invoke(`assistant:${name}`,...args)]));
 api.onChange = callback => {
   if(typeof callback !== 'function')throw new TypeError('callback must be a function');
