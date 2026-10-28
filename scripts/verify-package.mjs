@@ -22,6 +22,14 @@ for (const entry of asar.listPackage(archive)) {
   const source = path.join(root, ...name.split('/'));
   if (!fs.existsSync(source) || !fs.statSync(source).isFile()) continue;
   const bytes = asar.extractFile(archive, name.split('/').join(path.sep));
+  // Desktop and full-plugin packaging independently compile this helper. The
+  // framework compiler embeds a build timestamp, so compare its source below
+  // and retain the packaged binary digest rather than compare different builds.
+  if (name === 'packages/desktop-control/bin/xiaozhushou-desktop.exe') {
+    if (bytes.subarray(0, 2).toString() !== 'MZ') throw Error('Packaged native helper is not an executable');
+    checked.push({ path: name, sha256: hash(bytes), independentlyCompiled: true });
+    continue;
+  }
   if (!bytes.equals(fs.readFileSync(source))) throw Error('Packaged source differs: ' + name);
   checked.push({ path: name, sha256: hash(bytes) });
 }

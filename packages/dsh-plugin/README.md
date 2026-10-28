@@ -1,4 +1,4 @@
-# 小助手与微信 DSH 插件 1.1
+# 小助手与微信 DSH 插件 1.1.4
 
 这是原“小助手 Harness 宿主插件”的完整形态，同一个插件里运行小助手服务、DSH 会话连接和工作台界面。微信、任务、邮箱、能力中心和人格设置复用主工程代码。它不会启动另一个小助手 EXE 或 WeChatAgent 自动回复程序。
 
@@ -8,13 +8,13 @@ DSH 会话标题栏新增“小助手 · 微信”，设置中也有“小助手
 
 ## 安装
 
-在 DSH 的正式插件管理器里安装本地 `xiaozhushou-harness-host-1.1.0.tgz` 或其解压后的包目录。完整版位于 `dist/dsh-plugin/1.1.0-full`；轻量包位于 `dist/dsh-plugin/1.1.0`。插件沿用原宿主插件包名，更新它即可，不需要同时安装两份。正式命令为：
+在 DSH 的正式插件管理器里安装本地 `xiaozhushou-harness-host-1.1.4.tgz` 或其解压后的包目录。完整版位于 `dist/dsh-plugin/1.1.4-full`；轻量包位于 `dist/dsh-plugin/1.1.4`。插件沿用原宿主插件包名，更新它即可，不需要同时安装两份。正式命令为：
 
 ```powershell
 dsh plugin --profile desktop add file:<插件包绝对路径> --ignore-scripts
 ```
 
-缺少正式 CLI 时使用 DSH 插件管理器，不手改 profile。插件是否生效以小助手入口、插件状态和 `/health` 的 1.1.0 / `native-assistant-1.1.0` 为准；宿主要求重启时，从托盘完整退出后重开 DSH。
+缺少正式 CLI 时使用 DSH 插件管理器，不手改 profile。插件是否生效以小助手入口、插件状态和 `/health` 的 1.1.4 / `native-assistant-1.1.4` 为准；宿主要求重启时，从托盘完整退出后重开 DSH。
 
 默认查找当前 Windows 用户已有的小助手数据库（包括原启动器造成的目录重定向），只有没有原数据时才使用 `AppData/Roaming/XiaoZhuShou`。发现多份数据会要求明确原路径，不合并或覆盖。也可在包的 `cordis.patch.yml` 第一项 `config` 中指定：
 

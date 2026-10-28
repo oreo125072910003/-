@@ -8,6 +8,7 @@ import { resolveProductDataRoot } from './paths.mjs';
 
 export const name = 'xiaozhushou-harness-host';
 export const inject = ['agents','sessions','agentPresets','workspaceRegistry','webServer'];
+const { version } = JSON.parse(await fs.readFile(new URL('./package.json', import.meta.url), 'utf8'));
 export async function apply(ctx, options = {}) {
   if (process.platform !== 'win32') throw Error('小助手与微信插件目前支持 Windows。');
   const selected = resolveProductDataRoot(options);
@@ -17,7 +18,7 @@ export async function apply(ctx, options = {}) {
   const tokenDir = path.join(productDataRoot, 'harness-host'); await fs.mkdir(tokenDir, { recursive: true });
   const tokenFile = path.join(tokenDir, 'bridge-token.txt');
   await fs.writeFile(tokenFile, randomBytes(32).toString('base64url') + '\n', { flag: 'wx', mode: 0o600 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
-  const config = { ...options, productDataRoot, workspacesRoot, tokenFile, port: options.port ?? 11234, provider: options.provider || 'deepseek-account', model: options.model || 'deepseek-flash', agentPreset: 'xiaozhushou-desktop-text-v1', pluginVersion: '1.1.2', revision: 'native-assistant-1.1.2' };
+  const config = { ...options, productDataRoot, workspacesRoot, tokenFile, port: options.port ?? 11234, provider: options.provider || 'deepseek-account', model: options.model || 'deepseek-flash', agentPreset: 'xiaozhushou-desktop-text-v1', pluginVersion: version, revision: 'native-assistant-' + version };
   const bridge = await createHostedBridge(ctx, config, { createUserMessage });
   let native;
   ctx.effect(() => async () => { try { await native?.close(); } finally { await bridge.close(); } }, 'xiaozhushou: integrated service');

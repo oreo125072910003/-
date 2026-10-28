@@ -6,6 +6,26 @@ const MAX_BASE64_LENGTH = 4 * Math.ceil(MAX_IMAGE_BYTES / 3);
 const FIELDS = new Set(['id', 'name', 'mime', 'b64', 'sha256', 'bytes']);
 const HEX = /^[a-f0-9]{64}$/i;
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
+const QUALITY_DIMENSIONS = ['width', 'height', 'sourceWidth', 'sourceHeight'];
+const MAX_IMAGE_PIXELS = 40_000_000;
+
+/** Optional reader metadata is bounded independently at each trust boundary.
+ * Return only known fields, never a reader-controlled label or instruction. */
+export function normalizeImageQuality(value) {
+  if (!value || !QUALITY_DIMENSIONS.every(key => Number.isSafeInteger(value[key]) && value[key] > 0 && value[key] <= MAX_IMAGE_PIXELS) ||
+      value.width * value.height > MAX_IMAGE_PIXELS || value.sourceWidth * value.sourceHeight > MAX_IMAGE_PIXELS ||
+      !['full', 'thumbnail'].includes(value.sourceVariant)) return undefined;
+  return Object.fromEntries([...QUALITY_DIMENSIONS.map(key => [key, value[key]]), ['sourceVariant', value.sourceVariant]]);
+}
+
+/** Copy a complete rectangle only when it lies within the validated source. */
+export function normalizeImageRegion(value, quality) {
+  if (!normalizeImageQuality(quality) || !Array.isArray(value) || value.length !== 4) return undefined;
+  const region = Array.from(value);
+  if (region.some(coordinate => !Number.isSafeInteger(coordinate) || coordinate < 0) || region[0] >= region[2] || region[1] >= region[3] ||
+      region[2] > quality.sourceWidth || region[3] > quality.sourceHeight) return undefined;
+  return region;
+}
 
 function matchesMagic(bytes, mime) {
   if (mime === 'image/png') return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));

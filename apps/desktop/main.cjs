@@ -5,6 +5,7 @@ const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 const { spawn } = require('node:child_process');
 const { createHash } = require('node:crypto');
+const { resolveProductDataRoot } = require('../../packages/contracts/product-data.cjs');
 
 const projectRoot=path.resolve(__dirname,'../..');
 const smoke=process.argv.includes('--smoke-test');
@@ -12,7 +13,7 @@ const smokeRoot=smoke?fs.mkdtempSync(path.join(os.tmpdir(),'xiaozhushou-desktop-
 const dataHomeIndex=process.argv.indexOf('--data-home');
 const requestedDataHome=dataHomeIndex>=0?process.argv[dataHomeIndex+1]:undefined;
 if(dataHomeIndex>=0&&(!requestedDataHome||!path.isAbsolute(requestedDataHome)))throw Error('数据目录需要绝对路径。');
-const dataCandidate=smokeRoot||requestedDataHome||process.env.XIAOZHUSHOU_DATA_HOME||path.join(app.getPath('appData'),'XiaoZhuShou');
+const dataCandidate=smokeRoot||resolveProductDataRoot({productDataRoot:requestedDataHome},{roaming:app.getPath('appData')});
 fs.mkdirSync(dataCandidate,{recursive:true});
 // Pass the physical path across independently installed Windows applications,
 // including when the developer shell uses packaged-app AppData redirection.
@@ -55,13 +56,8 @@ async function quit(){
   catch(error){closing=false;dialog.showErrorBox('尚未退出',String(error.message));bringForward();}
 }
 async function registerIPC(){
-  for(const name of ['getBootstrap','listTasks','getTask','getTaskReplyText','createTask','cancelTask','getSettings','saveSettings','getWorkflowsState','exportTaskDocument',
-    'getWechatState','saveWechatSettings','connectWechat','disconnectWechat','draftWechatReply','sendWechatReply','searchWechatContacts','refreshWechatProfile','getWechatSessions','getWechatHistory','resolveWechatImage','getWechatStickers','sendWechatMessage','sendWechatSticker','sendWechatAttachment',
-    'importLegacyExtensions','refreshDshCatalog',
-    'getMailState','saveMailNotifications','importMailAccounts','syncMail','getMailMessage','createMailDraft','sendMailDraft','resolveMailAttachment','draftMailReply',
-    'getDshAccessState','refreshDshAccessCatalog','saveDshOwnerGrants','setDesktopComputerAccess','restoreProductFeatures',
-    'getWechatDshAccess','saveWechatDshGrants','importWechatDshGrants','saveWechatComputerAccess',
-    'getExtensionsState','configureSelfImprovement','proposeSelfImprovement','installBuiltinMcp','enableMcp','disableMcp','testMcp','setMcpTools','importBundledSkill','enableSkill','disableSkill']){
+  const { UI_SERVICE_METHODS } = await import(pathToFileURL(path.join(projectRoot,'packages/contracts/ui-service-methods.mjs')).href);
+  for(const name of UI_SERVICE_METHODS){
     ipcMain.handle('assistant:'+name,async(event,...args)=>{if(!trusted(event))throw Error('此窗口无权访问小助手。');return service[name](...args);});
   }
   ipcMain.handle('assistant:importMailAccountsFile',async event=>{

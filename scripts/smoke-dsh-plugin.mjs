@@ -7,9 +7,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+const { version } = JSON.parse(fs.readFileSync(path.join(root, 'packages/dsh-plugin/package.json'), 'utf8'));
 const output = path.join(root, 'dist/dsh-plugin/ui-smoke'); fs.mkdirSync(output, { recursive: true });
 const full = process.argv.includes('--full');
-const stage = path.join(root, 'dist/dsh-plugin', full ? '1.1.0-full/package' : '1.1.0/package');
+const stage = path.join(root, 'dist/dsh-plugin', version + (full ? '-full' : ''), 'package');
 const { createNativeAssistant } = await import(pathToFileURL(path.join(stage, 'host.mjs')).href);
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaozhushou-dsh-smoke-'));
 const attachment = path.join(directory, '合成资料.txt'); fs.writeFileSync(attachment, '数量：3\n单价：20\n这是离线插件界面验收资料。');
@@ -63,7 +64,7 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await page.screenshot({ path: path.join(output, '窄窗口.png') });
   assert.deepEqual(errors, []);
-  const report = { ok: true, packageVersion: '1.1.0', realPackagedService: true, renderedPages: ['home','task','wechat','mail','capabilities','settings'],
+  const report = { ok: true, packageVersion: version, realPackagedService: true, renderedPages: ['home','task','wechat','mail','capabilities','settings'],
     localTaskArtifacts: true, nativeFilePickerAdapter: true, identityPersisted: true, narrowViewport: true, consoleErrors: errors,
     modelCalled: false, wechatMessagesSent: 0, isolatedData: true, installedIntoLiveDsh: false };
   fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));

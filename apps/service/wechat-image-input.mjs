@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { validateTaskImages } from '../../packages/contracts/image-input.mjs';
+import { validateTaskImages, normalizeImageQuality, normalizeImageRegion } from '../../packages/contracts/image-input.mjs';
 
 const EXTENSIONS = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp' };
 const inside = (root, target) => { const value = path.relative(root, target); return value !== '..' && !value.startsWith('..' + path.sep) && !path.isAbsolute(value); };
@@ -57,9 +57,7 @@ export async function prepareWechatTaskImages({ task, store, wechat, signal, sup
         if (result?.id !== item.imageId) throw Error('图片编号与原始来信不一致。');
         const { quality, detailImages, detailIssue, ...pixels } = result;
         const [image] = validateTaskImages([{ ...pixels, name: '微信图片' + (index + 1) + (EXTENSIONS[result.mime] ?? '') }]);
-        const readableQuality = quality && ['width', 'height', 'sourceWidth', 'sourceHeight'].every(key => Number.isSafeInteger(quality[key]) && quality[key] > 0 && quality[key] <= 40_000_000) &&
-          quality.width * quality.height <= 40_000_000 && quality.sourceWidth * quality.sourceHeight <= 40_000_000 &&
-          ['full', 'thumbnail'].includes(quality.sourceVariant) ? { width: quality.width, height: quality.height, sourceWidth: quality.sourceWidth, sourceHeight: quality.sourceHeight, sourceVariant: quality.sourceVariant } : undefined;
+        const readableQuality = normalizeImageQuality(quality);
         const directory = path.join(task.workspace, '资料');
         const workspace = fs.realpathSync.native(task.workspace);
         if (fs.lstatSync(directory).isSymbolicLink() || !inside(workspace, fs.realpathSync.native(directory))) throw Error('图片资料目录无效。');
@@ -77,9 +75,9 @@ export async function prepareWechatTaskImages({ task, store, wechat, signal, sup
           if (!Array.isArray(detailImages) || detailImages.length > 3) entry.issue = true;
           else for (const [part, detail] of detailImages.entries()) {
             try {
-              const { region, ...input } = detail;
-              if (!readableQuality || !Array.isArray(region) || region.length !== 4 || region.some(value => !Number.isSafeInteger(value) || value < 0) ||
-                  region[0] >= region[2] || region[1] >= region[3] || region[2] > readableQuality.sourceWidth || region[3] > readableQuality.sourceHeight) throw Error('图片局部坐标无效。');
+              const { region: suppliedRegion, ...input } = detail;
+              const region = normalizeImageRegion(suppliedRegion, readableQuality);
+              if (!region) throw Error('图片局部坐标无效。');
               const name = `微信图片${index + 1}-局部${part + 1}${EXTENSIONS[input.mime] ?? ''}`;
               const [view] = validateTaskImages([{ ...input, name }]);
               entry.candidates.push({ view, region, part });

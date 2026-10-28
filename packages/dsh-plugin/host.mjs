@@ -3,26 +3,18 @@ import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createWindowsProtection, windowsOperation } from './windows-protection.mjs';
 import { createPortableWechat } from './portable-wechat.mjs';
 
 export const PREFIX = '/xiaozhushou';
-export const SERVICE_METHODS = Object.freeze([
-  'getBootstrap','listTasks','getTask','getTaskReplyText','createTask','cancelTask','getSettings','saveSettings','getWorkflowsState','exportTaskDocument',
-  'getWechatState','saveWechatSettings','connectWechat','disconnectWechat','draftWechatReply','sendWechatReply','searchWechatContacts','refreshWechatProfile',
-  'getWechatSessions','getWechatHistory','resolveWechatImage','getWechatStickers','sendWechatMessage','sendWechatSticker','sendWechatAttachment','importLegacyExtensions','refreshDshCatalog',
-  'getMailState','saveMailNotifications','importMailAccounts','syncMail','getMailMessage','createMailDraft','sendMailDraft','resolveMailAttachment','draftMailReply',
-  'getDshAccessState','refreshDshAccessCatalog','saveDshOwnerGrants','setDesktopComputerAccess','restoreProductFeatures',
-  'getWechatDshAccess','saveWechatDshGrants','importWechatDshGrants','saveWechatComputerAccess',
-  'getExtensionsState','configureSelfImprovement','proposeSelfImprovement','installBuiltinMcp','enableMcp','disableMcp','testMcp','setMcpTools','importBundledSkill','enableSkill','disableSkill'
-]);
 export const NATIVE_METHODS = Object.freeze(['pickAttachments','pickWechatAttachments','importWechatConnection','importMailAccountsFile','importMcpManifest','importSkill','openArtifact','openWorkspace','openContract','saveMailAttachment',
   'getPortableWechatState','preparePortableWechat','openPortableWechat','discoverPortableWechat','bindPortableWechat']);
 const fault = (message, status = 400) => Object.assign(Error(message), { status });
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const baseURL = new URL('./', import.meta.url);
 export const payloadRoot = fileURLToPath(fs.existsSync(new URL('./payload/', baseURL)) ? new URL('./payload/', baseURL) : new URL('../../', baseURL));
+export const { UI_SERVICE_METHODS: SERVICE_METHODS } = await import(pathToFileURL(path.join(payloadRoot, 'packages/contracts/ui-service-methods.mjs')).href);
 function json(res, status, value) { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(JSON.stringify(value)); }
 function authorize(req, port) {
   if (!LOOPBACK.has(req.socket?.remoteAddress)) throw fault('小助手仅接受本机连接。', 403);
@@ -142,7 +134,7 @@ export async function createNativeAssistant(ctx, config, overrides = {}) {
     '/setup-ui.js': ['text/javascript; charset=utf-8', () => fs.readFileSync(new URL('./setup-ui.js', baseURL))],
     '/setup.css': ['text/css; charset=utf-8', () => fs.readFileSync(new URL('./setup.css', baseURL))],
     '/browser.js': ['text/javascript; charset=utf-8', () => fs.readFileSync(new URL('./browser.js', baseURL), 'utf8').replace('METHODS_PLACEHOLDER', JSON.stringify([...SERVICE_METHODS, ...NATIVE_METHODS]))],
-    ...Object.fromEntries(['app.js','styles.css','workspace-theme.css'].map(name => ['/' + name, [name.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8', () => fs.readFileSync(path.join(payloadRoot, 'apps/desktop/renderer', name))]]))
+    ...Object.fromEntries(['app.js','styles.css'].map(name => ['/' + name, [name.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8', () => fs.readFileSync(path.join(payloadRoot, 'apps/desktop/renderer', name))]]))
   };
   async function handler(req, res) {
     try {

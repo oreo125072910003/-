@@ -5,7 +5,9 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const root = fileURLToPath(new URL('../', import.meta.url)), packageRoot = path.join(root, 'dist/dsh-plugin/1.1.0-full/package');
+const root = fileURLToPath(new URL('../', import.meta.url));
+const { version } = JSON.parse(fs.readFileSync(path.join(root, 'packages/dsh-plugin/package.json'), 'utf8'));
+const packageRoot = path.join(root, 'dist/dsh-plugin', version + '-full/package');
 const output = path.join(root, 'dist/dsh-plugin/portable-smoke'); fs.mkdirSync(output, { recursive: true });
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaozhushou-portable-check-'));
 const { createPortableWechat } = await import(pathToFileURL(path.join(packageRoot, 'portable-wechat.mjs')).href);

@@ -1,7 +1,7 @@
 {
   "name": "xiaozhushou-desktop",
   "productName": "小助手",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "有持续身份、任务与成果记录的个人桌面助手，使用 DeepSeek Harness 核心",
   "private": true,
   "type": "module",
@@ -15,7 +15,8 @@
     "package": "node scripts/package-desktop.mjs",
     "package:dsh": "node scripts/package-dsh-plugin.mjs",
     "package:dsh:full": "node scripts/package-dsh-plugin.mjs --full",
-    "check": "node scripts/check-desktop.mjs"
+    "check": "node scripts/check-desktop.mjs",
+    "package:installer": "node scripts/package-installer.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.25.2",

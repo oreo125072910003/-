@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import path from 'node:path';
+import {fileURLToPath,pathToFileURL} from 'node:url';
 import {TextEncoder} from 'node:util';
 
 // Exercise the real renderer functions with synthetic IPC. No windows or external sends.
@@ -124,7 +126,7 @@ test('full replies and grants have fixed preload IPC channels and reject untrust
   vm.runInNewContext(preload,{require:()=>({contextBridge:{exposeInMainWorld:(_name,value)=>api=value},ipcRenderer:{invoke:(...args)=>invocations.push(args)}})});
   for(const method of methods){api[method]('fixture');assert.deepEqual(invocations.at(-1),['assistant:'+method,'fixture']);}
   const registration=main.slice(main.indexOf('async function registerIPC(){'),main.indexOf('async function smokeTest(){'));
-  const context=vm.createContext({ipcMain:{handle:(name,fn)=>handlers.set(name,fn)},trusted:event=>event.desktop===true,service});
-  vm.runInContext(registration,context);await vm.runInContext('registerIPC()',context);
+  const context=vm.createContext({ipcMain:{handle:(name,fn)=>handlers.set(name,fn)},trusted:event=>event.desktop===true,service,path,pathToFileURL,projectRoot:fileURLToPath(new URL('../',import.meta.url))});
+  vm.runInContext(registration,context,{importModuleDynamically:vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER});await vm.runInContext('registerIPC()',context);
   for(const method of methods){const handler=handlers.get('assistant:'+method);assert.equal(typeof handler,'function');await assert.rejects(handler({},'fixture'),/无权/);assert.deepEqual(plain(await handler({desktop:true},'fixture')),{name:method,args:['fixture']});}
 });

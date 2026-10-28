@@ -9,7 +9,7 @@ import { createWechatMediaTransport } from './media-transport.mjs';
 import { createWechatHookMediaRunner } from './hook-media.mjs';
 import {fileMetadataFromXml,wechatFileReferences,cleanWechatFiles} from './file-references.mjs';
 import {createLocalWechatFileReader} from './local-file-reader.mjs';
-import { validateTaskImages } from '../contracts/image-input.mjs';
+import { validateTaskImages, normalizeImageQuality, normalizeImageRegion } from '../contracts/image-input.mjs';
 
 const MAX_EVENT_BYTES = 256_000;
 const MAX_JSON_BYTES = 5 * 1024 * 1024;
@@ -302,20 +302,15 @@ export function createWechatBridge({
     const bytes = Buffer.from(image.b64, 'base64');
     if (!bytes.length || bytes.length > 768 * 1024 || bytes.toString('base64') !== image.b64 ||
         crypto.createHash('sha256').update(bytes).digest('hex') !== image.sha256) throw fault('IMAGE_INTEGRITY_FAILED');
-    const dimensions = ['width', 'height', 'sourceWidth', 'sourceHeight'];
-    const quality = dimensions.every(key => Number.isSafeInteger(image[key]) && image[key] > 0 && image[key] <= 40_000_000) &&
-      image.width * image.height <= 40_000_000 && image.sourceWidth * image.sourceHeight <= 40_000_000 &&
-      ['full', 'thumbnail'].includes(image.sourceVariant)
-      ? Object.fromEntries([...dimensions.map(key => [key, image[key]]), ['sourceVariant', image.sourceVariant]]) : undefined;
+    const quality = normalizeImageQuality(image);
     const detailImages = [];
     let detailIssue = false;
     if (image.details !== undefined) {
       if (!Array.isArray(image.details) || image.details.length > 3) detailIssue = true;
       else for (const [index, detail] of image.details.entries()) {
         try {
-        const region = detail?.region;
-        if (!quality || !Array.isArray(region) || region.length !== 4 || region.some(value => !Number.isSafeInteger(value) || value < 0) ||
-            region[0] >= region[2] || region[1] >= region[3] || region[2] > quality.sourceWidth || region[3] > quality.sourceHeight) throw fault('INVALID_IMAGE_DATA');
+        const region = normalizeImageRegion(detail?.region, quality);
+        if (!region) throw fault('INVALID_IMAGE_DATA');
         const detailId = crypto.createHash('sha256').update(id + ':detail:' + index + ':' + detail.sha256).digest('hex');
         const [view] = validateTaskImages([{ id: detailId, mime: detail.mime, b64: detail.b64, sha256: detail.sha256, bytes: detail.bytes }]);
         detailImages.push({ ...view, region });

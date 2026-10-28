@@ -8,9 +8,10 @@ import YAML from 'yaml';
 import { chromium } from 'playwright';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+const { version } = JSON.parse(fs.readFileSync(path.join(root, 'packages/dsh-plugin/package.json'), 'utf8'));
 const full = process.argv.includes('--full'), reuse = process.argv.includes('--reuse');
 const output = reuse ? path.resolve(process.argv[process.argv.indexOf('--reuse') + 1]) : path.join(root, 'dist/dsh-plugin', 'official-verification-' + Date.now()); fs.mkdirSync(output, { recursive: true });
-const candidate = path.join(output, 'package'); if (!reuse) fs.cpSync(path.join(root, 'dist/dsh-plugin', full ? '1.1.0-full/package' : '1.1.0/package'), candidate, { recursive: true });
+const candidate = path.join(output, 'package'); if (!reuse) fs.cpSync(path.join(root, 'dist/dsh-plugin', version + (full ? '-full' : ''), 'package'), candidate, { recursive: true });
 async function freePort() { const server = http.createServer(); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); const port = server.address().port; await new Promise(resolve => server.close(resolve)); return port; }
 let bridgePort = await freePort(); const webPort = await freePort();
 const patchFile = path.join(candidate, 'cordis.patch.yml'), patch = YAML.parse(fs.readFileSync(patchFile, 'utf8'));
@@ -53,7 +54,7 @@ try {
   await page.goto(origin + '/xiaozhushou/'); await page.locator('#task-prompt').waitFor();
   await page.screenshot({ path: path.join(output, '真实DSH内置工作台.png') });
   const bootstrap = await page.evaluate(() => window.assistant.getBootstrap());
-  assert.equal(bootstrap.runtime.version, '1.1.0'); assert.equal(bootstrap.runtime.source, 'existing-harness-host');
+  assert.equal(bootstrap.runtime.version, version); assert.equal(bootstrap.runtime.source, 'existing-harness-host');
   // Open the real host shell as well, using only its generated local bootstrap
   // URL if it has one. It never contains a user's account or cloud credentials.
   const urls = running.text().match(/https?:\/\/127\.0\.0\.1:\d+[^\s\u001b]*/g) || [];
@@ -75,7 +76,7 @@ try {
   await page.frameLocator('iframe[title="小助手工作台"]').locator('#task-prompt').waitFor();
   fs.writeFileSync(path.join(output, 'shell-text.txt'), await page.locator('body').innerText());
   await page.screenshot({ path: path.join(output, 'DSH插件入口.png') });
-  const report = { ok: true, version: '1.1.0', officialCliVersion: '0.2.1-rc.3', installedInIsolatedProfile: true, nativeServiceRunningInDsh: true,
+  const report = { ok: true, version, officialCliVersion: '0.2.1-rc.3', installedInIsolatedProfile: true, nativeServiceRunningInDsh: true,
     realHostedRuntime: true, nativeWorkbenchRendered: true, realClientEntryAndEmbeddedPanel: true, shellPageErrors: errors, liveProfileModified: false, realWechatMessagesSent: 0, output };
   fs.writeFileSync(path.join(output, 'console-errors.json'), JSON.stringify(errors, null, 2));
   assert.deepEqual(errors.filter(error => typeof error === 'string' || !error.url.endsWith('/favicon.ico')), []);
